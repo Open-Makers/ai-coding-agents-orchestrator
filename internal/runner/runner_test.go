@@ -1,0 +1,59 @@
+package runner
+
+import (
+	"context"
+	"testing"
+)
+
+func TestMockRunner_Basic(t *testing.T) {
+	m := &MockRunner{Responses: []string{"hello world"}}
+
+	ch, err := m.Complete(context.Background(), CompletionRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var tokens []Token
+	for tok := range ch {
+		tokens = append(tokens, tok)
+	}
+
+	if len(tokens) != 2 {
+		t.Fatalf("expected 2 tokens (text + done), got %d", len(tokens))
+	}
+	if tokens[0].Text != "hello world" {
+		t.Errorf("unexpected text: %q", tokens[0].Text)
+	}
+	if !tokens[1].Done {
+		t.Error("expected final token to be Done")
+	}
+}
+
+func TestMockRunner_Exhausted(t *testing.T) {
+	m := &MockRunner{Responses: []string{"only one"}}
+	_, _ = m.Complete(context.Background(), CompletionRequest{})
+
+	_, err := m.Complete(context.Background(), CompletionRequest{})
+	if err == nil {
+		t.Error("expected error when responses exhausted")
+	}
+}
+
+func TestMockRunner_Reset(t *testing.T) {
+	m := &MockRunner{Responses: []string{"a"}}
+	_, _ = m.Complete(context.Background(), CompletionRequest{})
+	m.Reset()
+
+	ch, err := m.Complete(context.Background(), CompletionRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error after reset: %v", err)
+	}
+	for range ch {
+	}
+}
+
+// Compile-time check: CodexRunner implements LLMRunner.
+var _ LLMRunner = CodexRunner{}
+
+// Compile-time check: MockRunner implements LLMRunner.
+var _ LLMRunner = &MockRunner{}

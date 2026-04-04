@@ -4,9 +4,40 @@ Minimal Go-based orchestrator for a PLAN → CODE → TEST → REVIEW → FIX �
 
 ## Requirements
 
-- Go installed locally
 - `codex` CLI available in `PATH`
 - a git repository where the orchestrator can apply patches
+
+## Installation
+
+Build the binary:
+
+```bash
+go build -o orchestrator ./cmd/orchestrator
+```
+
+Install it into your system `PATH`:
+
+macOS / Linux:
+
+```bash
+install ./orchestrator /usr/local/bin/orchestrator
+```
+
+Windows PowerShell:
+
+```powershell
+go build -o orchestrator.exe .\cmd\orchestrator
+New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
+Copy-Item .\orchestrator.exe "$HOME\bin\orchestrator.exe"
+```
+
+On Windows, make sure the target directory such as `%USERPROFILE%\bin` is added to `PATH`.
+
+Verify installation:
+
+```bash
+orchestrator help
+```
 
 ## Quick Start
 
@@ -23,7 +54,7 @@ Minimal Go-based orchestrator for a PLAN → CODE → TEST → REVIEW → FIX �
 2. Run the orchestrator from the repository root:
 
 ```bash
-go run ./cmd/orchestrator run --requirements path/to/requirements.md
+orchestrator run --requirements path/to/requirements.md
 ```
 
 3. Wait for the first approval gate and inspect `.orchestrator/architecture.md`.
@@ -31,14 +62,14 @@ go run ./cmd/orchestrator run --requirements path/to/requirements.md
 4. Approve the architecture step:
 
 ```bash
-go run ./cmd/orchestrator approve architecture
+orchestrator approve architecture
 ```
 
 5. Repeat the same flow for the plan and prompts:
 
 ```bash
-go run ./cmd/orchestrator approve plan
-go run ./cmd/orchestrator approve prompts
+orchestrator approve plan
+orchestrator approve prompts
 ```
 
 6. After the approvals, the orchestrator will:
@@ -54,7 +85,7 @@ go run ./cmd/orchestrator approve prompts
 Run a task:
 
 ```bash
-go run ./cmd/orchestrator run --requirements path/to/requirements.md
+orchestrator run --requirements path/to/requirements.md
 ```
 
 Optional flags:
@@ -66,34 +97,34 @@ Typical runs:
 
 ```bash
 # only prepare .orchestrator/ and copy requirements
-go run ./cmd/orchestrator run --requirements doc/example_requirements.md --dry-run
+orchestrator run --requirements doc/example_requirements.md --dry-run
 
 # run on a dedicated branch
-go run ./cmd/orchestrator run --requirements doc/example_requirements.md --branch feat/orchestrated-change
+orchestrator run --requirements doc/example_requirements.md --branch feat/orchestrated-change
 
 # require confirmation before patch/test execution
-go run ./cmd/orchestrator run --requirements doc/example_requirements.md --human-approve
+orchestrator run --requirements doc/example_requirements.md --human-approve
 ```
 
 Report the last run:
 
 ```bash
-go run ./cmd/orchestrator report
+orchestrator report
 ```
 
 Approve manual gates:
 
 ```bash
-go run ./cmd/orchestrator approve architecture
-go run ./cmd/orchestrator approve plan
-go run ./cmd/orchestrator approve prompts
-go run ./cmd/orchestrator approve all
+orchestrator approve architecture
+orchestrator approve plan
+orchestrator approve prompts
+orchestrator approve all
 ```
 
 Clean artifacts:
 
 ```bash
-go run ./cmd/orchestrator clean
+orchestrator clean
 ```
 
 ## Recommended Workflow
