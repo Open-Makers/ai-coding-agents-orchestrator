@@ -66,7 +66,7 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 		if !strings.HasPrefix(full+string(filepath.Separator), rootAbs+string(filepath.Separator)) {
 			continue
 		}
-		data, err := os.ReadFile(full)
+		data, err := os.ReadFile(full) //nolint:gosec // G304: path validated against repo root above
 		if err == nil {
 			pc.AlwaysInclude[cfgPath] = string(data)
 		}
@@ -250,7 +250,7 @@ func collectSourceFiles(root string, files []string) map[string]string {
 		if totalSize >= maxTotalSourceContext {
 			break
 		}
-		content, err := os.ReadFile(filepath.Join(root, path))
+		content, err := os.ReadFile(filepath.Join(root, path)) //nolint:gosec // G304: path from git ls-files, scoped to repo
 		if err != nil {
 			continue
 		}
@@ -374,7 +374,7 @@ func gitLines(root string, args ...string) ([]string, error) {
 }
 
 func gitOutput(root string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := exec.Command("git", args...) //nolint:gosec // G204: args built internally for git operations
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {

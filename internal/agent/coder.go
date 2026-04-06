@@ -224,10 +224,10 @@ func (a *CoderAgent) writeOneFile(path, content string) error {
 		return fmt.Errorf("empty path after sanitization")
 	}
 	target := filepath.Join(a.root, path)
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return fmt.Errorf("mkdir for %s: %w", path, err)
 	}
-	return os.WriteFile(target, []byte(content), 0o644)
+	return os.WriteFile(target, []byte(content), 0o600)
 }
 
 // findPathInRecent scans recent non-fence lines (newest first) for a file path.
@@ -321,7 +321,7 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 	}
 	var sb strings.Builder
 	for _, path := range files {
-		content, err := os.ReadFile(filepath.Join(a.root, path))
+		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // G304: path from git-tracked files in project
 		if err != nil {
 			continue
 		}

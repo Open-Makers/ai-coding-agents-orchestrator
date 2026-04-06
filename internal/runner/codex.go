@@ -54,7 +54,7 @@ func readCodexConfigModel() string {
 	if err != nil {
 		return ""
 	}
-	f, err := os.Open(filepath.Join(home, ".codex", "config.toml"))
+	f, err := os.Open(filepath.Join(home, ".codex", "config.toml")) //nolint:gosec // G304: path scoped to user home config
 	if err != nil {
 		return ""
 	}
@@ -126,7 +126,7 @@ func (r CodexRunner) run(ctx context.Context, prompt, systemPrompt, model string
 		args = append(args, "--", prompt)
 	}
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin resolved from config, args built internally
 	cmd.Env = os.Environ()
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out

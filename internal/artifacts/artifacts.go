@@ -48,7 +48,7 @@ func EnsureWorkspace(root string) (Workspace, error) {
 		return Workspace{}, fmt.Errorf("root is required")
 	}
 	dir := filepath.Join(root, DirName)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Workspace{}, fmt.Errorf("create workspace: %w", err)
 	}
 	return Workspace{Root: root, Dir: dir}, nil
@@ -61,7 +61,7 @@ func (w Workspace) Path(name string) string {
 
 func (w Workspace) WriteFile(name string, data []byte) error {
 	path := w.Path(name)
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", name, err)
 	}
 	return nil
@@ -69,7 +69,7 @@ func (w Workspace) WriteFile(name string, data []byte) error {
 
 func (w Workspace) ReadFile(name string) ([]byte, error) {
 	path := w.Path(name)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path scoped to workspace dir
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
@@ -138,7 +138,7 @@ func (w Workspace) CleanGeneratedArtifacts() {
 // AppendRunLog appends a single line with RFC3339 timestamp.
 func (w Workspace) AppendRunLog(message string) error {
 	path := w.Path(RunLogFile)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: path scoped to workspace dir
 	if err != nil {
 		return fmt.Errorf("open runlog: %w", err)
 	}

@@ -47,7 +47,7 @@ func (l *Loader) Load(name string) (string, error) {
 	// Check project-level override first.
 	if l.override != "" {
 		overridePath := filepath.Join(l.override, name+".md")
-		if data, err := os.ReadFile(overridePath); err == nil {
+		if data, err := os.ReadFile(overridePath); err == nil { //nolint:gosec // G304: path scoped to project override dir
 			content := string(data)
 			l.mu.Lock()
 			l.cache[name] = content
@@ -124,12 +124,12 @@ func ExportPrompt(promptName, destDir string) (string, error) {
 		return "", fmt.Errorf("prompt %q not found: %w", promptName, err)
 	}
 
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return "", fmt.Errorf("create prompts dir: %w", err)
 	}
 
 	path := filepath.Join(destDir, promptName+".md")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", fmt.Errorf("write prompt: %w", err)
 	}
 

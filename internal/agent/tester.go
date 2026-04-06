@@ -133,7 +133,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(a.root, path))
+		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // G304: path from git-tracked files in project
 		if err != nil {
 			continue
 		}
@@ -181,11 +181,11 @@ func (a *TesterAgent) writeTestBlocks(output string) []string {
 	var written []string
 	for _, f := range blocks {
 		target := filepath.Join(a.root, f.Path)
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			a.emitToken(fmt.Sprintf("warning: mkdir for test %s: %v\n", f.Path, err), false)
 			continue
 		}
-		if err := os.WriteFile(target, []byte(f.Content), 0o644); err != nil {
+		if err := os.WriteFile(target, []byte(f.Content), 0o600); err != nil {
 			a.emitToken(fmt.Sprintf("warning: write test %s: %v\n", f.Path, err), false)
 			continue
 		}

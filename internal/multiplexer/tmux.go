@@ -101,7 +101,7 @@ func (t *TmuxMultiplexer) Close() error {
 }
 
 func (t *TmuxMultiplexer) tmux(args ...string) error {
-	cmd := exec.Command("tmux", args...)
+	cmd := exec.Command("tmux", args...) //nolint:gosec // G204: args built internally for tmux session management
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -111,7 +111,7 @@ func (t *TmuxMultiplexer) tmux(args ...string) error {
 }
 
 func (t *TmuxMultiplexer) tmuxOutput(args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...)
+	cmd := exec.Command("tmux", args...) //nolint:gosec // G204: args built internally for tmux session management
 	var stdout strings.Builder
 	var stderr strings.Builder
 	cmd.Stdout = &stdout

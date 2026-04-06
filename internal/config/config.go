@@ -92,7 +92,7 @@ func EnsureGlobalDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(home, GlobalDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -105,10 +105,10 @@ func Save(root string, cfg Config) error {
 		return err
 	}
 	dir := filepath.Join(root, GlobalDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, ProjectFilename), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, ProjectFilename), data, 0o600)
 }
 
 // SaveGlobal writes cfg to ~/.orchestrator/config.yaml.
@@ -129,7 +129,7 @@ func SaveGlobal(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, GlobalFilename), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, GlobalFilename), data, 0o600)
 }
 
 // Load reads config with layered precedence:
@@ -178,7 +178,7 @@ func LoadProject(root string) Config {
 
 // loadFile reads and unmarshals a single YAML config file.
 func loadFile(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path from known config locations
 	if err != nil {
 		return Config{}, err
 	}

@@ -73,7 +73,7 @@ func (r OpenCodeRunner) run(ctx context.Context, prompt, model string) (string, 
 	// Pass prompt as positional argument.
 	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin resolved from config, args built internally
 	cmd.Env = env
 
 	var out, stderr bytes.Buffer

@@ -258,8 +258,8 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case RequirementsSavedMsg:
 			content := msg.Path // naming quirk: Path holds textarea content
 			m.cleanAfterEditorSave(content)
-			_ = os.MkdirAll(filepath.Dir(m.wsReqPath), 0o755)
-			_ = os.WriteFile(m.wsReqPath, []byte(content), 0o644)
+			_ = os.MkdirAll(filepath.Dir(m.wsReqPath), 0o750)
+			_ = os.WriteFile(m.wsReqPath, []byte(content), 0o600)
 			m.reqPath = m.wsReqPath
 			return m, tea.Quit
 		case EditorCancelledMsg:
@@ -281,7 +281,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *startupModel) cleanIfRequirementsChanged(newReqPath string) {
 	ws := artifacts.Workspace{Dir: m.wsDir}
 
-	newContent, err := os.ReadFile(newReqPath)
+	newContent, err := os.ReadFile(newReqPath) //nolint:gosec // G304: path from user-selected requirements file
 	if err != nil {
 		return
 	}

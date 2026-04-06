@@ -74,7 +74,7 @@ func (r *OllamaRunner) run(prompt, model string) ([]byte, error) {
 		"-p", prompt,
 	}
 
-	cmd := exec.Command("ollama", args...)
+	cmd := exec.Command("ollama", args...) //nolint:gosec // G204: args built internally for ollama CLI
 	cmd.Env = os.Environ()
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -107,16 +107,6 @@ func OllamaListInstalled() ([]string, error) {
 		names[i] = m.Name
 	}
 	return names, nil
-}
-
-// OllamaPull pulls a model by running `ollama pull <name>`.
-// It blocks until the pull completes or ctx is cancelled.
-func OllamaPull(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "ollama", "pull", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ollama pull %s: %w: %s", name, err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // OllamaPopularModels is a curated list of models useful for coding tasks.
