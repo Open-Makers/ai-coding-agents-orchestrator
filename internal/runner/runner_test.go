@@ -52,8 +52,20 @@ func TestMockRunner_Reset(t *testing.T) {
 	}
 }
 
+// Compile-time check: ClaudeRunner implements LLMRunner.
+var _ LLMRunner = ClaudeRunner{}
+
+// Compile-time check: OpenCodeRunner implements LLMRunner.
+var _ LLMRunner = OpenCodeRunner{}
+
+// Compile-time check: OllamaRunner implements LLMRunner.
+var _ LLMRunner = &OllamaRunner{}
+
 // Compile-time check: CodexRunner implements LLMRunner.
 var _ LLMRunner = CodexRunner{}
+
+// Compile-time check: SkillRunner implements LLMRunner.
+var _ LLMRunner = &SkillRunner{}
 
 // Compile-time check: MockRunner implements LLMRunner.
 var _ LLMRunner = &MockRunner{}

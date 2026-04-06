@@ -25,8 +25,7 @@ func (a *BaseAgent) emitToken(text string, done bool) {
 	a.emit(bus.MsgEvent, bus.TokenPayload{Text: text, Done: done})
 }
 
-// gate publishes a human_gate event and blocks until approved via the returned channel.
-// The caller must send on the returned channel to unblock.
-func (a *BaseAgent) gate(msg string) {
+// Gate publishes a human_gate event (exported so orchestrator can call it if needed).
+func (a *BaseAgent) Gate(msg string) {
 	a.emit(bus.MsgHumanGate, msg)
 }

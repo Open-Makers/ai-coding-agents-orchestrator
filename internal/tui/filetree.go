@@ -2,39 +2,74 @@ package tui
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// FileTreeModel is a filterable list of .md files from the git repo.
+type ftEntry struct {
+	name  string
+	isDir bool
+}
+
+// FileTreeModel is an MC-style single-pane directory navigator.
+// Directories are navigable; .md files are selectable.
+// Any file can be selected with Ctrl+Enter.
 type FileTreeModel struct {
-	root        string
-	allFiles    []string
-	filtered    []string
-	filter      string
-	cursor      int
-	previewText string
-	showPreview bool
-	width       int
-	height      int
+	root    string // repo root (never go above this)
+	cwd     string // current directory being displayed
+	entries []ftEntry
+	cursor  int
+	width   int
+	height  int
 }
 
 func NewFileTree(root string) (FileTreeModel, error) {
-	files, err := listMdFiles(root)
-	if err != nil {
-		return FileTreeModel{}, err
+	m := FileTreeModel{root: root, cwd: root, width: 80, height: 20}
+	if err := m.reload(); err != nil {
+		return m, err
 	}
-	return FileTreeModel{
-		root:     root,
-		allFiles: files,
-		filtered: files,
-		width:    80,
-		height:   20,
-	}, nil
+	return m, nil
+}
+
+// reload reads cwd and populates entries: dirs first (sorted), then files.
+func (m *FileTreeModel) reload() error {
+	entries, err := os.ReadDir(m.cwd)
+	if err != nil {
+		return err
+	}
+
+	m.entries = nil
+
+	// ".." unless already at root
+	if m.cwd != m.root {
+		m.entries = append(m.entries, ftEntry{name: "..", isDir: true})
+	}
+
+	var dirs, files []ftEntry
+	for _, e := range entries {
+		name := e.Name()
+		// skip common noise directories
+		if name == "node_modules" || name == "vendor" {
+			continue
+		}
+		if e.IsDir() {
+			dirs = append(dirs, ftEntry{name: name + "/", isDir: true})
+		} else {
+			files = append(files, ftEntry{name: name})
+		}
+	}
+
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].name < dirs[j].name })
+	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
+
+	m.entries = append(m.entries, dirs...)
+	m.entries = append(m.entries, files...)
+	m.cursor = 0
+	return nil
 }
 
 func (m FileTreeModel) Init() tea.Cmd { return nil }
@@ -46,33 +81,57 @@ func (m FileTreeModel) Update(msg tea.Msg) (FileTreeModel, tea.Cmd) {
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
-				m.loadPreview()
 			}
 		case "down", "j":
-			if m.cursor < len(m.filtered)-1 {
+			if m.cursor < len(m.entries)-1 {
 				m.cursor++
-				m.loadPreview()
 			}
-		case "ctrl+p":
-			m.showPreview = !m.showPreview
-		case "enter":
-			if len(m.filtered) > 0 {
-				return m, func() tea.Msg {
-					return FileSelectedMsg{Path: filepath.Join(m.root, m.filtered[m.cursor])}
+		case "pgup":
+			m.cursor -= m.visibleRows()
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+		case "pgdown":
+			m.cursor += m.visibleRows()
+			if m.cursor >= len(m.entries) {
+				m.cursor = len(m.entries) - 1
+			}
+
+		case "enter", "right", "l":
+			if len(m.entries) == 0 {
+				break
+			}
+			e := m.entries[m.cursor]
+			if e.isDir {
+				next := m.cwdJoin(e.name)
+				m.cwd = next
+				_ = m.reload()
+			} else {
+				// select file
+				path := filepath.Join(m.cwd, e.name)
+				return m, func() tea.Msg { return FileSelectedMsg{Path: path} }
+			}
+
+		case "backspace", "left", "h":
+			if m.cwd != m.root {
+				parent := filepath.Dir(m.cwd)
+				if !strings.HasPrefix(parent, m.root) {
+					parent = m.root
+				}
+				prevDir := filepath.Base(m.cwd)
+				m.cwd = parent
+				_ = m.reload()
+				// restore cursor on the dir we came from
+				for i, e := range m.entries {
+					if strings.TrimSuffix(e.name, "/") == prevDir {
+						m.cursor = i
+						break
+					}
 				}
 			}
-		case "esc", "backspace":
-			if m.filter != "" {
-				m.filter = m.filter[:len(m.filter)-1]
-				m.applyFilter()
-			} else {
-				return m, func() tea.Msg { return EditorCancelledMsg{} }
-			}
-		default:
-			if len(msg.String()) == 1 {
-				m.filter += msg.String()
-				m.applyFilter()
-			}
+
+		case "esc":
+			return m, func() tea.Msg { return EditorCancelledMsg{} }
 		}
 	}
 	return m, nil
@@ -80,87 +139,85 @@ func (m FileTreeModel) Update(msg tea.Msg) (FileTreeModel, tea.Cmd) {
 
 func (m FileTreeModel) View() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	filterStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
+	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	dirStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
+	mdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	fileStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	cursorBg := lipgloss.NewStyle().
+		Background(lipgloss.Color("238")).
+		Foreground(lipgloss.Color("255")).
+		Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	sep := strings.Repeat("─", m.width)
 
-	header := titleStyle.Render("Pick requirements file") +
-		"   Filter: " + filterStyle.Render(m.filter+"█")
-
-	listW := m.width
-	if m.showPreview {
-		listW = m.width / 2
+	// header
+	rel, _ := filepath.Rel(m.root, m.cwd)
+	if rel == "." || rel == "" {
+		rel = "/"
+	} else {
+		rel = "/" + rel + "/"
 	}
+	header := titleStyle.Render("Select requirements file") +
+		"  " + pathStyle.Render(rel)
 
-	var sb strings.Builder
-	sb.WriteString(header + "\n")
-	sb.WriteString(strings.Repeat("─", m.width) + "\n")
+	var lines []string
+	lines = append(lines, header, sep)
 
-	maxItems := m.height - 4
+	rows := m.visibleRows()
 	start := 0
-	if m.cursor >= maxItems {
-		start = m.cursor - maxItems + 1
+	if m.cursor >= rows {
+		start = m.cursor - rows + 1
 	}
 
-	for i := start; i < len(m.filtered) && i < start+maxItems; i++ {
-		f := m.filtered[i]
-		if len(f) > listW-4 {
-			f = "…" + f[len(f)-(listW-5):]
+	for i := start; i < len(m.entries) && i < start+rows; i++ {
+		e := m.entries[i]
+		maxW := m.width - 4
+		label := e.name
+		if len(label) > maxW {
+			label = label[:maxW-1] + "…"
 		}
-		if i == m.cursor {
-			sb.WriteString(cursorStyle.Render("► " + f))
+
+		var rendered string
+		if e.isDir {
+			rendered = dirStyle.Render("  " + label)
+		} else if strings.HasSuffix(e.name, ".md") {
+			rendered = mdStyle.Render("  " + label)
 		} else {
-			sb.WriteString(dimStyle.Render("  " + f))
+			rendered = fileStyle.Render("  " + label)
 		}
-		sb.WriteString("\n")
+
+		if i == m.cursor {
+			// pad to full width for highlight bar
+			pad := m.width - 2 - lipglossLen(rendered)
+			if pad < 0 {
+				pad = 0
+			}
+			rendered = cursorBg.Render("▶ " + strings.TrimPrefix(rendered, "  ") + strings.Repeat(" ", pad))
+		}
+		lines = append(lines, rendered)
 	}
 
-	list := sb.String()
-
-	if m.showPreview && m.previewText != "" {
-		preview := lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder(), false, false, false, true).
-			BorderForeground(lipgloss.Color("240")).
-			Padding(0, 1).
-			Width(m.width/2 - 2).
-			Render(truncate(m.previewText, (m.width/2-4)*(m.height-4)))
-
-		return lipgloss.JoinHorizontal(lipgloss.Top, list, preview)
+	// scroll position hint when list is longer than screen
+	if len(m.entries) > rows {
+		pct := 0
+		if len(m.entries) > 1 {
+			pct = m.cursor * 100 / (len(m.entries) - 1)
+		}
+		lines = append(lines, dimStyle.Render(strings.Repeat("─", m.width-8)+"  "+strings.Repeat("░", pct/10)+strings.Repeat("·", 10-pct/10)))
 	}
 
-	return list + dimStyle.Render("Enter select  Ctrl+P preview  Esc back")
+	lines = append(lines, sep)
+	lines = append(lines, dimStyle.Render("↑↓/PgUp/PgDn navigate   Enter/→ open   ←/Backspace up   Esc back"))
+
+	return strings.Join(lines, "\n")
 }
 
-func (m *FileTreeModel) applyFilter() {
-	if m.filter == "" {
-		m.filtered = m.allFiles
-		m.cursor = 0
-		return
+func (m FileTreeModel) visibleRows() int {
+	rows := m.height - 5 // header + sep + sep + hints
+	if rows < 4 {
+		rows = 4
 	}
-	var out []string
-	lower := strings.ToLower(m.filter)
-	for _, f := range m.allFiles {
-		if strings.Contains(strings.ToLower(f), lower) {
-			out = append(out, f)
-		}
-	}
-	m.filtered = out
-	m.cursor = 0
-	m.loadPreview()
-}
-
-func (m *FileTreeModel) loadPreview() {
-	if len(m.filtered) == 0 {
-		m.previewText = ""
-		return
-	}
-	path := filepath.Join(m.root, m.filtered[m.cursor])
-	data, err := os.ReadFile(path)
-	if err != nil {
-		m.previewText = "(cannot read file)"
-		return
-	}
-	m.previewText = string(data)
+	return rows
 }
 
 func (m *FileTreeModel) SetSize(w, h int) {
@@ -168,37 +225,15 @@ func (m *FileTreeModel) SetSize(w, h int) {
 	m.height = h
 }
 
-func listMdFiles(root string) ([]string, error) {
-	cmd := exec.Command("git", "ls-files", "*.md", "**/*.md")
-	cmd.Dir = root
-	out, err := cmd.Output()
-	if err != nil {
-		// fallback: walk the directory
-		return walkMd(root)
+// cwdJoin resolves a relative entry name (possibly "..") against cwd, clamped to root.
+func (m *FileTreeModel) cwdJoin(name string) string {
+	name = strings.TrimSuffix(name, "/")
+	if name == ".." {
+		p := filepath.Dir(m.cwd)
+		if strings.HasPrefix(p, m.root) {
+			return p
+		}
+		return m.root
 	}
-	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line != "" {
-			files = append(files, line)
-		}
-	}
-	return files, nil
-}
-
-func walkMd(root string) ([]string, error) {
-	var files []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.IsDir() && (info.Name() == ".git" || info.Name() == ".orchestrator") {
-			return filepath.SkipDir
-		}
-		if !info.IsDir() && strings.HasSuffix(path, ".md") {
-			rel, _ := filepath.Rel(root, path)
-			files = append(files, rel)
-		}
-		return nil
-	})
-	return files, err
+	return filepath.Join(m.cwd, name)
 }

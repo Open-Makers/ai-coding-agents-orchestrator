@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -18,17 +17,23 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/multiplexer"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/skills"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tui"
 )
 
+// version is set at build time via -ldflags "-X main.version=<ver>".
+var version = "dev"
+
 func main() {
+	logging.Setup()
+	tui.Version = version
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		// No sub-command: open the TUI picker and let the user choose requirements.
+		runCmd(nil)
+		return
 	}
 
 	switch os.Args[1] {
@@ -41,6 +46,8 @@ func main() {
 		os.Exit(2)
 	case "report":
 		reportCmd(os.Args[2:])
+	case "monitor":
+		monitorCmd(os.Args[2:])
 	case "approve":
 		approveCmd(os.Args[2:])
 	case "clean":
@@ -57,37 +64,28 @@ func main() {
 func usage() {
 	fmt.Println(`orchestrator <command>
 
-Commands:
-  run --requirements requirements.md  Run a full orchestration workflow
-  resume                              Resume last run (not implemented)
-  report                              Summarize last run artifacts
-  approve                             Create approval marker
-  clean                               Remove .orchestrator workspace`)
+	Commands:
+	  run --requirements requirements.md  Run a full orchestration workflow
+	  resume                              Resume last run (not implemented)
+	  report                              Summarize last run artifacts
+	  monitor                             Open the control TUI against a running bus
+	  approve                             Create approval marker
+	  clean                               Remove .orchestrator workspace`)
 
 }
 
 func runCmd(args []string) {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	reqPath := fs.String("requirements", "", "path to requirements.md")
+	reqPath := fs.String("requirements", "", "path to requirements.md (omit to open picker)")
 	branch := fs.String("branch", "", "git branch to create and checkout")
+	modulePath := fs.String("module", "", "Go module path (e.g. github.com/user/project)")
 	dryRun := fs.Bool("dry-run", false, "print intent and exit")
-	ui := fs.String("ui", "tui", "ui mode: tui or plain")
+	ui := fs.String("ui", "auto", "ui mode: auto, tui, or plain")
 	_ = fs.Parse(args)
-
-	if *reqPath == "" {
-		fmt.Fprintln(os.Stderr, "--requirements is required")
-		os.Exit(2)
-	}
 
 	root, err := os.Getwd()
 	if err != nil {
 		fatal(err)
-	}
-
-	if *branch != "" {
-		if err := checkoutBranch(root, *branch); err != nil {
-			fatal(err)
-		}
 	}
 
 	cfg, err := config.Load(root)
@@ -100,22 +98,92 @@ func runCmd(args []string) {
 		fatal(err)
 	}
 
+	if err := logging.SetupFile(ws.Path(logging.LogFileName)); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: could not open log file: %v\n", err)
+	}
+	defer logging.Close()
+
+	// Migrate legacy module_path file into project config.
+	if cfg.Project.ModulePath == "" {
+		if data, err := ws.ReadFile(artifacts.ModulePathFile); err == nil {
+			cfg.Project.ModulePath = strings.TrimSpace(string(data))
+			_ = os.Remove(ws.Path(artifacts.ModulePathFile))
+		}
+	}
+
+	// Override with --module flag if provided.
+	if *modulePath != "" {
+		cfg.Project.ModulePath = *modulePath
+	}
+
+	// Auto-detect from existing go.mod if still empty.
+	if cfg.Project.ModulePath == "" {
+		cfg.Project.ModulePath = detectGoModulePath(root)
+	}
+
+	// Persist module path to project config for future runs.
+	if cfg.Project.ModulePath != "" {
+		projectCfg := config.LoadProject(root)
+		if projectCfg.Project.ModulePath != cfg.Project.ModulePath {
+			projectCfg.Project.ModulePath = cfg.Project.ModulePath
+			_ = config.Save(root, projectCfg)
+		}
+	}
+
+	// If module path is still missing for a Go project, prompt the user.
+	if tui.NeedsModulePath(root, cfg) && !*dryRun && *ui != "plain" {
+		chosen, err := tui.RunModulePathPrompt(root, ws.Path(""))
+		if err != nil {
+			fatal(fmt.Errorf("module path prompt: %w", err))
+		}
+		if chosen == "" {
+			return // user cancelled
+		}
+		cfg.Project.ModulePath = chosen
+	}
+
+	// No requirements given — open the TUI home/picker (unless plain/dry-run mode).
+	if *reqPath == "" && !*dryRun && *ui != "plain" {
+		chosen, updatedCfg, err := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
+		if err != nil {
+			fatal(fmt.Errorf("picker: %w", err))
+		}
+		if chosen == "" {
+			return // user quit
+		}
+		*reqPath = chosen
+		cfg = updatedCfg
+	}
+
+	if *reqPath == "" {
+		fmt.Fprintln(os.Stderr, "--requirements is required in plain/dry-run mode")
+		os.Exit(2)
+	}
+
+	if *branch != "" {
+		if err := checkoutBranch(root, *branch); err != nil {
+			fatal(err)
+		}
+	}
+
 	if *dryRun {
 		fmt.Println("dry-run: workspace prepared, no agents executed")
 		return
 	}
 
+	resolvedUI := resolveUIMode(*ui)
+
 	b := bus.New()
 	if err := b.SetLogPath(ws.Path("runlog.jsonl")); err != nil {
-		log.Printf("warn: could not open bus log: %v", err)
+		slog.Warn("could not open bus log", slog.String("error", err.Error()))
 	}
 	defer b.Close()
 
-	agents := buildAgents(b, cfg, ws, root)
-	pipeline := orchestrator.NewPipeline(b, agents, cfg, ws, root)
 	ctx := context.Background()
 
-	if *ui == "plain" {
+	if resolvedUI == "plain" {
+		agents := buildAgents(b, cfg, ws, root)
+		pipeline := orchestrator.NewPipeline(b, agents, cfg, ws, root)
 		events := b.Subscribe()
 		go plainLogger(events)
 		if err := pipeline.Run(ctx, *reqPath); err != nil {
@@ -124,84 +192,127 @@ func runCmd(args []string) {
 		return
 	}
 
-	if *ui == "tmux" {
-		runTmuxMode(ctx, b, pipeline, ws, root, *reqPath)
-		return
-	}
+	// TUI mode (default) — loop supports returning to main menu after pipeline.
+	for {
+		events := b.Subscribe()
+		wsPath := ws.Path("")
+		chatLLM := runner.OpenCodeRunner{}
+		tuiModel := tui.New(events, nil, root, wsPath, chatLLM, cfg)
+		p := tea.NewProgram(tuiModel, tea.WithAltScreen())
 
-	// TUI mode (default).
-	events := b.Subscribe()
-	wsPath := ws.Path("")
-	// Reuse the planner's runner for the chat overlay (best-effort).
-	var chatLLM runner.LLMRunner
-	if apiKey := os.Getenv("ANTHROPIC_API_KEY"); apiKey != "" {
-		chatLLM = runner.NewAnthropicRunner(apiKey, nil)
-	}
-	tuiModel := tui.New(events, pipeline, root, wsPath, chatLLM)
-	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
+		pipelineCtx, pipelineCancel := context.WithCancel(ctx)
 
-	go func() {
-		if err := pipeline.Run(ctx, *reqPath); err != nil {
-			log.Printf("pipeline error: %v", err)
+		go func() {
+			agents := buildAgents(b, cfg, ws, root)
+			pipeline := orchestrator.NewPipeline(b, agents, cfg, ws, root)
+			p.Send(tui.PipelineReadyWithCancelMsg(pipeline, pipelineCancel))
+			err := pipeline.Run(pipelineCtx, *reqPath)
+			if pipelineCtx.Err() != nil {
+				err = fmt.Errorf("pipeline cancelled by user")
+			}
+			p.Send(tui.PipelineDoneMsg{Err: err})
+		}()
+
+		result, err := p.Run()
+		if err != nil {
+			fatal(err)
 		}
-		p.Quit()
-	}()
 
-	if _, err := p.Run(); err != nil {
-		fatal(err)
+		// Check if user wants to return to main menu.
+		final, ok := result.(tui.Model)
+		if !ok || !final.ReturnToMenu() {
+			break
+		}
+
+		// Re-open the startup picker to choose new requirements.
+		chosen, updatedCfg, err := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
+		if err != nil {
+			fatal(fmt.Errorf("picker: %w", err))
+		}
+		if chosen == "" {
+			break // user quit from menu
+		}
+
+		*reqPath = chosen
+		cfg = updatedCfg
+	}
+}
+
+func resolveUIMode(requested string) string {
+	switch requested {
+	case "", "auto":
+		return "tui"
+	case "plain", "tui":
+		return requested
+	case "tmux", "cmux", "cmux-internal":
+		slog.Warn("ui mode no longer supported, using tui", slog.String("requested", requested))
+		return "tui"
+	default:
+		slog.Warn("unknown ui mode, falling back to tui", slog.String("requested", requested))
+		return "tui"
 	}
 }
 
 func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root string) map[bus.AgentRole]agent.Agent {
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-
 	skillLoader := skills.New("")
-	// Pre-fetch skills used by all agents (best-effort, non-blocking on failure).
 	var allSkills []string
 	for _, ac := range cfg.Agents {
 		allSkills = append(allSkills, ac.Skills...)
 	}
-	if len(allSkills) > 0 && apiKey != "" {
+	if len(allSkills) > 0 {
 		go func() {
 			if err := skillLoader.Prefetch(allSkills); err != nil {
-				log.Printf("warn: skill prefetch: %v", err)
+				slog.Warn("skill prefetch failed", slog.String("error", err.Error()))
 			}
 		}()
 	}
 
 	makeRunner := func(role string) runner.LLMRunner {
 		ac := cfg.Agents[role]
-		r, err := runner.New(ac, skillLoader, apiKey)
+		r, err := runner.New(ac, skillLoader, cfg.PromptLanguage)
 		if err != nil {
-			log.Printf("warn: runner for %s: %v — falling back to codex", role, err)
-			return runner.CodexRunner{}
+			slog.Warn("runner creation failed, falling back to opencode",
+				slog.String("role", role),
+				slog.String("error", err.Error()),
+			)
+			return runner.OpenCodeRunner{}
 		}
 		return r
 	}
 
 	agents := make(map[bus.AgentRole]agent.Agent)
 
+	pmCfg := cfg.Agents["pm"]
+	agents[bus.RolePM] = agent.NewPMAgent(b, makeRunner("pm"), ws,
+		pmCfg.Skills, pmCfg.Model)
+
 	plannerCfg := cfg.Agents["planner"]
 	agents[bus.RolePlanner] = agent.NewPlannerAgent(b, makeRunner("planner"), ws,
 		plannerCfg.Skills, plannerCfg.Model)
 
 	coderCfg := cfg.Agents["coder"]
-	agents[bus.RoleCoder] = agent.NewCoderAgent(b, makeRunner("coder"), ws,
+	agents[bus.RoleCoder] = agent.NewCoderAgent(b, makeRunner("coder"), ws, root, cfg,
 		coderCfg.Skills, coderCfg.Model)
 
-	agents[bus.RoleTester] = agent.NewTesterAgent(b, ws, root)
+	testerCfg := cfg.Agents["tester"]
+	agents[bus.RoleTester] = agent.NewTesterAgent(b, makeRunner("tester"), ws, root, cfg,
+		testerCfg.Skills, testerCfg.Model)
 
 	reviewerCfg := cfg.Agents["reviewer"]
 	agents[bus.RoleReviewer] = agent.NewReviewerAgent(b, makeRunner("reviewer"), ws,
 		reviewerCfg.Skills, reviewerCfg.Model)
 
-	fixerCfg := cfg.Agents["fixer"]
-	agents[bus.RoleFixer] = agent.NewFixerAgent(b, makeRunner("fixer"), ws,
-		fixerCfg.Skills, fixerCfg.Model)
+	uxCfg := cfg.Agents["ux_reviewer"]
+	agents[bus.RoleUXReviewer] = agent.NewUXReviewerAgent(b, makeRunner("ux_reviewer"), ws,
+		uxCfg.Skills, uxCfg.Model)
 
-	prCfg := cfg.Agents["pr"]
-	agents[bus.RolePR] = agent.NewPRAgent(b, makeRunner("pr"), ws,
-		prCfg.Skills, prCfg.Model)
+	secCfg := cfg.Agents["security"]
+	agents[bus.RoleSecurity] = agent.NewSecurityAgent(b, makeRunner("security"), ws,
+		secCfg.Skills, secCfg.Model)
+
+	qaCfg := cfg.Agents["qa"]
+	agents[bus.RoleQA] = agent.NewQAAgent(b, makeRunner("qa"), ws,
+		qaCfg.Skills, qaCfg.Model)
 
 	return agents
 }
@@ -246,7 +357,6 @@ func reportCmd(args []string) {
 		artifacts.ImplementationPlanFile,
 		artifacts.TestReportFile,
 		artifacts.ReviewFile,
-		artifacts.PRDescriptionFile,
 	} {
 		printIfExists(ws, name)
 	}
@@ -258,7 +368,7 @@ func approveCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: orchestrator approve <architecture|plan|prompts|all>")
+		fmt.Fprintln(os.Stderr, "usage: orchestrator approve <vision|architecture|plan|prompts|all>")
 		os.Exit(2)
 	}
 
@@ -291,6 +401,8 @@ func approveCmd(args []string) {
 
 func markerList(target string) []string {
 	switch target {
+	case "vision":
+		return []string{artifacts.VisionApprovedFile}
 	case "architecture":
 		return []string{artifacts.ArchitectureApprovedFile}
 	case "plan":
@@ -299,6 +411,7 @@ func markerList(target string) []string {
 		return []string{artifacts.PromptsApprovedFile}
 	case "all":
 		return []string{
+			artifacts.VisionApprovedFile,
 			artifacts.ArchitectureApprovedFile,
 			artifacts.PlanApprovedFile,
 			artifacts.PromptsApprovedFile,
@@ -322,10 +435,29 @@ func cleanCmd(args []string) {
 	}
 
 	dir := filepath.Join(root, artifacts.DirName)
-	if err := os.RemoveAll(dir); err != nil {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("nothing to clean")
+			return
+		}
 		fatal(err)
 	}
-	fmt.Println("removed", dir)
+
+	preserve := map[string]bool{
+		artifacts.RequirementsFile:  true,
+		artifacts.ProjectConfigFile: true,
+	}
+	for _, entry := range entries {
+		if preserve[entry.Name()] {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			fatal(err)
+		}
+	}
+	fmt.Printf("cleaned %s (preserved %v)\n", dir, preserve)
 }
 
 func printIfExists(ws artifacts.Workspace, name string) {
@@ -373,59 +505,17 @@ func fatal(err error) {
 	os.Exit(1)
 }
 
-// runTmuxMode starts a tmux session with per-agent panes.
-// Each pane runs `orchestrator agent` which subscribes to the bus over a Unix socket.
-// The main process runs the pipeline normally; agents' bus events are visible in each pane.
-func runTmuxMode(ctx context.Context, b *bus.Bus, pipeline *orchestrator.Pipeline, ws artifacts.Workspace, root, reqPath string) {
-	sessionID := fmt.Sprintf("orch-%d", time.Now().UnixNano()%100000)
-	socketPath := fmt.Sprintf("/tmp/%s.sock", sessionID)
-
-	// Start bus socket server.
-	stop := make(chan struct{})
-	defer close(stop)
-	if err := b.ServeUnix(socketPath, stop); err != nil {
-		fatal(fmt.Errorf("tmux: bus socket: %w", err))
+// detectGoModulePath reads the module path from an existing go.mod file.
+func detectGoModulePath(root string) string {
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return ""
 	}
-	defer os.Remove(socketPath)
-
-	mx := multiplexer.New(sessionID)
-	if err := mx.CreateSession(sessionID); err != nil {
-		fatal(fmt.Errorf("tmux: create session: %w", err))
-	}
-	defer mx.Close()
-
-	agentRoles := []bus.AgentRole{
-		bus.RolePlanner, bus.RoleCoder,
-		bus.RoleTester, bus.RoleReviewer,
-		bus.RoleFixer, bus.RolePR,
-	}
-
-	for _, role := range agentRoles {
-		pane, err := mx.NewPane(role)
-		if err != nil {
-			log.Printf("warn: tmux pane for %s: %v", role, err)
-			continue
-		}
-		if err := mx.SpawnAgent(pane, role, sessionID, socketPath); err != nil {
-			log.Printf("warn: tmux spawn %s: %v", role, err)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
 		}
 	}
-
-	// Main window: Conversation Panel only (attach to session, window 0).
-	events := b.Subscribe()
-	tuiModel := tui.NewConvOnly(events, root)
-	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
-
-	fmt.Printf("tmux session: %s\n  attach with: tmux attach -t %s\n", sessionID, sessionID)
-
-	go func() {
-		if err := pipeline.Run(ctx, reqPath); err != nil {
-			log.Printf("pipeline error: %v", err)
-		}
-		p.Quit()
-	}()
-
-	if _, err := p.Run(); err != nil {
-		fatal(err)
-	}
+	return ""
 }

@@ -2,36 +2,51 @@ package tui
 
 import (
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 )
 
-// AgentPanelModel displays the status and recent output of one agent.
+const maxPanelLines = 500
+
+// AgentPanelModel displays the status and scrollable output of one agent.
 type AgentPanelModel struct {
-	role      bus.AgentRole
-	state     AgentState
-	lastLines []string // ring of last 3 output lines
-	elapsed   string
-	spinner   spinner.Model
-	width     int
-	height    int
+	role        bus.AgentRole
+	state       AgentState
+	lines       []string // completed lines, capped at maxPanelLines
+	currentLine string   // tokens accumulate here until \n
+
+	vp       viewport.Model // scrollable viewport for output
+	pinToEnd bool           // auto-scroll to bottom on new content
+
+	spinner spinner.Model
+	width   int
+	height  int
+	log     *slog.Logger
 }
 
 func NewAgentPanel(role bus.AgentRole) AgentPanelModel {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = styleRunning
+	vp := viewport.New(28, 4)
+	vp.SetContent("")
 	return AgentPanelModel{
-		role:    role,
-		state:   AgentWaiting,
-		spinner: s,
-		width:   30,
-		height:  6,
+		role:     role,
+		state:    AgentWaiting,
+		spinner:  s,
+		vp:       vp,
+		pinToEnd: true,
+		width:    30,
+		height:   6,
+		log:      logging.ForComponent("agent_panel").With(slog.String("role", string(role))),
 	}
 }
 
@@ -40,19 +55,54 @@ func (m AgentPanelModel) Init() tea.Cmd {
 }
 
 func (m AgentPanelModel) Update(msg tea.Msg) (AgentPanelModel, tea.Cmd) {
+	var cmds []tea.Cmd
+
 	switch msg := msg.(type) {
 	case AgentEventMsg:
 		if msg.Role != m.role {
 			return m, nil
 		}
 		if msg.State != "" {
+			prevState := m.state
 			m.state = msg.State
+			m.log.Debug("state transition",
+				slog.String("from", string(prevState)),
+				slog.String("to", string(m.state)),
+			)
 		}
 		if msg.Text != "" {
+			m.log.Debug("received text",
+				slog.Int("text_len", len(msg.Text)),
+				slog.Int("buffered_lines", len(m.lines)),
+			)
 			m.addLine(msg.Text)
+			m.syncViewport()
 		}
 		if m.state == AgentRunning {
-			return m, m.spinner.Tick
+			cmds = append(cmds, m.spinner.Tick)
+		}
+		return m, tea.Batch(cmds...)
+
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "up", "k":
+			m.pinToEnd = false
+			m.vp.ScrollUp(1)
+		case "down", "j":
+			m.vp.ScrollDown(1)
+			m.pinToEnd = m.vp.AtBottom()
+		case "pgup", "b":
+			m.pinToEnd = false
+			m.vp.HalfPageUp()
+		case "pgdown", "f":
+			m.vp.HalfPageDown()
+			m.pinToEnd = m.vp.AtBottom()
+		case "home", "g":
+			m.pinToEnd = false
+			m.vp.GotoTop()
+		case "end", "G":
+			m.vp.GotoBottom()
+			m.pinToEnd = true
 		}
 		return m, nil
 
@@ -68,35 +118,69 @@ func (m AgentPanelModel) Update(msg tea.Msg) (AgentPanelModel, tea.Cmd) {
 }
 
 func (m *AgentPanelModel) addLine(text string) {
-	// flatten multi-line tokens into individual lines
-	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		if line == "" {
-			continue
+	for _, ch := range text {
+		if ch == '\n' {
+			m.lines = append(m.lines, m.currentLine)
+			m.currentLine = ""
+		} else {
+			m.currentLine += string(ch)
 		}
-		if len(m.lastLines) >= 3 {
-			m.lastLines = m.lastLines[1:]
-		}
-		m.lastLines = append(m.lastLines, line)
+	}
+	if len(m.lines) > maxPanelLines {
+		trimmed := len(m.lines) - maxPanelLines
+		m.lines = m.lines[trimmed:]
+		m.log.Debug("buffer trimmed", slog.Int("dropped_lines", trimmed))
 	}
 }
 
 func (m AgentPanelModel) View() string {
-	inner := m.renderInner()
+	contentW := m.width - 2 // border left + right
+	if contentW < 2 {
+		contentW = 2
+	}
+
 	color := roleColor(string(m.role))
+	bSt := lipgloss.NewStyle().Foreground(color)
 
-	border := stylePanelBorder.Copy().
-		BorderForeground(color).
-		Width(m.width - 2).
-		Height(m.height - 2)
+	header := m.renderHeader(contentW)
+	hRule := strings.Repeat("─", contentW)
 
-	return border.Render(inner)
+	var sb strings.Builder
+	sb.WriteString(bSt.Render("╭"+hRule+"╮") + "\n")
+
+	// Header row.
+	vis := lipgloss.Width(header)
+	pad := contentW - vis
+	if pad < 0 {
+		pad = 0
+	}
+	sb.WriteString(bSt.Render("│") + header + strings.Repeat(" ", pad) + bSt.Render("│") + "\n")
+
+	// Viewport rows.
+	vpLines := strings.Split(m.vp.View(), "\n")
+	for _, raw := range vpLines {
+		vis := lipgloss.Width(raw)
+		pad := contentW - vis
+		if pad < 0 {
+			pad = 0
+		}
+		sb.WriteString(bSt.Render("│") + raw + strings.Repeat(" ", pad) + bSt.Render("│") + "\n")
+	}
+
+	// Scroll indicator.
+	scrollInfo := m.scrollIndicator()
+	vis = lipgloss.Width(scrollInfo)
+	bottomRule := hRule
+	if vis > 0 && vis+2 < contentW {
+		bottomRule = hRule[:contentW-vis-1] + scrollInfo + "─"
+	}
+	sb.WriteString(bSt.Render("╰" + bottomRule + "╯"))
+	return sb.String()
 }
 
-func (m AgentPanelModel) renderInner() string {
-	roleStyle := lipgloss.NewStyle().
-		Foreground(roleColor(string(m.role))).
-		Bold(true)
-
+// renderHeader returns the formatted header line with role name and status.
+func (m AgentPanelModel) renderHeader(_ int) string {
+	roleStyle := lipgloss.NewStyle().Foreground(roleColor(string(m.role))).Bold(true)
 	header := roleStyle.Render(fmt.Sprintf("[%s]", strings.ToUpper(string(m.role))))
 
 	var statusIcon string
@@ -110,25 +194,52 @@ func (m AgentPanelModel) renderInner() string {
 	case AgentError:
 		statusIcon = styleError.Render("✗ error")
 	case AgentGate:
-		statusIcon = styleGate.Render("⏸ waiting for approval")
+		statusIcon = styleGate.Render("⏸ gate")
 	}
 
-	lines := []string{header + "  " + statusIcon}
-
-	for _, l := range m.lastLines {
-		truncated := l
-		maxW := m.width - 4
-		if len(truncated) > maxW {
-			truncated = truncated[:maxW-1] + "…"
-		}
-		lines = append(lines, styleWaiting.Render(truncated))
-	}
-
-	return strings.Join(lines, "\n")
+	return header + "  " + statusIcon
 }
+
+// scrollIndicator returns a short string showing scroll position.
+func (m AgentPanelModel) scrollIndicator() string {
+	total := m.vp.TotalLineCount()
+	visible := m.vp.VisibleLineCount()
+	if total <= visible {
+		return ""
+	}
+	pct := m.vp.ScrollPercent() * 100
+	indicator := fmt.Sprintf(" %d%% ", int(pct))
+	return lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(indicator)
+}
+
+// syncViewport updates the viewport content from the line buffer.
+func (m *AgentPanelModel) syncViewport() {
+	src := m.lines
+	if m.currentLine != "" {
+		src = append(append([]string{}, m.lines...), m.currentLine)
+	}
+	m.vp.SetContent(strings.Join(src, "\n"))
+	if m.pinToEnd {
+		m.vp.GotoBottom()
+	}
+}
+
+// innerLines is no longer used — viewport handles rendering.
 
 // SetSize updates panel dimensions.
 func (m *AgentPanelModel) SetSize(w, h int) {
+	m.log.Debug("resize", slog.Int("width", w), slog.Int("height", h))
 	m.width = w
 	m.height = h
+	contentW := w - 2
+	if contentW < 2 {
+		contentW = 2
+	}
+	contentH := h - 3 // top border + header + bottom border
+	if contentH < 1 {
+		contentH = 1
+	}
+	m.vp.Width = contentW
+	m.vp.Height = contentH
+	m.syncViewport()
 }

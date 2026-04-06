@@ -7,6 +7,7 @@ import (
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
 
@@ -18,8 +19,9 @@ type ReviewerPayload struct {
 
 // ReviewResult is the structured outcome of a review.
 type ReviewResult struct {
-	Approved bool
-	MustFix  []string
+	Approved   bool
+	MustFix    []string
+	NiceToHave []string
 }
 
 type ReviewerAgent struct {
@@ -49,22 +51,15 @@ func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 	}
 
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
-	patch, _ := a.ws.ReadFile(artifacts.PatchFile)
+	coderOutput, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
 	_ = payload
 
-	systemPrompt := `You are a Code Reviewer. Look for logic errors, edge cases, security issues, and plan compliance.
+	systemPrompt := prompts.MustLoad("reviewer-system")
 
-Respond in this exact format:
-MUST FIX
-- <issue> (or "none" if no issues)
-NICE TO HAVE
-- <suggestion> (or "none")
-Approve?: YES or NO`
-
-	userContent := fmt.Sprintf("Plan:\n%s\n\nDiff:\n%s\n\nTest results:\n%s",
-		string(plan), string(patch), string(report))
+	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s\n\nTest results:\n%s",
+		string(plan), string(coderOutput), string(report))
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,
@@ -91,8 +86,8 @@ Approve?: YES or NO`
 
 func parseReview(text string) ReviewResult {
 	lines := strings.Split(text, "\n")
-	var mustFix []string
-	inMustFix := false
+	var mustFix, niceToHave []string
+	section := ""
 	approved := false
 
 	for _, line := range lines {
@@ -101,21 +96,25 @@ func parseReview(text string) ReviewResult {
 
 		switch {
 		case strings.HasPrefix(upper, "MUST FIX"):
-			inMustFix = true
+			section = "mustfix"
 		case strings.HasPrefix(upper, "NICE TO HAVE"):
-			inMustFix = false
+			section = "nicetohave"
 		case strings.HasPrefix(upper, "APPROVE"):
 			approved = strings.Contains(upper, "YES")
-			inMustFix = false
+			section = ""
 		default:
-			if inMustFix {
-				item := strings.TrimSpace(strings.TrimPrefix(trim, "-"))
-				if item != "" && strings.ToLower(item) != "none" {
-					mustFix = append(mustFix, item)
-				}
+			item := strings.TrimSpace(strings.TrimPrefix(trim, "-"))
+			if item == "" || strings.ToLower(item) == "none" {
+				continue
+			}
+			switch section {
+			case "mustfix":
+				mustFix = append(mustFix, item)
+			case "nicetohave":
+				niceToHave = append(niceToHave, item)
 			}
 		}
 	}
 
-	return ReviewResult{Approved: approved, MustFix: mustFix}
+	return ReviewResult{Approved: approved, MustFix: mustFix, NiceToHave: niceToHave}
 }

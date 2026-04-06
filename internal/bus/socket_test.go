@@ -12,7 +12,7 @@ import (
 func tempSock(t *testing.T, suffix string) string {
 	t.Helper()
 	path := fmt.Sprintf("/tmp/orch-test-%s.sock", suffix)
-	t.Cleanup(func() { os.Remove(path) })
+	t.Cleanup(func() { _ = os.Remove(path) })
 	return path
 }
 
@@ -36,7 +36,7 @@ func TestServeDialUnix_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialUnix: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	incoming := client.Subscribe()
 	time.Sleep(10 * time.Millisecond) // let subscription be registered
@@ -66,7 +66,7 @@ func TestDialPublish_ForwardsToServerBus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialUnix: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	time.Sleep(10 * time.Millisecond) // let connection establish
 
@@ -98,7 +98,7 @@ func TestHandleSocketConn_NoGoroutineLeak(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DialUnix: %v", err)
 	}
-	client.Close() // close immediately
+	_ = client.Close() // close immediately
 
 	// Publish after close — writer goroutine must not block indefinitely.
 	b.Publish(NewMessage(RoleSystem, "", MsgEvent, "post-close"))

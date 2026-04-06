@@ -24,7 +24,7 @@ func (b *Bus) ServeUnix(path string, stop <-chan struct{}) error {
 
 	go func() {
 		<-stop
-		l.Close()
+		_ = l.Close()
 	}()
 
 	go func() {
@@ -46,7 +46,7 @@ func (b *Bus) ServeUnix(path string, stop <-chan struct{}) error {
 // The writer goroutine is stopped via readerDone when the reader exits,
 // preventing a goroutine leak when the client disconnects.
 func (b *Bus) handleSocketConn(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	sub := b.Subscribe()
 	readerDone := make(chan struct{})

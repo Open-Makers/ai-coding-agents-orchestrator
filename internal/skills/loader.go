@@ -2,107 +2,73 @@ package skills
 
 import (
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"sync"
-	"time"
 )
 
-const (
-	rawBase = "https://raw.githubusercontent.com/affaan-m/everything-claude-code/main/skills/%s/SKILL.md"
-	timeout = 10 * time.Second
-)
-
-// Loader fetches and caches skill files from GitHub.
+// Loader provides skill content from embedded files.
+// Skills are bundled into the binary at compile time — no external fetches.
 type Loader struct {
-	cacheDir   string
-	httpClient *http.Client
+	mu    sync.RWMutex
+	cache map[string]string
 }
 
-// New creates a Loader. If cacheDir is empty the XDG default is used.
-func New(cacheDir string) *Loader {
-	if cacheDir == "" {
-		cacheDir = defaultCacheDir()
-	}
+// New creates a Loader backed by embedded skill files.
+// The cacheDir parameter is kept for backward compatibility but ignored.
+func New(_ string) *Loader {
 	return &Loader{
-		cacheDir:   cacheDir,
-		httpClient: &http.Client{Timeout: timeout},
+		cache: make(map[string]string),
 	}
 }
 
-// Load returns the content of a skill by name.
-// Order: local cache → GitHub download → empty string (never blocks the caller on failure).
+// Load returns the content of a skill by name from embedded files.
 func (l *Loader) Load(name string) (string, error) {
-	if err := ensureCacheDir(l.cacheDir); err != nil {
-		return "", err
+	l.mu.RLock()
+	if content, ok := l.cache[name]; ok {
+		l.mu.RUnlock()
+		return content, nil
 	}
+	l.mu.RUnlock()
 
-	path := cachePath(l.cacheDir, name)
-
-	// cache hit
-	if data, err := os.ReadFile(path); err == nil {
-		return string(data), nil
-	}
-
-	// fetch from GitHub
-	content, err := l.fetch(name)
+	data, err := embeddedSkills.ReadFile("embedded/" + name + ".md")
 	if err != nil {
-		// non-fatal: caller continues without this skill
-		return "", nil //nolint:nilerr
+		return "", fmt.Errorf("skill %q not found: %w", name, err)
 	}
 
-	// persist to cache (best-effort)
-	_ = os.WriteFile(path, []byte(content), 0o644)
+	content := string(data)
+
+	l.mu.Lock()
+	l.cache[name] = content
+	l.mu.Unlock()
 
 	return content, nil
 }
 
-// Prefetch downloads a list of skills concurrently and caches them.
+// Prefetch preloads a list of skills into the in-memory cache.
 func (l *Loader) Prefetch(names []string) error {
-	var wg sync.WaitGroup
-	errs := make(chan error, len(names))
-
+	var firstErr error
 	for _, name := range names {
-		wg.Add(1)
-		go func(n string) {
-			defer wg.Done()
-			if _, err := l.Load(n); err != nil {
-				errs <- fmt.Errorf("prefetch %s: %w", n, err)
-			}
-		}(name)
-	}
-
-	wg.Wait()
-	close(errs)
-
-	var first error
-	for err := range errs {
-		if first == nil {
-			first = err
+		if _, err := l.Load(name); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
-	return first
+	return firstErr
 }
 
-func (l *Loader) fetch(name string) (string, error) {
-	return l.fetchURL(fmt.Sprintf(rawBase, name))
-}
-
-func (l *Loader) fetchURL(url string) (string, error) {
-	resp, err := l.httpClient.Get(url) //nolint:noctx
+// Available returns the names of all embedded skills.
+func (l *Loader) Available() []string {
+	entries, err := embeddedSkills.ReadDir("embedded")
 	if err != nil {
-		return "", fmt.Errorf("skills: get %s: %w", url, err)
+		return nil
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("skills: HTTP %d for %s", resp.StatusCode, url)
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) > 3 && name[len(name)-3:] == ".md" {
+			names = append(names, name[:len(name)-3])
+		}
 	}
-
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("skills: read body: %w", err)
-	}
-	return string(data), nil
+	return names
 }

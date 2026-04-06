@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -10,11 +8,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// EditorModel is a full-screen requirements editor.
+// EditorModel is a full-screen requirements editor using an embedded textarea.
 type EditorModel struct {
-	ta     textarea.Model
-	width  int
-	height int
+	ta          textarea.Model
+	width       int
+	height      int
+	confirmExit bool // true when waiting for save/discard confirmation
 }
 
 func NewEditor(initialContent string) EditorModel {
@@ -43,26 +42,35 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		if m.confirmExit {
+			switch msg.String() {
+			case "ctrl+s", "s":
+				content := m.ta.Value()
+				m.confirmExit = false
+				return m, func() tea.Msg { return RequirementsSavedMsg{Path: content} }
+			case "d":
+				m.confirmExit = false
+				return m, func() tea.Msg { return EditorCancelledMsg{} }
+			case "esc":
+				m.confirmExit = false
+				return m, nil
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "ctrl+s":
 			content := m.ta.Value()
 			return m, func() tea.Msg {
 				return RequirementsSavedMsg{Path: content}
 			}
-		case "ctrl+e":
-			content := m.ta.Value()
-			return m, openExternalEditor(content)
 		case "esc":
+			if strings.TrimSpace(m.ta.Value()) != "" {
+				m.confirmExit = true
+				return m, nil
+			}
 			return m, func() tea.Msg { return EditorCancelledMsg{} }
 		}
-	}
-
-	// externalEditorResult is returned by openExternalEditor cmd.
-	if result, ok := msg.(externalEditorResult); ok {
-		if result.content != "" {
-			m.ta.SetValue(result.content)
-		}
-		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -70,53 +78,27 @@ func (m EditorModel) Update(msg tea.Msg) (EditorModel, tea.Cmd) {
 	return m, cmd
 }
 
+func (m *EditorModel) SetSize(w, h int) {
+	m.width = w
+	m.height = h
+	m.ta.SetWidth(w - 4)
+	m.ta.SetHeight(h - 4)
+}
+
 func (m EditorModel) View() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
 	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
 
 	title := titleStyle.Render("Requirements Editor")
 	sep := strings.Repeat("─", m.width)
-	hints := dimStyle.Render("Ctrl+S save & start   Ctrl+E open $EDITOR   Esc back")
 
-	return strings.Join([]string{title, sep, m.ta.View(), sep, hints}, "\n")
-}
-
-// externalEditorResult carries content back from the external editor.
-type externalEditorResult struct{ content string }
-
-// openExternalEditor writes content to a temp file, opens $EDITOR, reads it back.
-func openExternalEditor(content string) tea.Cmd {
-	return func() tea.Msg {
-		tmp, err := os.CreateTemp("", "orchestrator-req-*.md")
-		if err != nil {
-			return externalEditorResult{content: content}
-		}
-		defer os.Remove(tmp.Name())
-
-		if _, err := tmp.WriteString(content); err != nil {
-			tmp.Close()
-			return externalEditorResult{content: content}
-		}
-		tmp.Close()
-
-		editor := os.Getenv("EDITOR")
-		if editor == "" {
-			editor = "vi"
-		}
-
-		cmd := exec.Command(editor, tmp.Name())
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		// tea.ExecProcess would be cleaner but requires program reference.
-		// For now use plain exec — TUI will be suspended while editor runs.
-		_ = cmd.Run()
-
-		data, err := os.ReadFile(tmp.Name())
-		if err != nil {
-			return externalEditorResult{content: content}
-		}
-		return externalEditorResult{content: string(data)}
+	var bottom string
+	if m.confirmExit {
+		bottom = warnStyle.Render("Unsaved changes — S save & start   D discard   Esc back to editing")
+	} else {
+		bottom = dimStyle.Render("Ctrl+S save & start   Esc back")
 	}
+
+	return strings.Join([]string{title, sep, m.ta.View(), sep, bottom}, "\n")
 }

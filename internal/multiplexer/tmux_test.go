@@ -3,6 +3,8 @@ package multiplexer
 import (
 	"os/exec"
 	"testing"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 )
 
 func TestTmuxMultiplexer_SkipIfNoTmux(t *testing.T) {
@@ -16,14 +18,17 @@ func TestTmuxMultiplexer_SkipIfNoTmux(t *testing.T) {
 	if err := mx.CreateSession(sessionID); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
-	defer mx.Close()
+	defer func() { _ = mx.Close() }()
 
-	pane, err := mx.NewPane("planner")
-	if err != nil {
-		t.Fatalf("NewPane: %v", err)
-	}
+	roles := []bus.AgentRole{"planner", "coder", "tester", "reviewer"}
+	for _, role := range roles {
+		pane, err := mx.NewPane(role)
+		if err != nil {
+			t.Fatalf("NewPane(%s): %v", role, err)
+		}
 
-	if err := mx.WriteToPane(pane, "echo hello"); err != nil {
-		t.Fatalf("WriteToPane: %v", err)
+		if err := mx.WriteToPane(pane, "echo hello"); err != nil {
+			t.Fatalf("WriteToPane(%s): %v", role, err)
+		}
 	}
 }

@@ -112,6 +112,11 @@ func (g *GitClient) Log(base string) ([]CommitEntry, error) {
 	return commits, nil
 }
 
+// RemoteURL returns the fetch URL of the given remote (e.g. "origin").
+func (g *GitClient) RemoteURL(name string) (string, error) {
+	return g.run("remote", "get-url", name)
+}
+
 func (g *GitClient) run(args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = g.Root

@@ -1,48 +1,21 @@
 package skills
 
 import (
-	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestLoader_FetchAndCache(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("# Test Skill\nThis is a test skill."))
-	}))
-	defer srv.Close()
+func TestLoader_LoadEmbeddedSkill(t *testing.T) {
+	l := New("")
 
-	cacheDir := t.TempDir()
-	l := &Loader{
-		cacheDir:   cacheDir,
-		httpClient: srv.Client(),
-	}
-
-	// override rawBase by patching fetch directly via a test server URL
-	// We test fetch() directly since rawBase is a package-level const.
-	// Instead, test Load() with a custom httpClient pointing to our server.
-	// We need to override the URL — simplest: replace fetch with a wrapper.
-
-	// Test via direct fetch with overridden URL.
-	content, err := l.fetchURL(srv.URL + "/skills/golang-patterns/SKILL.md")
+	content, err := l.Load("golang-patterns")
 	if err != nil {
-		t.Fatalf("fetchURL error: %v", err)
+		t.Fatalf("Load error: %v", err)
 	}
 	if content == "" {
-		t.Fatal("expected non-empty content")
+		t.Fatal("expected non-empty content for golang-patterns")
 	}
 
-	// Write to cache manually, then test cache hit.
-	path := cachePath(cacheDir, "golang-patterns")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Second load should hit cache (server could be dead).
-	srv.Close()
+	// Second load should hit in-memory cache.
 	content2, err := l.Load("golang-patterns")
 	if err != nil {
 		t.Fatalf("Load (cache hit) error: %v", err)
@@ -53,43 +26,56 @@ func TestLoader_FetchAndCache(t *testing.T) {
 }
 
 func TestLoader_NotFound(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
+	l := New("")
 
-	cacheDir := t.TempDir()
-	l := &Loader{
-		cacheDir:   cacheDir,
-		httpClient: srv.Client(),
-	}
-
-	// 404 should return empty string, no error (non-fatal)
-	content, err := l.Load("nonexistent-skill")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// content may be empty since fetch failed and cache miss
-	_ = content
-
-	// No cache file should have been written.
-	if _, err := os.Stat(filepath.Join(cacheDir, "nonexistent-skill.md")); !os.IsNotExist(err) {
-		t.Error("cache file should not exist for failed fetch")
+	_, err := l.Load("nonexistent-skill")
+	if err == nil {
+		t.Fatal("expected error for nonexistent skill")
 	}
 }
 
 func TestPrefetch(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("skill content"))
-	}))
-	defer srv.Close()
+	l := New("")
 
-	l := &Loader{
-		cacheDir:   t.TempDir(),
-		httpClient: srv.Client(),
+	err := l.Prefetch([]string{"golang-patterns", "golang-testing"})
+	if err != nil {
+		t.Fatalf("Prefetch error: %v", err)
 	}
 
-	// Prefetch shouldn't panic or error even if skills don't exist on the server.
-	err := l.Prefetch([]string{"a", "b", "c"})
-	_ = err // non-fatal
+	content, err := l.Load("golang-patterns")
+	if err != nil {
+		t.Fatalf("Load after Prefetch error: %v", err)
+	}
+	if content == "" {
+		t.Fatal("expected non-empty content after Prefetch")
+	}
+}
+
+func TestPrefetch_WithMissing(t *testing.T) {
+	l := New("")
+
+	err := l.Prefetch([]string{"golang-patterns", "nonexistent"})
+	if err == nil {
+		t.Fatal("expected error for nonexistent skill in Prefetch")
+	}
+}
+
+func TestAvailable(t *testing.T) {
+	l := New("")
+	available := l.Available()
+
+	if len(available) == 0 {
+		t.Fatal("expected at least one available skill")
+	}
+
+	found := false
+	for _, name := range available {
+		if name == "golang-patterns" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("golang-patterns not found in available skills: %v", available)
+	}
 }

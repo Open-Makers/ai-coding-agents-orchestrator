@@ -1,9 +1,12 @@
 package tui
 
 import (
+	"context"
+
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 )
 
 // BusMessageMsg wraps a bus.Message as a tea.Msg.
@@ -43,12 +46,24 @@ type FileRejectedMsg struct{ Path string }
 type GitPanelClosedMsg struct{}
 type GitRefreshMsg struct{}
 
+// pipelineReadyMsg is sent after buildAgents completes so that log output
+// from agent construction appears inside the TUI, not between TUI sessions.
+type pipelineReadyMsg struct {
+	p      *orchestrator.Pipeline
+	cancel context.CancelFunc
+}
+
 // Chat messages.
 type ChatTokenMsg struct {
 	Text string
 	Done bool
 }
 type ChatClosedMsg struct{}
+
+// PipelineDoneMsg is sent when the pipeline finishes (successfully or with an error).
+type PipelineDoneMsg struct {
+	Err error
+}
 
 // waitForBusEvent is a tea.Cmd that reads one message from the bus channel.
 func waitForBusEvent(ch <-chan bus.Message) tea.Cmd {

@@ -14,10 +14,10 @@ import (
 // It connects to a remote bus via Unix socket, subscribes for messages
 // targeted at its role, and streams them to stdout.
 //
-// In tmux mode, this process runs in its own pane and displays agent output.
+// In multiplexer mode, this process runs in its own pane and displays agent output.
 func agentCmd(args []string) {
 	fs := flag.NewFlagSet("agent", flag.ExitOnError)
-	roleFlag := fs.String("role", "", "agent role (planner|coder|tester|reviewer|fixer|pr)")
+	roleFlag := fs.String("role", "", "agent role (planner|coder|tester|reviewer|pr)")
 	sessionFlag := fs.String("session", "", "orchestrator session ID")
 	busAddrFlag := fs.String("bus-addr", "", "unix socket path of the bus server")
 	_ = fs.Parse(args)
@@ -28,11 +28,12 @@ func agentCmd(args []string) {
 	}
 
 	validRoles := map[string]bool{
-		"planner": true, "coder": true, "tester": true,
-		"reviewer": true, "fixer": true, "pr": true,
+		"pm": true, "planner": true, "coder": true, "tester": true,
+		"reviewer": true, "ux_reviewer": true, "security": true,
+		"qa": true, "pr": true,
 	}
 	if !validRoles[*roleFlag] {
-		fmt.Fprintf(os.Stderr, "invalid --role %q (must be one of: planner, coder, tester, reviewer, fixer, pr)\n", *roleFlag)
+		fmt.Fprintf(os.Stderr, "invalid --role %q (must be one of: pm, planner, coder, tester, reviewer, ux_reviewer, security, qa, pr)\n", *roleFlag)
 		os.Exit(2)
 	}
 
@@ -43,7 +44,7 @@ func agentCmd(args []string) {
 		fmt.Fprintf(os.Stderr, "agent %s: connect to bus: %v\n", role, err)
 		os.Exit(1)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	fmt.Printf("[%s] connected to session %s\n", role, *sessionFlag)
 
@@ -68,8 +69,7 @@ func agentCmd(args []string) {
 
 // printAgentMsg prints relevant bus messages to stdout in the agent pane.
 func printAgentMsg(myRole bus.AgentRole, m bus.Message) {
-	// Show messages directed at or from this role.
-	if m.From != myRole && m.To != myRole && m.To != "" {
+	if !visibleInAgentPane(myRole, m) {
 		return
 	}
 
@@ -98,4 +98,14 @@ func printAgentMsg(myRole bus.AgentRole, m bus.Message) {
 			fmt.Printf("\n[%s] done\n", myRole)
 		}
 	}
+}
+
+func visibleInAgentPane(myRole bus.AgentRole, m bus.Message) bool {
+	if m.From == myRole {
+		return true
+	}
+	if m.To == myRole {
+		return true
+	}
+	return false
 }

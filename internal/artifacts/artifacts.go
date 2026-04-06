@@ -10,7 +10,12 @@ import (
 
 const (
 	DirName                  = ".orchestrator"
+	ProjectConfigFile        = "project.yaml"
+	ModulePathFile           = "module_path"
 	RequirementsFile         = "requirements.md"
+	VisionFile               = "vision.md"
+	VisionApprovedFile       = "vision.approved"
+	MoscowFile               = "moscow.md"
 	ArchitectureFile         = "architecture.md"
 	ArchitectureApprovedFile = "architecture.approved"
 	ImplementationPlanFile   = "implementation_plan.md"
@@ -18,12 +23,16 @@ const (
 	PromptsFile              = "prompts.md"
 	PromptsApprovedFile      = "prompts.approved"
 	PlanFile                 = "plan.json"
-	PatchFile                = "patch.diff"
+	RawCoderOutputFile       = "coder_output.md"
 	ChangesFile              = "changes.md"
 	TestCmdsFile             = "test_cmds.txt"
 	TestReportFile           = "test_report.json"
 	ReviewFile               = "review.md"
-	PRDescriptionFile        = "pr_description.md"
+	UXReviewFile             = "ux_review.md"
+	SecurityReviewFile       = "security_review.md"
+	QAReviewFile             = "qa_review.md"
+	NiceToHaveFile           = "nice_to_have.md"
+	SummaryFile              = "summary.md"
 	RunLogFile               = "runlog.txt"
 )
 
@@ -67,6 +76,12 @@ func (w Workspace) ReadFile(name string) ([]byte, error) {
 	return data, nil
 }
 
+// FileExists returns true if the artifact file exists and is non-empty.
+func (w Workspace) FileExists(name string) bool {
+	info, err := os.Stat(w.Path(name))
+	return err == nil && info.Size() > 0
+}
+
 func (w Workspace) WriteJSON(name string, v any) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
@@ -87,6 +102,39 @@ func (w Workspace) ReadJSON(name string, v any) error {
 	return nil
 }
 
+// generatedArtifacts lists all files produced by PM, planner, and pipeline phases.
+// Requirements are intentionally excluded — they are user input.
+var generatedArtifacts = []string{
+	VisionFile,
+	VisionApprovedFile,
+	MoscowFile,
+	ArchitectureFile,
+	ArchitectureApprovedFile,
+	ImplementationPlanFile,
+	PlanApprovedFile,
+	PromptsFile,
+	PromptsApprovedFile,
+	PlanFile,
+	RawCoderOutputFile,
+	ChangesFile,
+	TestCmdsFile,
+	TestReportFile,
+	ReviewFile,
+	UXReviewFile,
+	SecurityReviewFile,
+	QAReviewFile,
+	NiceToHaveFile,
+	SummaryFile,
+}
+
+// CleanGeneratedArtifacts removes all generated artifacts from the workspace,
+// forcing the pipeline to regenerate everything from scratch.
+func (w Workspace) CleanGeneratedArtifacts() {
+	for _, name := range generatedArtifacts {
+		_ = os.Remove(w.Path(name))
+	}
+}
+
 // AppendRunLog appends a single line with RFC3339 timestamp.
 func (w Workspace) AppendRunLog(message string) error {
 	path := w.Path(RunLogFile)
@@ -94,7 +142,7 @@ func (w Workspace) AppendRunLog(message string) error {
 	if err != nil {
 		return fmt.Errorf("open runlog: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	line := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), message)
 	if _, err := f.WriteString(line); err != nil {

@@ -8,13 +8,15 @@ import (
 type AgentRole string
 
 const (
-	RolePlanner  AgentRole = "planner"
-	RoleCoder    AgentRole = "coder"
-	RoleTester   AgentRole = "tester"
-	RoleReviewer AgentRole = "reviewer"
-	RoleFixer    AgentRole = "fixer"
-	RolePR       AgentRole = "pr"
-	RoleSystem   AgentRole = "system"
+	RolePM         AgentRole = "pm"
+	RolePlanner    AgentRole = "planner"
+	RoleCoder      AgentRole = "coder"
+	RoleTester     AgentRole = "tester"
+	RoleReviewer   AgentRole = "reviewer"
+	RoleUXReviewer AgentRole = "ux_reviewer"
+	RoleSecurity   AgentRole = "security"
+	RoleQA         AgentRole = "qa"
+	RoleSystem     AgentRole = "system"
 )
 
 type MessageType string

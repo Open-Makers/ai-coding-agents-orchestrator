@@ -68,12 +68,11 @@ func (m PickerModel) Update(msg tea.Msg) (PickerModel, tea.Cmd) {
 		m.tree, cmd = m.tree.Update(msg)
 
 		// Handle tree selection.
-		switch msg.(type) {
+		switch msg := msg.(type) {
 		case FileSelectedMsg:
-			selected := msg.(FileSelectedMsg)
-			_ = SaveHistory(m.wsPath, selected.Path)
+			_ = SaveHistory(m.wsPath, msg.Path)
 			return m, func() tea.Msg {
-				return PickerSelectedMsg{Path: selected.Path}
+				return PickerSelectedMsg{Path: msg.Path}
 			}
 		case EditorCancelledMsg:
 			m.mode = pickerModeStart

@@ -2,40 +2,41 @@ package config
 
 func DefaultConfig() Config {
 	return Config{
+		PromptLanguage: "English",
 		Project: ProjectConfig{
-			Name:     "",
-			Language: "go",
-			TestCmd:  "go test ./...",
-			LintCmd:  "golangci-lint run",
+			Name:           "",
+			Language:       "go",
+			TestCmd:        "go test ./...",
+			LintCmd:        "golangci-lint run",
+			MaxFixAttempts: 0,
 		},
 		Agents: map[string]AgentConfig{
+			"pm": {
+				Skills: []string{"agentic-engineering"},
+			},
 			"planner": {
-				Runner: "claude",
-				Model:  "claude-sonnet-4-6",
-				Skills: []string{"agentic-engineering", "architecture-decision-records"},
+				Skills: []string{"agentic-engineering", "architecture-decision-records", "codebase-onboarding", "golang-patterns", "coding-standards"},
 			},
 			"coder": {
-				Runner: "claude",
-				Model:  "claude-sonnet-4-6",
-				Skills: []string{"golang-patterns"},
+				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},
 			},
 			"tester": {
-				Runner: "codex",
 				Skills: []string{"golang-testing", "tdd-workflow"},
 			},
 			"reviewer": {
-				Runner: "claude",
-				Model:  "claude-opus-4-6",
-				Skills: []string{"code-review", "security-scan"},
+				Skills: []string{"golang-patterns", "coding-standards"},
 			},
-			"fixer": {
-				Runner: "claude",
-				Model:  "claude-sonnet-4-6",
-				Skills: []string{"agent-harness-construction"},
+			"ux_reviewer": {
+				Skills: []string{"ux-review", "coding-standards"},
+			},
+			"security": {
+				Skills: []string{"security-scan", "security-review"},
+			},
+			"qa": {
+				Skills: []string{"golang-testing", "coding-standards"},
 			},
 			"pr": {
-				Runner: "claude",
-				Model:  "claude-sonnet-4-6",
+				Skills: []string{"git-workflow"},
 			},
 		},
 	}

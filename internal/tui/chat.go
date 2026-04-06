@@ -17,18 +17,24 @@ type chatLine struct {
 	content string
 }
 
+// ReviseFunc is called when the PM decides to revise an artifact.
+type ReviseFunc func(artifact, feedback string) error
+
 // ChatModel is a live chat panel overlay backed by an LLMRunner.
 type ChatModel struct {
-	llm      runner.LLMRunner
-	history  []runner.ConvMessage
-	lines    []chatLine
-	input    string
-	vp       viewport.Model
-	waiting  bool
-	ctx      context.Context
-	cancelFn context.CancelFunc
-	width    int
-	height   int
+	llm          runner.LLMRunner
+	history      []runner.ConvMessage
+	lines        []chatLine
+	input        string
+	vp           viewport.Model
+	waiting      bool
+	ctx          context.Context
+	cancelFn     context.CancelFunc
+	width        int
+	height       int
+	systemPrompt string
+	reviseFn     ReviseFunc // called when PM decides to revise an artifact
+	revising     bool       // true while a revision is in progress
 }
 
 // NewChat creates a ChatModel with the given LLMRunner.
@@ -37,22 +43,30 @@ func NewChat(llm runner.LLMRunner, systemContext string) ChatModel {
 	vp := viewport.New(76, 18)
 	ctx, cancel := context.WithCancel(context.Background())
 	return ChatModel{
-		llm:      llm,
-		vp:       vp,
-		ctx:      ctx,
-		cancelFn: cancel,
-		width:    80,
-		height:   24,
+		llm:          llm,
+		vp:           vp,
+		ctx:          ctx,
+		cancelFn:     cancel,
+		width:        80,
+		height:       24,
+		systemPrompt: systemContext,
 	}
+}
+
+// WithReviseFn sets a callback for artifact revision (PM chat mode).
+func (m ChatModel) WithReviseFn(fn ReviseFunc) ChatModel {
+	m.reviseFn = fn
+	return m
 }
 
 func (m ChatModel) Init() tea.Cmd { return nil }
 
 // chatSendCmd sends the current conversation to the LLM and streams tokens.
-func chatSendCmd(llm runner.LLMRunner, ctx context.Context, history []runner.ConvMessage) tea.Cmd {
+func chatSendCmd(llm runner.LLMRunner, ctx context.Context, systemPrompt string, history []runner.ConvMessage) tea.Cmd {
 	return func() tea.Msg {
 		ch, err := llm.Complete(ctx, runner.CompletionRequest{
-			Messages: history,
+			SystemPrompt: systemPrompt,
+			Messages:     history,
 		})
 		if err != nil {
 			return ChatTokenMsg{Text: "error: " + err.Error(), Done: true}
@@ -116,7 +130,7 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 			m.lines = append(m.lines, chatLine{role: "user", content: userMsg})
 			m.waiting = true
 			m.refreshViewport()
-			return m, chatSendCmd(m.llm, m.ctx, m.history)
+			return m, chatSendCmd(m.llm, m.ctx, m.systemPrompt, m.history)
 		case "backspace":
 			if len(m.input) > 0 {
 				m.input = m.input[:len(m.input)-1]
@@ -149,12 +163,35 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 						Role:    "assistant",
 						Content: last.content,
 					})
+					// Check for revision directive from PM.
+					if artifact, feedback := parseReviseDirective(last.content); artifact != "" && m.reviseFn != nil {
+						m.revising = true
+						m.refreshViewport()
+						return m, reviseArtifactCmd(m.reviseFn, artifact, feedback)
+					}
 				}
 			}
 			m.waiting = false
 			return m, nil
 		}
 		return m, chatDrainCmd(msg.ch)
+
+	case chatRevisionDoneMsg:
+		m.revising = false
+		if msg.err != nil {
+			m.lines = append(m.lines, chatLine{
+				role:    "assistant",
+				content: "⚠ revision failed: " + msg.err.Error(),
+			})
+		} else {
+			m.lines = append(m.lines, chatLine{
+				role:    "assistant",
+				content: "✓ revised " + msg.artifact + " — close chat (Esc) and re-approve the artifact",
+			})
+		}
+		m.waiting = false
+		m.refreshViewport()
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -173,7 +210,7 @@ func (m *ChatModel) refreshViewport() {
 		case "user":
 			sb.WriteString(userStyle.Render("you › ") + line.content + "\n\n")
 		case "assistant":
-			prefix := dimStyle.Render("claude › ")
+			prefix := dimStyle.Render("ai › ")
 			sb.WriteString(prefix + assistantStyle.Render(line.content) + "\n\n")
 		}
 	}
@@ -199,15 +236,22 @@ func (m ChatModel) View() string {
 
 	sep := strings.Repeat("─", m.width)
 
+	title := "Chat with PM"
+	if m.reviseFn == nil {
+		title = "Chat"
+	}
+
 	var statusLine string
-	if m.waiting {
+	if m.revising {
+		statusLine = dimStyle.Render("  revising artifact…")
+	} else if m.waiting {
 		statusLine = dimStyle.Render("  waiting… (Esc cancel)")
 	} else {
 		statusLine = inputStyle.Render("› ") + m.input + "█"
 	}
 
 	return strings.Join([]string{
-		titleStyle.Render("Chat") + "  " + dimStyle.Render("Esc close  Enter send"),
+		titleStyle.Render(title) + "  " + dimStyle.Render("Esc close  Enter send"),
 		sep,
 		m.vp.View(),
 		sep,

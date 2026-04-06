@@ -1,20 +1,27 @@
-BINARY   := orchestrator
-CMD      := ./cmd/orchestrator
-VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
-LDFLAGS  := -ldflags "-X main.version=$(VERSION)"
+BINARY      := orchestrator
+CMD         := ./cmd/orchestrator
+INSTALL_DIR := $(shell go env GOPATH)/bin
 
-.PHONY: all build test test-race lint vet clean install
+# Version: prefer .Version file, fall back to git describe, then "dev".
+VERSION     := $(shell cat .Version 2>/dev/null || git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS     := -ldflags "-X main.version=$(VERSION)"
 
-all: build
+.PHONY: all build test test-race lint vet clean install uninstall help
+
+all: vet lint test-race build install
 
 ## build: compile the binary to ./bin/orchestrator
 build:
 	mkdir -p bin
 	go build $(LDFLAGS) -o bin/$(BINARY) $(CMD)
 
-## install: install to $GOPATH/bin (or ~/go/bin)
-install:
+## install: remove previous binary, then install to $GOPATH/bin
+install: uninstall
 	go install $(LDFLAGS) $(CMD)
+
+## uninstall: remove the installed binary from $GOPATH/bin
+uninstall:
+	rm -f $(INSTALL_DIR)/$(BINARY)
 
 ## test: run all tests
 test:

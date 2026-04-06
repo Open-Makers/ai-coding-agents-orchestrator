@@ -21,16 +21,16 @@ const (
 
 // GitPanelModel is a lazygit-inspired git panel overlay.
 type GitPanelModel struct {
-	gc       *gitclient.GitClient
-	files    []gitclient.FileStatus
-	cursor   int
-	focus    gitFocus
-	diff     viewport.Model
+	gc        *gitclient.GitClient
+	files     []gitclient.FileStatus
+	cursor    int
+	focus     gitFocus
+	diff      viewport.Model
 	commitMsg string
 	statusMsg string
-	err      string
-	width    int
-	height   int
+	err       string
+	width     int
+	height    int
 }
 
 // NewGitPanel creates a GitPanelModel for the given repo root.
@@ -44,10 +44,10 @@ func NewGitPanel(root string) (GitPanelModel, error) {
 	vp := viewport.New(60, 20)
 
 	m := GitPanelModel{
-		gc:    gc,
-		files: files,
-		diff:  vp,
-		width: 80,
+		gc:     gc,
+		files:  files,
+		diff:   vp,
+		width:  80,
 		height: 24,
 	}
 	m.loadDiff()
@@ -232,7 +232,7 @@ func (m GitPanelModel) View() string {
 
 	// File list panel
 	var filesSB strings.Builder
-	label := "Files"
+	var label string
 	if m.focus == gitFocusFiles {
 		label = activeStyle.Render("Files")
 	} else {
@@ -248,9 +248,9 @@ func (m GitPanelModel) View() string {
 		name := f.Path
 		var line string
 		if f.Staged {
-			line = stagedStyle.Render(code+" "+name)
+			line = stagedStyle.Render(code + " " + name)
 		} else {
-			line = unstagedStyle.Render(code+" "+name)
+			line = unstagedStyle.Render(code + " " + name)
 		}
 		if i == m.cursor && m.focus == gitFocusFiles {
 			line = "► " + line
@@ -263,7 +263,7 @@ func (m GitPanelModel) View() string {
 	filesPanel := borderStyle.Width(fileW).Render(filesSB.String())
 
 	// Diff panel
-	diffLabel := "Diff"
+	var diffLabel string
 	if m.focus == gitFocusDiff {
 		diffLabel = activeStyle.Render("Diff (↑↓ scroll, Tab/Esc back)")
 	} else {
@@ -287,7 +287,7 @@ func (m GitPanelModel) View() string {
 		bottom = bottom + "  " + dimStyle.Render(m.statusMsg)
 	}
 	if m.err != "" {
-		bottom = errorStyle.Render("error: "+m.err)
+		bottom = errorStyle.Render("error: " + m.err)
 	}
 
 	return strings.Join([]string{

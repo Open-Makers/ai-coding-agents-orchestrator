@@ -1,6 +1,11 @@
 package runner
 
-import "context"
+import (
+	"context"
+	"strings"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/skills"
+)
 
 // ConvMessage is a single turn in a conversation.
 type ConvMessage struct {
@@ -26,4 +31,33 @@ type CompletionRequest struct {
 // LLMRunner is the common interface for all LLM backends.
 type LLMRunner interface {
 	Complete(ctx context.Context, req CompletionRequest) (<-chan Token, error)
+}
+
+// ResolveSkills loads skill content and appends it to the system prompt.
+// Returns the enriched system prompt. If loader is nil or no skills match,
+// the original prompt is returned unchanged.
+func ResolveSkills(systemPrompt string, skillNames []string, loader *skills.Loader) string {
+	if loader == nil || len(skillNames) == 0 {
+		return systemPrompt
+	}
+
+	var loaded []string
+	for _, name := range skillNames {
+		content, err := loader.Load(name)
+		if err != nil || content == "" {
+			continue
+		}
+		loaded = append(loaded, content)
+	}
+
+	if len(loaded) == 0 {
+		return systemPrompt
+	}
+
+	var sb strings.Builder
+	sb.WriteString(systemPrompt)
+	sb.WriteString("\n\n<skills>\n")
+	sb.WriteString(strings.Join(loaded, "\n---\n"))
+	sb.WriteString("\n</skills>")
+	return sb.String()
 }

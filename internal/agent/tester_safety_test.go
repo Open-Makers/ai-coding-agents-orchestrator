@@ -1,6 +1,11 @@
 package agent
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
+)
 
 func TestSanitiseTestCmd_OK(t *testing.T) {
 	valid := []string{
@@ -13,7 +18,7 @@ func TestSanitiseTestCmd_OK(t *testing.T) {
 		"go test -race -timeout 120s ./...",
 	}
 	for _, cmd := range valid {
-		if err := sanitiseTestCmd(cmd); err != nil {
+		if err := executil.Sanitize(cmd); err != nil {
 			t.Errorf("expected %q to be valid, got: %v", cmd, err)
 		}
 	}
@@ -26,12 +31,12 @@ func TestSanitiseTestCmd_Rejected(t *testing.T) {
 	}{
 		{"go test ./...\nrm -rf /", "embedded newline"},
 		{"go test ./...\rrm -rf /", "embedded carriage return"},
-		{"go test " + string(make([]byte, maxTestCmdLen)), "too long"},
+		{"go test " + strings.Repeat("x", 600), "too long"},
 		{"echo \x00hello", "null byte (control char)"},
 		{"echo \x01hello", "SOH control char"},
 	}
 	for _, tc := range cases {
-		if err := sanitiseTestCmd(tc.cmd); err == nil {
+		if err := executil.Sanitize(tc.cmd); err == nil {
 			t.Errorf("expected %q to be rejected (%s)", tc.cmd, tc.reason)
 		}
 	}

@@ -4,13 +4,16 @@ import "github.com/charmbracelet/lipgloss"
 
 // Role colors.
 var roleColors = map[string]lipgloss.Color{
-	"planner":  lipgloss.Color("86"),  // cyan
-	"coder":    lipgloss.Color("69"),  // blue
-	"tester":   lipgloss.Color("220"), // yellow
-	"reviewer": lipgloss.Color("213"), // magenta
-	"fixer":    lipgloss.Color("203"), // red
-	"pr":       lipgloss.Color("82"),  // green
-	"system":   lipgloss.Color("245"), // gray
+	"pm":          lipgloss.Color("178"), // gold
+	"planner":     lipgloss.Color("86"),  // cyan
+	"coder":       lipgloss.Color("69"),  // blue
+	"tester":      lipgloss.Color("220"), // yellow
+	"reviewer":    lipgloss.Color("141"), // purple
+	"ux_reviewer": lipgloss.Color("213"), // pink
+	"security":    lipgloss.Color("196"), // red
+	"qa":          lipgloss.Color("208"), // orange
+	"pr":          lipgloss.Color("82"),  // green
+	"system":      lipgloss.Color("245"), // gray
 }
 
 func roleColor(role string) lipgloss.Color {
@@ -29,11 +32,12 @@ var (
 	styleGate    = lipgloss.NewStyle().Foreground(lipgloss.Color("220")).Bold(true)
 )
 
-// Panel border.
-var stylePanelBorder = lipgloss.NewStyle().
-	Border(lipgloss.RoundedBorder()).
-	BorderForeground(lipgloss.Color("240")).
-	Padding(0, 1)
+// Gate banner shown when pipeline is waiting for human approval.
+var styleGateBanner = lipgloss.NewStyle().
+	Background(lipgloss.Color("130")).
+	Foreground(lipgloss.Color("230")).
+	Bold(true).
+	Padding(0, 2)
 
 // Conversation line.
 var styleConvTimestamp = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
