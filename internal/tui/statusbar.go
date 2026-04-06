@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // StatusBarModel renders a single-line status bar at the bottom.
