@@ -325,7 +325,10 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 		if err != nil {
 			continue
 		}
-		sb.WriteString(fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, string(content)))
+		_, err = fmt.Fprintf(&sb, "**%s**\n```\n%s\n```\n\n", path, string(content))
+		if err != nil {
+			return ""
+		}
 	}
 	return sb.String()
 }

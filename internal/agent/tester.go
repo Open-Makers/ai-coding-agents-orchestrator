@@ -64,7 +64,7 @@ func (a *TesterAgent) GenerateTests(ctx context.Context, files []string) error {
 	return a.generateTests(ctx, files)
 }
 
-func (a *TesterAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
+func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error) {
 
 	report := TestReport{Success: true}
 
@@ -137,7 +137,10 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 		if err != nil {
 			continue
 		}
-		sourceContext.WriteString(fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, string(content)))
+		_, err = fmt.Fprintf(&sourceContext, "**%s**\n```\n%s\n```\n\n", path, string(content))
+		if err != nil {
+			return err
+		}
 	}
 
 	if sourceContext.Len() == 0 {

@@ -862,22 +862,37 @@ func (p *Pipeline) emitSummary() {
 
 	for _, ph := range phases {
 		if _, ok := p.agents[ph.role]; !ok {
-			sb.WriteString(fmt.Sprintf("  ○ %s — skipped\n", ph.name))
+			_, err := fmt.Fprintf(&sb, "  ○ %s — skipped\n", ph.name)
+			if err != nil {
+				return
+			}
 			continue
 		}
 		if p.ws.FileExists(ph.file) {
-			sb.WriteString(fmt.Sprintf("  ✓ %s — passed\n", ph.name))
+			_, err := fmt.Fprintf(&sb, "  ✓ %s — passed\n", ph.name)
+			if err != nil {
+				return
+			}
 		} else {
-			sb.WriteString(fmt.Sprintf("  ? %s — no output\n", ph.name))
+			_, err := fmt.Fprintf(&sb, "  ? %s — no output\n", ph.name)
+			if err != nil {
+				return
+			}
 		}
 	}
 
 	// Nice-to-have summary.
 	total := p.totalNiceToHave()
 	if total > 0 {
-		sb.WriteString(fmt.Sprintf("\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile))
+		_, err := fmt.Fprintf(&sb, "\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile)
+		if err != nil {
+			return
+		}
 		for phase, items := range p.niceToHave {
-			sb.WriteString(fmt.Sprintf("     • %s: %d items\n", phase, len(items)))
+			_, err := fmt.Fprintf(&sb, "     • %s: %d items\n", phase, len(items))
+			if err != nil {
+				return
+			}
 		}
 	}
 
@@ -889,7 +904,10 @@ func (p *Pipeline) emitSummary() {
 		artifacts.NiceToHaveFile,
 	} {
 		if p.ws.FileExists(file) {
-			sb.WriteString(fmt.Sprintf("    • %s\n", file))
+			_, err := fmt.Fprintf(&sb, "    • %s\n", file)
+			if err != nil {
+				return
+			}
 		}
 	}
 

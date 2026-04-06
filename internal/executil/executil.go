@@ -73,7 +73,10 @@ func (r *Runner) Run(command string) Result {
 		}
 		if ctx.Err() == context.DeadlineExceeded {
 			exitCode = 124 // same as timeout(1)
-			stderrBuf.WriteString(fmt.Sprintf("\ncommand timed out after %s", r.timeout))
+			_, err := fmt.Fprintf(&stderrBuf, "\ncommand timed out after %s", r.timeout)
+			if err != nil {
+				return Result{}
+			}
 		}
 	}
 
@@ -108,7 +111,10 @@ func (r *Runner) RunUnchecked(command string) Result {
 		}
 		if ctx.Err() == context.DeadlineExceeded {
 			exitCode = 124
-			stderrBuf.WriteString(fmt.Sprintf("\ncommand timed out after %s", r.timeout))
+			_, err := fmt.Fprintf(&stderrBuf, "\ncommand timed out after %s", r.timeout)
+			if err != nil {
+				return Result{}
+			}
 		}
 	}
 

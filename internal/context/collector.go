@@ -100,7 +100,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	if p.ProjectType != "" {
-		sb.WriteString(fmt.Sprintf("### Project Type: %s\n\n", p.ProjectType))
+		_, err := fmt.Fprintf(&sb, "### Project Type: %s\n\n", p.ProjectType)
+		if err != nil {
+			return ""
+		}
 	}
 
 	if p.TreeStructure != "" {
@@ -114,7 +117,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 		if len(p.Files) < limit {
 			limit = len(p.Files)
 		}
-		sb.WriteString(fmt.Sprintf("### Files (%d total, showing first %d)\n```\n", len(p.Files), limit))
+		_, err := fmt.Fprintf(&sb, "### Files (%d total, showing first %d)\n```\n", len(p.Files), limit)
+		if err != nil {
+			return ""
+		}
 		sb.WriteString(strings.Join(p.Files[:limit], "\n"))
 		sb.WriteString("\n```\n\n")
 	}
@@ -141,7 +147,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 		sb.WriteString("### Existing Source Code\n")
 		sb.WriteString("Below are the key source files in the project. Study them carefully before making changes.\n\n")
 		for name, content := range p.SourceFiles {
-			sb.WriteString(fmt.Sprintf("**%s**\n```\n", name))
+			_, err := fmt.Fprintf(&sb, "**%s**\n```\n", name)
+			if err != nil {
+				return ""
+			}
 			if len(content) > maxSourceFileSize {
 				sb.WriteString(content[:maxSourceFileSize])
 				sb.WriteString("\n... (truncated)")
@@ -153,7 +162,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	for name, content := range p.AlwaysInclude {
-		sb.WriteString(fmt.Sprintf("### %s\n```\n", name))
+		_, err := fmt.Fprintf(&sb, "### %s\n```\n", name)
+		if err != nil {
+			return ""
+		}
 		if len(content) > 3000 {
 			sb.WriteString(content[:3000])
 			sb.WriteString("\n... (truncated)")
@@ -191,7 +203,7 @@ func detectProjectType(root string) string {
 }
 
 // detectBrownfield returns true if the project already has meaningful source code.
-func detectBrownfield(files []string, projectType string) bool {
+func detectBrownfield(files []string, _ string) bool {
 	sourceCount := 0
 	for _, f := range files {
 		if isSourceFile(f) {
@@ -342,7 +354,10 @@ func buildTreeStructure(files []string) string {
 		depth := strings.Count(d, string(filepath.Separator))
 		indent := strings.Repeat("  ", depth)
 		name := filepath.Base(d)
-		sb.WriteString(fmt.Sprintf("%s%s/\n", indent, name))
+		_, err := fmt.Fprintf(&sb, "%s%s/\n", indent, name)
+		if err != nil {
+			return ""
+		}
 	}
 	return sb.String()
 }
