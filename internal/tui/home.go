@@ -68,6 +68,10 @@ type HomeModel struct {
 	width   int
 	height  int
 
+	// projectValid is false when root is not a real project directory
+	// (e.g. home dir or missing project markers). Disables Run, Setup, Clean.
+	projectValid bool
+
 	// Cached project info — computed once in NewHomeModel, stable across renders.
 	cachedRunner     string
 	cachedModel      string
@@ -122,6 +126,7 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		root:             root,
 		wsPath:           wsPath,
 		history:          history,
+		projectValid:     isValidProjectRoot(root),
 		cachedRunner:     runnerName,
 		cachedModel:      modelName,
 		cachedProject:    projectName,
@@ -135,7 +140,7 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 			{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
 			{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
 			{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
-			{icon: "✦", label: "Clean Workspace", desc: "Remove artifacts, keep config", action: homeActionClean, key: "c"},
+			{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports, keep code and config", action: homeActionClean, key: "c"},
 			{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
 		},
 		width:  80,
@@ -184,18 +189,27 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			}
 		case "enter", " ":
 			selected := m.items[m.cursor].action
+			if !m.projectValid && requiresProject(selected) {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			if selected == homeActionQuit {
 				m.confirmQuit = true
 			} else {
 				return m, m.selectAction(selected)
 			}
 		case "s", "S":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionSetup)
 		case "g", "G":
 			return m, m.selectAction(homeActionGlobalSettings)
 		case "o", "O":
 			return m, m.selectAction(homeActionOpenProject)
 		case "c", "C":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionClean)
 		case "q", "Q":
 			m.confirmQuit = true
@@ -209,14 +223,23 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 		case "right":
 			m.scrollX += horizontalScrollStep
 		case "1":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionRun)
 		case "2":
 			return m, m.selectAction(homeActionOpenProject)
 		case "3":
 			return m, m.selectAction(homeActionGlobalSettings)
 		case "4":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionSetup)
 		case "5":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionClean)
 		case "6":
 			m.confirmQuit = true
@@ -518,9 +541,33 @@ func (m HomeModel) renderInfoCard(contentWidth int) string {
 	labelStyle := lipgloss.NewStyle().Foreground(p.dim).Width(12)
 	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
 
+	cardW := contentWidth/2 - 2
+	if contentWidth < 90 {
+		cardW = contentWidth - 4
+	}
+
 	var lines []string
 	lines = append(lines, titleStyle.Render(" ◈ PROJECT"))
 	lines = append(lines, "")
+
+	if !m.projectValid {
+		warnStyle := lipgloss.NewStyle().Foreground(p.gold)
+		lines = append(lines, warnStyle.Render("  ⚠ No project selected"))
+		lines = append(lines, "")
+		lines = append(lines, dimStyle.Render("  Press ")+
+			lipgloss.NewStyle().Foreground(p.accent).Bold(true).Render("o")+
+			dimStyle.Render(" to open a project directory"))
+		lines = append(lines, "")
+		lines = append(lines, dimStyle.Render("  Current directory is not a"))
+		lines = append(lines, dimStyle.Render("  recognized project root."))
+
+		return lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(p.gold).
+			Padding(0, 1).
+			Width(cardW).
+			Render(strings.Join(lines, "\n"))
+	}
 
 	row := func(label, value string, style lipgloss.Style) {
 		lines = append(lines, fmt.Sprintf("  %s %s", labelStyle.Render(label), style.Render(value)))
@@ -550,11 +597,6 @@ func (m HomeModel) renderInfoCard(contentWidth int) string {
 		}
 	}
 
-	cardW := contentWidth/2 - 2
-	if contentWidth < 90 {
-		cardW = contentWidth - 4
-	}
-
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(p.border).
@@ -576,7 +618,7 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 		p.accent, // Open Project
 		p.cyan,   // Global Settings
 		p.gold,   // Project Setup
-		p.red,    // Clean Workspace
+		p.red,    // Reset Artifacts
 		p.dim,    // Quit
 	}
 
@@ -594,11 +636,22 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 	lines = append(lines, "")
 
 	for i, item := range m.items {
+		disabled := !m.projectValid && requiresProject(item.action)
+
 		itemColor := p.bright
 		if i < len(itemColors) {
 			itemColor = itemColors[i]
 		}
+		if disabled {
+			itemColor = p.dim
+		}
+
 		key := dimStyle.Render("[" + item.key + "]")
+
+		desc := item.desc
+		if disabled {
+			desc = "Open a project first (o)"
+		}
 
 		if i == m.cursor {
 			label := fmt.Sprintf(" %s %s", item.icon, strings.ToUpper(item.label))
@@ -610,12 +663,12 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 				Render(label)
 			activeMarker := lipgloss.NewStyle().Foreground(itemColor).Bold(true)
 			lines = append(lines, activeMarker.Render("▸")+activeLine+" "+key)
-			lines = append(lines, "  "+dimStyle.Render("  "+item.desc))
+			lines = append(lines, "  "+dimStyle.Render("  "+desc))
 		} else {
 			inactiveStyle := lipgloss.NewStyle().Foreground(itemColor)
 			label := fmt.Sprintf("  %s %s", item.icon, strings.ToUpper(item.label))
 			lines = append(lines, inactiveStyle.Render(label)+"  "+key)
-			lines = append(lines, "  "+dimStyle.Render("  "+item.desc))
+			lines = append(lines, "  "+dimStyle.Render("  "+desc))
 		}
 		if i < len(m.items)-1 {
 			lines = append(lines, "")
@@ -710,7 +763,7 @@ func (m HomeModel) renderFooter(style lipgloss.Style) string {
 		hint("o", "project"),
 		hint("g", "global"),
 		hint("s", "setup"),
-		hint("c", "clean"),
+		hint("c", "reset"),
 		hint("q", "quit"),
 	)
 	left := strings.Join(hints, "  ")
@@ -836,4 +889,35 @@ func (m HomeModel) workspaceStatus() string {
 		return "◇ workspace ready"
 	}
 	return "◆ artifacts: " + strings.Join(found, ", ")
+}
+
+// isValidProjectRoot returns true when root looks like a real project directory.
+// It rejects the user's home directory and directories without any project markers.
+func isValidProjectRoot(root string) bool {
+	if root == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && filepath.Clean(root) == filepath.Clean(home) {
+		return false
+	}
+	// Reuses projectMarkers from dir_browser.go, plus .orchestrator workspace.
+	markers := append(projectMarkers, ".orchestrator")
+	for _, marker := range markers {
+		if _, err := os.Stat(filepath.Join(root, marker)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// requiresProject returns true for actions that need a valid project directory.
+func requiresProject(action homeAction) bool {
+	switch action {
+	case homeActionRun, homeActionSetup, homeActionClean:
+		return true
+	case homeActionOpenProject, homeActionGlobalSettings, homeActionQuit:
+		return false
+	}
+	return false
 }

@@ -387,6 +387,7 @@ func TestHomeModel_HorizontalScroll(t *testing.T) {
 
 func TestHomeModel_RenderInfoCard_ShowsAllOverrides(t *testing.T) {
 	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, ".git"), 0o755)
 	cfg := newTestConfig()
 	m := NewHomeModel(cfg, root)
 	m.width, m.height = 120, 40
@@ -573,6 +574,137 @@ func TestHomeModel_RenderHistory_WithEntries(t *testing.T) {
 // containsText strips ANSI codes and checks for substring presence.
 func containsText(s, substr string) bool {
 	return strings.Contains(stripAnsi(s), substr)
+}
+
+func TestIsValidProjectRoot_RejectsEmptyRoot(t *testing.T) {
+	if isValidProjectRoot("") {
+		t.Error("empty root should be invalid")
+	}
+}
+
+func TestIsValidProjectRoot_RejectsHomeDir(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+	if isValidProjectRoot(home) {
+		t.Error("home directory should be invalid project root")
+	}
+}
+
+func TestIsValidProjectRoot_AcceptsProjectWithGit(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	if !isValidProjectRoot(root) {
+		t.Error("directory with .git should be valid")
+	}
+}
+
+func TestIsValidProjectRoot_AcceptsProjectWithGoMod(t *testing.T) {
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "go.mod"), []byte("module test"), 0o644)
+	if !isValidProjectRoot(root) {
+		t.Error("directory with go.mod should be valid")
+	}
+}
+
+func TestIsValidProjectRoot_AcceptsProjectWithOrchestrator(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, ".orchestrator"), 0o755)
+	if !isValidProjectRoot(root) {
+		t.Error("directory with .orchestrator should be valid")
+	}
+}
+
+func TestIsValidProjectRoot_RejectsBareDir(t *testing.T) {
+	root := t.TempDir()
+	if isValidProjectRoot(root) {
+		t.Error("bare temp directory should be invalid")
+	}
+}
+
+func TestHomeModel_ProjectValid_WithMarker(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	m := NewHomeModel(newTestConfig(), root)
+	if !m.projectValid {
+		t.Error("projectValid should be true for directory with .git")
+	}
+}
+
+func TestHomeModel_ProjectValid_WithoutMarker(t *testing.T) {
+	root := t.TempDir()
+	m := NewHomeModel(newTestConfig(), root)
+	if m.projectValid {
+		t.Error("projectValid should be false for bare temp directory")
+	}
+}
+
+func TestHomeModel_DisabledAction_RedirectsToOpenProject(t *testing.T) {
+	root := t.TempDir() // no project markers → projectValid=false
+	m := NewHomeModel(newTestConfig(), root)
+	m.width, m.height = 120, 40
+	m.syncViewport()
+
+	// Press '1' (Run Pipeline shortcut) — should redirect to Open Project.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if cmd == nil {
+		t.Fatal("expected a command from disabled Run action")
+	}
+	msg := cmd()
+	selected, ok := msg.(homeSelectedMsg)
+	if !ok {
+		t.Fatal("expected homeSelectedMsg")
+	}
+	if selected.action != homeActionOpenProject {
+		t.Errorf("expected redirect to homeActionOpenProject, got %d", selected.action)
+	}
+}
+
+func TestHomeModel_EnabledAction_RunsPipeline(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	m := NewHomeModel(newTestConfig(), root)
+	m.width, m.height = 120, 40
+	m.syncViewport()
+
+	// Press '1' (Run Pipeline shortcut) — should fire homeActionRun.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if cmd == nil {
+		t.Fatal("expected a command from enabled Run action")
+	}
+	msg := cmd()
+	selected, ok := msg.(homeSelectedMsg)
+	if !ok {
+		t.Fatal("expected homeSelectedMsg")
+	}
+	if selected.action != homeActionRun {
+		t.Errorf("expected homeActionRun, got %d", selected.action)
+	}
+}
+
+func TestHomeModel_InfoCard_NoProject(t *testing.T) {
+	root := t.TempDir()
+	m := NewHomeModel(newTestConfig(), root)
+	m.width, m.height = 120, 40
+	m.syncViewport()
+
+	card := m.renderInfoCard(100)
+	if !containsText(card, "No project selected") {
+		t.Error("info card should show 'No project selected' for invalid project")
+	}
+}
+
+func TestHomeModel_Menu_DisabledDescription(t *testing.T) {
+	root := t.TempDir()
+	m := NewHomeModel(newTestConfig(), root)
+	m.width, m.height = 120, 40
+	m.syncViewport()
+
+	menu := m.renderMenu(100)
+	if !containsText(menu, "Open a project first") {
+		t.Error("disabled menu items should show 'Open a project first'")
+	}
 }
 
 // stripAnsi removes ANSI escape sequences for easier text assertions.
