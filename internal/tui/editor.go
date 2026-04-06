@@ -86,9 +86,9 @@ func (m *EditorModel) SetSize(w, h int) {
 }
 
 func (m EditorModel) View() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.warn)
 
 	title := titleStyle.Render("Requirements Editor")
 	sep := strings.Repeat("─", m.width)

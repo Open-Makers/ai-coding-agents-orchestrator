@@ -41,17 +41,17 @@ var homePalette = struct {
 	accent, green, dim, bright, gold, cyan, red lipgloss.Color
 	border, activeBg, headerBg, footerBg        lipgloss.Color
 }{
-	accent:   lipgloss.Color("69"),
-	green:    lipgloss.Color("82"),
-	dim:      lipgloss.Color("240"),
-	bright:   lipgloss.Color("252"),
-	gold:     lipgloss.Color("178"),
-	cyan:     lipgloss.Color("86"),
-	red:      lipgloss.Color("203"),
-	border:   lipgloss.Color("237"),
-	activeBg: lipgloss.Color("236"),
-	headerBg: lipgloss.Color("234"),
-	footerBg: lipgloss.Color("235"),
+	accent:   lipgloss.Color("#7aa2f7"), // blue accent for titles
+	green:    lipgloss.Color("#9ece6a"), // green
+	dim:      crt.dim,
+	bright:   crt.bright,
+	gold:     lipgloss.Color("#e0af68"), // warm gold
+	cyan:     lipgloss.Color("#2ac3de"), // cyan
+	red:      lipgloss.Color("#f7768e"), // coral
+	border:   lipgloss.Color("#3b4261"), // slightly brighter border
+	activeBg: crt.muted,
+	headerBg: crt.panelBg,
+	footerBg: crt.panelBg,
 }
 
 // ── HomeModel ────────────────────────────────────────────────────────────────
@@ -244,7 +244,7 @@ func (m HomeModel) View() string {
 		Width(m.width)
 
 	header := headerStyle.Render(
-		"◆  orchestrator v" + Version,
+		"◈  O R C H E S T R A T O R  v" + Version,
 	)
 
 	footer := m.renderFooter(footerStyle)
@@ -298,7 +298,7 @@ func (m HomeModel) renderContent() string {
 	logoBlock := m.renderLogo(contentWidth)
 	pipelineBlock := m.renderPipeline(contentWidth)
 
-	sep := dimStyle.Render(strings.Repeat("─", contentWidth))
+	sep := lipgloss.NewStyle().Foreground(homePalette.border).Render(strings.Repeat("─", contentWidth))
 
 	infoBlock := m.renderInfoCard(contentWidth)
 	menuBlock := m.renderMenu(contentWidth)
@@ -339,17 +339,17 @@ func (m HomeModel) renderContent() string {
 
 	// Quit confirmation overlay.
 	if m.confirmQuit {
-		warnStyle := lipgloss.NewStyle().Foreground(homePalette.red).Bold(true)
+		warnStyle := lipgloss.NewStyle().Foreground(crt.warn).Bold(true)
 		confirmBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(homePalette.red).
+			BorderForeground(crt.warn).
 			Padding(1, 3).
 			Render(
-				warnStyle.Render("  Quit orchestrator?") + "\n\n" +
+				warnStyle.Render("  QUIT ORCHESTRATOR?") + "\n\n" +
 					dimStyle.Render("  Press ") +
-					lipgloss.NewStyle().Foreground(homePalette.bright).Bold(true).Render("y") +
+					lipgloss.NewStyle().Foreground(crt.bright).Bold(true).Render("y") +
 					dimStyle.Render(" or ") +
-					lipgloss.NewStyle().Foreground(homePalette.bright).Bold(true).Render("Enter") +
+					lipgloss.NewStyle().Foreground(crt.bright).Bold(true).Render("Enter") +
 					dimStyle.Render(" to confirm, any other key to cancel"),
 			)
 		placeW := m.width
@@ -382,35 +382,97 @@ func (m HomeModel) renderContent() string {
 	return horizontalSlice(content, scrollX, m.width)
 }
 
+// ── Block-art pixel font ─────────────────────────────────────────────────────
+
+// blockGlyphs defines each letter as a 4-wide × 5-tall pixel grid.
+// '#' = filled pixel, '.' = empty pixel.
+var blockGlyphs = map[rune][]string{
+	'O': {".##.", "#..#", "#..#", "#..#", ".##."},
+	'R': {"###.", "#..#", "###.", "#.#.", "#..#"},
+	'C': {".###", "#...", "#...", "#...", ".###"},
+	'H': {"#..#", "#..#", "####", "#..#", "#..#"},
+	'E': {"####", "#...", "###.", "#...", "####"},
+	'S': {"####", "#...", ".##.", "...#", "####"},
+	'T': {"####", ".##.", ".##.", ".##.", ".##."},
+	'A': {".##.", "#..#", "####", "#..#", "#..#"},
+	' ': {"....", "....", "....", "....", "...."},
+}
+
+// renderBlockText renders text as chunky pixel-art using Unicode half-block characters.
+// 5 pixel rows → 3 display rows via ▀▄█ compositing.
+func renderBlockText(text string) []string {
+	pixelRows := make([]string, 5)
+	for i, ch := range text {
+		glyph := blockGlyphs[ch]
+		if glyph == nil {
+			glyph = blockGlyphs[' ']
+		}
+		if i > 0 {
+			for r := range pixelRows {
+				pixelRows[r] += "."
+			}
+		}
+		for r := range pixelRows {
+			pixelRows[r] += glyph[r]
+		}
+	}
+
+	pairs := [][2]int{{0, 1}, {2, 3}, {4, -1}}
+	result := make([]string, len(pairs))
+	for i, pair := range pairs {
+		top := pixelRows[pair[0]]
+		bot := ""
+		if pair[1] >= 0 {
+			bot = pixelRows[pair[1]]
+		} else {
+			bot = strings.Repeat(".", len(top))
+		}
+		var sb strings.Builder
+		for j := 0; j < len(top); j++ {
+			t, b := top[j] == '#', bot[j] == '#'
+			switch {
+			case t && b:
+				sb.WriteRune('█')
+			case t:
+				sb.WriteRune('▀')
+			case b:
+				sb.WriteRune('▄')
+			default:
+				sb.WriteRune(' ')
+			}
+		}
+		result[i] = sb.String()
+	}
+	return result
+}
+
 // ── Logo ─────────────────────────────────────────────────────────────────────
 
 func (m HomeModel) renderLogo(maxW int) string {
-	p := homePalette
-	logoStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
-	tagStyle := lipgloss.NewStyle().Foreground(p.dim).Italic(true)
+	tagStyle := lipgloss.NewStyle().Foreground(homePalette.dim)
 
-	logo := []string{
-		`                 _               _             _              `,
-		`   ___  _ __ ___| |__   ___  ___| |_ _ __ __ _| |_ ___  _ __ `,
-		`  / _ \| '__/ __| '_ \ / _ \/ __| __| '__/ _' | __/ _ \| '__|`,
-		` | (_) | | | (__| | | |  __/\__ \ |_| | | (_| | || (_) | |   `,
-		`  \___/|_|  \___|_| |_|\___||___/\__|_|  \__,_|\__\___/|_|   `,
-	}
-
-	compact := maxW < 64
-	if compact {
-		// Smaller terminals get a simple one-liner.
+	if maxW < 62 {
+		titleStyle := lipgloss.NewStyle().Foreground(homePalette.gold).Bold(true)
 		return lipgloss.JoinVertical(lipgloss.Center,
-			logoStyle.Render("◆ ORCHESTRATOR"),
-			tagStyle.Render("AI-powered multi-agent coding pipeline"),
+			titleStyle.Render("◈ ORCHESTRATOR"),
+			tagStyle.Render("AI multi-agent coding pipeline"),
 		)
 	}
 
+	blockLines := renderBlockText("ORCHESTRATOR")
+
+	glowBright := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd787")).Bold(true)
+	glowDim := lipgloss.NewStyle().Foreground(lipgloss.Color("#d7af5f"))
+
 	var lines []string
-	for _, l := range logo {
-		lines = append(lines, logoStyle.Render(l))
+	for i, bl := range blockLines {
+		if i < 2 {
+			lines = append(lines, glowBright.Render(bl))
+		} else {
+			lines = append(lines, glowDim.Render(bl))
+		}
 	}
-	lines = append(lines, tagStyle.Render("  AI-powered multi-agent coding pipeline"))
+	lines = append(lines, tagStyle.Render("       AI-powered multi-agent coding pipeline"))
 
 	return strings.Join(lines, "\n")
 }
@@ -418,36 +480,22 @@ func (m HomeModel) renderLogo(maxW int) string {
 // ── Pipeline visualisation ───────────────────────────────────────────────────
 
 func (m HomeModel) renderPipeline(maxW int) string {
-	agents := []struct {
-		label string
-		role  string
-	}{
-		{"PM", "pm"},
-		{"Plan", "planner"},
-		{"Code", "coder"},
-		{"Test", "tester"},
-		{"Review", "reviewer"},
-		{"UX", "ux_reviewer"},
-		{"Sec", "security"},
-		{"QA", "qa"},
-		{"PR", "pr"},
-	}
+	agents := []string{"PM", "PLAN", "CODE", "TEST", "REVIEW", "UX", "SEC", "QA", "PR"}
 
-	dimArrow := lipgloss.NewStyle().Foreground(homePalette.dim).Render(" → ")
+	arrow := lipgloss.NewStyle().Foreground(crt.dim).Render(" → ")
 
 	var parts []string
-	for _, ag := range agents {
-		c := roleColor(ag.role)
-		badge := lipgloss.NewStyle().
-			Foreground(c).
-			Bold(true).
-			Render(ag.label)
-		parts = append(parts, badge)
+	for _, label := range agents {
+		color := crt.primary
+		if c, ok := pipelineColors[label]; ok {
+			color = c
+		}
+		style := lipgloss.NewStyle().Foreground(color).Bold(true)
+		parts = append(parts, style.Render(label))
 	}
 
-	pipeline := strings.Join(parts, dimArrow)
+	pipeline := strings.Join(parts, arrow)
 
-	// Center within available width.
 	return lipgloss.PlaceHorizontal(maxW, lipgloss.Center, pipeline)
 }
 
@@ -458,37 +506,35 @@ func (m HomeModel) renderInfoCard(contentWidth int) string {
 	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
 	valueStyle := lipgloss.NewStyle().Foreground(p.bright)
 	labelStyle := lipgloss.NewStyle().Foreground(p.dim).Width(12)
-	goldStyle := lipgloss.NewStyle().Foreground(p.gold).Bold(true)
-	cyanStyle := lipgloss.NewStyle().Foreground(p.cyan)
+	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
 
 	var lines []string
-	lines = append(lines, goldStyle.Render(" ◆ Project"))
+	lines = append(lines, titleStyle.Render(" ◈ PROJECT"))
 	lines = append(lines, "")
 
 	row := func(label, value string, style lipgloss.Style) {
 		lines = append(lines, fmt.Sprintf("  %s %s", labelStyle.Render(label), style.Render(value)))
 	}
 
-	row("name", m.cachedProject, valueStyle)
+	row("NAME", m.cachedProject, valueStyle)
 	if m.cachedLanguage != "" {
-		row("language", m.cachedLanguage, valueStyle)
+		row("LANG", m.cachedLanguage, valueStyle)
 	}
 	if m.cachedBranch != "" {
-		row("branch", " "+m.cachedBranch, cyanStyle)
+		row("BRANCH", " "+m.cachedBranch, valueStyle)
 	}
-	row("runner", m.cachedRunner+dimStyle.Render(" (global)"), valueStyle)
-	row("model", m.cachedModel+dimStyle.Render(" (global)"), valueStyle)
-	row("response lang", m.cachedPromptLang+dimStyle.Render(" (global)"), valueStyle)
+	row("RUNNER", m.cachedRunner+dimStyle.Render(" (global)"), valueStyle)
+	row("MODEL", m.cachedModel+dimStyle.Render(" (global)"), valueStyle)
+	row("RESP LANG", m.cachedPromptLang+dimStyle.Render(" (global)"), valueStyle)
 
 	if len(m.cachedOverrides) > 0 {
 		lines = append(lines, "")
-		lines = append(lines, dimStyle.Render("  agents:"))
+		lines = append(lines, dimStyle.Render("  AGENTS:"))
 		for _, ov := range m.cachedOverrides {
 			info := valueStyle.Render(ov.runner + " / " + ov.model)
-			c := roleColor(ov.role)
-			roleStyle := lipgloss.NewStyle().Foreground(c)
+			agentStyle := lipgloss.NewStyle().Foreground(roleColor(ov.role))
 			lines = append(lines, fmt.Sprintf("   %s %s",
-				roleStyle.Render(fmt.Sprintf("%-12s", ov.role)),
+				agentStyle.Render(fmt.Sprintf("%-12s", strings.ToUpper(ov.role))),
 				info,
 			))
 		}
@@ -512,40 +558,52 @@ func (m HomeModel) renderInfoCard(contentWidth int) string {
 func (m HomeModel) renderMenu(contentWidth int) string {
 	p := homePalette
 	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
-	valueStyle := lipgloss.NewStyle().Foreground(p.bright)
-	greenStyle := lipgloss.NewStyle().Foreground(p.green).Bold(true)
-	goldStyle := lipgloss.NewStyle().Foreground(p.gold).Bold(true)
+	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
+
+	// Each menu item gets its own accent color.
+	itemColors := []lipgloss.Color{
+		p.green, // Run Pipeline
+		p.cyan,  // Global Settings
+		p.gold,  // Project Setup
+		p.red,   // Clean Workspace
+		p.dim,   // Quit
+	}
 
 	cardW := contentWidth/2 - 2
 	if contentWidth < 90 {
 		cardW = contentWidth - 4
 	}
-	// Inner width available for text (card border + padding eat ~4 chars).
 	innerW := cardW - 6
 	if innerW < 20 {
 		innerW = 20
 	}
 
 	var lines []string
-	lines = append(lines, goldStyle.Render(" ◆ Actions"))
+	lines = append(lines, titleStyle.Render(" ◈ ACTIONS"))
 	lines = append(lines, "")
 
 	for i, item := range m.items {
+		itemColor := p.bright
+		if i < len(itemColors) {
+			itemColor = itemColors[i]
+		}
 		key := dimStyle.Render("[" + item.key + "]")
 
 		if i == m.cursor {
-			label := fmt.Sprintf(" %s %s", item.icon, item.label)
+			label := fmt.Sprintf(" %s %s", item.icon, strings.ToUpper(item.label))
 			activeLine := lipgloss.NewStyle().
 				Background(p.activeBg).
-				Foreground(p.green).
+				Foreground(itemColor).
 				Bold(true).
 				Width(innerW).
 				Render(label)
-			lines = append(lines, greenStyle.Render("▸")+activeLine+" "+key)
+			activeMarker := lipgloss.NewStyle().Foreground(itemColor).Bold(true)
+			lines = append(lines, activeMarker.Render("▸")+activeLine+" "+key)
 			lines = append(lines, "  "+dimStyle.Render("  "+item.desc))
 		} else {
-			label := fmt.Sprintf("  %s %s", item.icon, item.label)
-			lines = append(lines, valueStyle.Render(label)+"  "+key)
+			inactiveStyle := lipgloss.NewStyle().Foreground(itemColor)
+			label := fmt.Sprintf("  %s %s", item.icon, strings.ToUpper(item.label))
+			lines = append(lines, inactiveStyle.Render(label)+"  "+key)
 			lines = append(lines, "  "+dimStyle.Render("  "+item.desc))
 		}
 		if i < len(m.items)-1 {
@@ -570,7 +628,7 @@ func (m HomeModel) renderHistory() string {
 	dimStyle := lipgloss.NewStyle().Foreground(homePalette.dim)
 
 	var lines []string
-	lines = append(lines, dimStyle.Render("  ◆ Recent Requirements"))
+	lines = append(lines, dimStyle.Render("  ◈ RECENT REQUIREMENTS"))
 	maxShow := 3
 	if len(m.history) < maxShow {
 		maxShow = len(m.history)

@@ -495,8 +495,8 @@ func TestHomeModel_ViewReady(t *testing.T) {
 	if view == "" {
 		t.Error("View should return non-empty string when ready")
 	}
-	if !containsText(view, "orchestrator") {
-		t.Error("View should contain 'orchestrator'")
+	if !containsText(view, "O R C H E S T R A T O R") {
+		t.Error("View should contain 'O R C H E S T R A T O R'")
 	}
 }
 
@@ -508,8 +508,8 @@ func TestHomeModel_RenderContent_QuitOverlay(t *testing.T) {
 	m.confirmQuit = true
 
 	content := m.renderContent()
-	if !containsText(content, "Quit") {
-		t.Error("quit overlay should contain 'Quit'")
+	if !containsText(content, "QUIT") {
+		t.Error("quit overlay should contain 'QUIT'")
 	}
 }
 

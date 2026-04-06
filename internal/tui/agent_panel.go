@@ -186,15 +186,15 @@ func (m AgentPanelModel) renderHeader(_ int) string {
 	var statusIcon string
 	switch m.state {
 	case AgentWaiting:
-		statusIcon = styleWaiting.Render("○ waiting")
+		statusIcon = styleWaiting.Render("○ WAITING")
 	case AgentRunning:
-		statusIcon = m.spinner.View() + styleRunning.Render(" running")
+		statusIcon = m.spinner.View() + styleRunning.Render(" RUNNING")
 	case AgentDone:
-		statusIcon = styleDone.Render("✓ done")
+		statusIcon = styleDone.Render("✓ DONE")
 	case AgentError:
-		statusIcon = styleError.Render("✗ error")
+		statusIcon = styleError.Render("✗ ERROR")
 	case AgentGate:
-		statusIcon = styleGate.Render("⏸ gate")
+		statusIcon = styleGate.Render("⏸ GATE")
 	}
 
 	return header + "  " + statusIcon
@@ -209,7 +209,7 @@ func (m AgentPanelModel) scrollIndicator() string {
 	}
 	pct := m.vp.ScrollPercent() * 100
 	indicator := fmt.Sprintf(" %d%% ", int(pct))
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(indicator)
+	return lipgloss.NewStyle().Foreground(crt.dim).Render(indicator)
 }
 
 // syncViewport updates the viewport content from the line buffer.

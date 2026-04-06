@@ -534,8 +534,8 @@ func (m Model) View() string {
 	parts := []string{p.View()}
 	if m.pipelineErr != "" {
 		banner := lipgloss.NewStyle().
-			Background(lipgloss.Color("160")).
-			Foreground(lipgloss.Color("231")).
+			Background(crt.border).
+			Foreground(crt.warn).
 			Bold(true).
 			Padding(0, 2).
 			Width(m.width - 4).
@@ -547,15 +547,15 @@ func (m Model) View() string {
 	mainView := strings.Join(parts, "\n")
 
 	if m.confirmQuit {
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-		brightStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+		dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+		warnStyle := lipgloss.NewStyle().Foreground(crt.warn).Bold(true)
+		brightStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
 		confirmBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("203")).
+			BorderForeground(crt.warn).
 			Padding(1, 3).
 			Render(
-				warnStyle.Render("  Quit orchestrator?") + "\n\n" +
+				warnStyle.Render("  QUIT ORCHESTRATOR?") + "\n\n" +
 					dimStyle.Render("  Press ") +
 					brightStyle.Render("y") +
 					dimStyle.Render(" or ") +
@@ -566,15 +566,15 @@ func (m Model) View() string {
 	}
 
 	if m.cancelConfirm {
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true)
-		brightStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+		dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+		warnStyle := lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+		brightStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
 		confirmBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("214")).
+			BorderForeground(crt.primary).
 			Padding(1, 3).
 			Render(
-				warnStyle.Render("  Cancel pipeline and return to menu?") + "\n\n" +
+				warnStyle.Render("  CANCEL PIPELINE AND RETURN TO MENU?") + "\n\n" +
 					dimStyle.Render("  Press ") +
 					brightStyle.Render("y") +
 					dimStyle.Render(" or ") +
@@ -592,27 +592,33 @@ func (m Model) View() string {
 //
 //	✓ architecture → ◉ plan → ○ prompts → ○ coding → …
 func (m Model) renderPhaseBar() string {
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	doneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
-	activeStyle := lipgloss.NewStyle().Foreground(roleColor("planner")).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	sepStyle := lipgloss.NewStyle().Foreground(crt.muted)
+	doneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#73daca")).Bold(true)
+
+	phaseStyle := func(label string) lipgloss.Style {
+		if c, ok := pipelineColors[label]; ok {
+			return lipgloss.NewStyle().Foreground(c).Bold(true)
+		}
+		return lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+	}
 
 	var parts []string
 
 	// PM phase (before planning gates).
 	pmPhase := "pm"
 	if strings.Contains(m.phase, pmPhase) {
-		c := roleColor("pm")
-		parts = append(parts, lipgloss.NewStyle().Foreground(c).Bold(true).Render("◉ pm"))
+		parts = append(parts, phaseStyle("PM").Render("◉ PM"))
 	} else if m.approvedGates[planningGates[0]] || strings.Contains(m.phase, "planning") || strings.Contains(m.phase, "coding") {
-		parts = append(parts, doneStyle.Render("✓ pm"))
+		parts = append(parts, doneStyle.Render("✓ PM"))
 	} else {
-		parts = append(parts, dimStyle.Render("○ pm"))
+		parts = append(parts, dimStyle.Render("○ PM"))
 	}
 
 	// Planning sub-stages: architecture → plan → prompts.
 	for _, gate := range planningGates {
-		label := gateLabel(gate)
+		label := strings.ToUpper(gateLabel(gate))
+		activeStyle := phaseStyle(label)
 		switch {
 		case m.approvedGates[gate]:
 			parts = append(parts, doneStyle.Render("✓ "+label))
@@ -628,38 +634,15 @@ func (m Model) renderPhaseBar() string {
 	// Post-planning phases.
 	postPhases := []string{"coding", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"}
 	for _, ph := range postPhases {
+		label := strings.ToUpper(ph)
 		if strings.Contains(m.phase, ph) {
-			c := roleColor(phaseRole(ph))
-			parts = append(parts, lipgloss.NewStyle().Foreground(c).Bold(true).Render("◉ "+ph))
+			parts = append(parts, phaseStyle(label).Render("◉ "+label))
 		} else {
-			parts = append(parts, dimStyle.Render("○ "+ph))
+			parts = append(parts, dimStyle.Render("○ "+label))
 		}
 	}
 
 	return "  " + strings.Join(parts, sepStyle.Render(" → "))
-}
-
-// phaseRole maps a pipeline phase to an agent role color.
-func phaseRole(phase string) string {
-	switch phase {
-	case "pm":
-		return "pm"
-	case "planning":
-		return "planner"
-	case "coding":
-		return "coder"
-	case "testing":
-		return "tester"
-	case "reviewing":
-		return "reviewer"
-	case "ux_reviewing":
-		return "ux_reviewer"
-	case "security":
-		return "security"
-	case "qa":
-		return "qa"
-	}
-	return "pr"
 }
 
 func (m *Model) layout() {

@@ -15,10 +15,9 @@ import (
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
 
-const defaultMaxFixAttempts = 3
+// No default limit — quality gate iterates until all checks pass.
 
 // PipelineState represents the current phase of the pipeline.
 type PipelineState string
@@ -94,24 +93,13 @@ func (p *Pipeline) Approve() {
 // CurrentState returns the current pipeline state.
 func (p *Pipeline) CurrentState() PipelineState { return p.state }
 
-// maxFix returns the configured max fix attempts, falling back to the default.
-// For local runners (ollama, opencode with local model) there is no limit.
+// maxFix returns 0 (unlimited) — the quality gate iterates until all checks pass.
+// Users can still set max_fix_attempts in config to impose a hard cap if desired.
 func (p *Pipeline) maxFix() int {
-	if p.isLocal() {
-		return 0 // 0 means unlimited
-	}
 	if p.cfg.Project.MaxFixAttempts > 0 {
 		return p.cfg.Project.MaxFixAttempts
 	}
-	return defaultMaxFixAttempts
-}
-
-// isLocal returns true when the coder agent uses a local runner.
-func (p *Pipeline) isLocal() bool {
-	if ac, ok := p.cfg.Agents["coder"]; ok {
-		return runner.IsLocalRunner(ac)
-	}
-	return false
+	return 0
 }
 
 // Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate: TEST → REVIEW → UX → SECURITY → QA) → PR.
@@ -544,11 +532,10 @@ func (p *Pipeline) runQAReview(ctx context.Context) (string, error) {
 // fixAndRebuild sends failure to coder, rebuilds, and returns.
 // The caller (qualityGate) will restart the full quality pipeline.
 func (p *Pipeline) fixAndRebuild(ctx context.Context, ctxFragment, failure string, files *[]string, phase string, attempt, maxAttempts int) error {
-	if maxAttempts > 0 && attempt >= maxAttempts-1 {
-		return fmt.Errorf("%s issues not resolved after %d attempts", phase, maxAttempts)
-	}
-
 	if maxAttempts > 0 {
+		if attempt >= maxAttempts-1 {
+			return fmt.Errorf("%s issues not resolved after %d attempts", phase, maxAttempts)
+		}
 		p.event(fmt.Sprintf("%s issues found, sending to coder (attempt %d/%d)", phase, attempt+1, maxAttempts))
 	} else {
 		p.event(fmt.Sprintf("%s issues found, sending to coder (attempt %d)", phase, attempt+1))
@@ -789,22 +776,22 @@ func (p *Pipeline) emitSummary() {
 
 	for _, ph := range phases {
 		if _, ok := p.agents[ph.role]; !ok {
-			sb.WriteString(fmt.Sprintf("  ○ %s — skipped\n", ph.name))
+			fmt.Fprintf(&sb, "  ○ %s — skipped\n", ph.name)
 			continue
 		}
 		if p.ws.FileExists(ph.file) {
-			sb.WriteString(fmt.Sprintf("  ✓ %s — passed\n", ph.name))
+			fmt.Fprintf(&sb, "  ✓ %s — passed\n", ph.name)
 		} else {
-			sb.WriteString(fmt.Sprintf("  ? %s — no output\n", ph.name))
+			fmt.Fprintf(&sb, "  ? %s — no output\n", ph.name)
 		}
 	}
 
 	// Nice-to-have summary.
 	total := p.totalNiceToHave()
 	if total > 0 {
-		sb.WriteString(fmt.Sprintf("\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile))
+		fmt.Fprintf(&sb, "\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile)
 		for phase, items := range p.niceToHave {
-			sb.WriteString(fmt.Sprintf("     • %s: %d items\n", phase, len(items)))
+			fmt.Fprintf(&sb, "     • %s: %d items\n", phase, len(items))
 		}
 	}
 
@@ -816,7 +803,7 @@ func (p *Pipeline) emitSummary() {
 		artifacts.NiceToHaveFile,
 	} {
 		if p.ws.FileExists(file) {
-			sb.WriteString(fmt.Sprintf("    • %s\n", file))
+			fmt.Fprintf(&sb, "    • %s\n", file)
 		}
 	}
 

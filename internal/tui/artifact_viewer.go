@@ -347,11 +347,11 @@ func discoverArtifacts(wsDir, current string) ([]string, int) {
 }
 
 func (m ArtifactViewerModel) View() string {
-	borderColor := roleColor("planner")
+	borderColor := crt.border
 	bSt := lipgloss.NewStyle().Foreground(borderColor)
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(borderColor)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("160"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	errStyle := lipgloss.NewStyle().Foreground(crt.warn)
 
 	contentW := m.width - 2 // left border + right border
 	if contentW < 2 {

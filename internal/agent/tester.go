@@ -137,7 +137,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 		if err != nil {
 			continue
 		}
-		sourceContext.WriteString(fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, string(content)))
+		fmt.Fprintf(&sourceContext, "**%s**\n```\n%s\n```\n\n", path, string(content))
 	}
 
 	if sourceContext.Len() == 0 {

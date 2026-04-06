@@ -389,10 +389,10 @@ func (m *startupModel) showPicker() tea.Cmd {
 }
 
 func (m startupModel) viewModulePath() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	exampleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	exampleStyle := lipgloss.NewStyle().Foreground(crt.primary)
+	hintStyle := lipgloss.NewStyle().Foreground(crt.success)
 	sep := strings.Repeat("─", m.width)
 
 	projectName := filepath.Base(m.root)
@@ -577,10 +577,10 @@ func (m modulePathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m modulePathModel) View() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	exampleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	exampleStyle := lipgloss.NewStyle().Foreground(crt.primary)
+	hintStyle := lipgloss.NewStyle().Foreground(crt.success)
 	sep := strings.Repeat("─", m.width)
 
 	projectName := filepath.Base(m.root)

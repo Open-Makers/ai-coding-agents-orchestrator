@@ -100,7 +100,7 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	if p.ProjectType != "" {
-		sb.WriteString(fmt.Sprintf("### Project Type: %s\n\n", p.ProjectType))
+		fmt.Fprintf(&sb, "### Project Type: %s\n\n", p.ProjectType)
 	}
 
 	if p.TreeStructure != "" {
@@ -114,7 +114,7 @@ func (p ProjectContext) SystemPromptFragment() string {
 		if len(p.Files) < limit {
 			limit = len(p.Files)
 		}
-		sb.WriteString(fmt.Sprintf("### Files (%d total, showing first %d)\n```\n", len(p.Files), limit))
+		fmt.Fprintf(&sb, "### Files (%d total, showing first %d)\n```\n", len(p.Files), limit)
 		sb.WriteString(strings.Join(p.Files[:limit], "\n"))
 		sb.WriteString("\n```\n\n")
 	}
@@ -141,7 +141,7 @@ func (p ProjectContext) SystemPromptFragment() string {
 		sb.WriteString("### Existing Source Code\n")
 		sb.WriteString("Below are the key source files in the project. Study them carefully before making changes.\n\n")
 		for name, content := range p.SourceFiles {
-			sb.WriteString(fmt.Sprintf("**%s**\n```\n", name))
+			fmt.Fprintf(&sb, "**%s**\n```\n", name)
 			if len(content) > maxSourceFileSize {
 				sb.WriteString(content[:maxSourceFileSize])
 				sb.WriteString("\n... (truncated)")
@@ -153,7 +153,7 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	for name, content := range p.AlwaysInclude {
-		sb.WriteString(fmt.Sprintf("### %s\n```\n", name))
+		fmt.Fprintf(&sb, "### %s\n```\n", name)
 		if len(content) > 3000 {
 			sb.WriteString(content[:3000])
 			sb.WriteString("\n... (truncated)")
@@ -342,7 +342,7 @@ func buildTreeStructure(files []string) string {
 		depth := strings.Count(d, string(filepath.Separator))
 		indent := strings.Repeat("  ", depth)
 		name := filepath.Base(d)
-		sb.WriteString(fmt.Sprintf("%s%s/\n", indent, name))
+		fmt.Fprintf(&sb, "%s%s/\n", indent, name)
 	}
 	return sb.String()
 }

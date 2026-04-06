@@ -217,15 +217,15 @@ func (m *GitPanelModel) SetSize(w, h int) {
 }
 
 func (m GitPanelModel) View() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("82"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	stagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	unstagedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.bright)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	stagedStyle := lipgloss.NewStyle().Foreground(crt.success)
+	unstagedStyle := lipgloss.NewStyle().Foreground(crt.primary)
+	errorStyle := lipgloss.NewStyle().Foreground(crt.warn)
 	borderStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240"))
+		BorderForeground(crt.border)
 
 	fileW := m.width / 3
 	diffW := m.width - fileW - 3

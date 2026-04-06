@@ -47,7 +47,8 @@ func main() {
 	case "report":
 		reportCmd(os.Args[2:])
 	case "monitor":
-		monitorCmd(os.Args[2:])
+		fmt.Fprintln(os.Stderr, "monitor not implemented yet")
+		os.Exit(2)
 	case "approve":
 		approveCmd(os.Args[2:])
 	case "clean":

@@ -125,10 +125,10 @@ func (m PickerModel) View() string {
 		return m.tree.View()
 	}
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	cursorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	dateStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	cursorStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	dateStyle := lipgloss.NewStyle().Foreground(crt.dim)
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("orchestrator  ·  select requirements") + "\n")
@@ -148,7 +148,7 @@ func (m PickerModel) View() string {
 	}
 
 	if m.treeErr != "" {
-		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("error: "+m.treeErr) + "\n")
+		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(crt.warn).Render("error: "+m.treeErr) + "\n")
 	}
 
 	sb.WriteString("\n" + dimStyle.Render("↑↓ navigate   Enter select   q quit"))

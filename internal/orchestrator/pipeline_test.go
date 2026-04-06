@@ -117,7 +117,6 @@ func TestQualityGate_FixAndRestart(t *testing.T) {
 	}
 
 	cfg := config.Config{}
-	cfg.Project.MaxFixAttempts = 5
 	p := &Pipeline{b: b, agents: agents, cfg: cfg, niceToHave: make(map[string][]string)}
 	files := []string{"main.go"}
 	if err := p.qualityGate(context.Background(), "ctx", &files); err != nil {

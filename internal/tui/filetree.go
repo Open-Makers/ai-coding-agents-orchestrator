@@ -138,16 +138,16 @@ func (m FileTreeModel) Update(msg tea.Msg) (FileTreeModel, tea.Cmd) {
 }
 
 func (m FileTreeModel) View() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	pathStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	dirStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
-	mdStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	fileStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	pathStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	dirStyle := lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+	mdStyle := lipgloss.NewStyle().Foreground(crt.bright)
+	fileStyle := lipgloss.NewStyle().Foreground(crt.dim)
 	cursorBg := lipgloss.NewStyle().
-		Background(lipgloss.Color("238")).
-		Foreground(lipgloss.Color("255")).
+		Background(crt.muted).
+		Foreground(crt.bright).
 		Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
 	sep := strings.Repeat("─", m.width)
 
 	// header
