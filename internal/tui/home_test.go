@@ -79,6 +79,46 @@ func TestNewHomeModel_UnnamedProject(t *testing.T) {
 	}
 }
 
+func TestNewHomeModel_RootSlash(t *testing.T) {
+	cfg := config.Config{
+		Agents: map[string]config.AgentConfig{
+			"pm": {Runner: "codex", Model: "gpt-5"},
+		},
+	}
+
+	m := NewHomeModel(cfg, "/")
+
+	if m.cachedProject != "(unnamed)" {
+		t.Errorf("expected '(unnamed)' for root '/', got %q", m.cachedProject)
+	}
+}
+
+func TestHomeModel_ShortenProjectPath_ExactHome(t *testing.T) {
+	m := HomeModel{}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+	result := m.shortenProjectPath(home)
+	if result != "~" {
+		t.Errorf("expected '~' for home dir, got %q", result)
+	}
+}
+
+func TestHomeModel_ShortenProjectPath_SimilarPrefix(t *testing.T) {
+	m := HomeModel{}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home dir")
+	}
+	// Path that starts with home dir name but is a sibling, not a child.
+	sibling := home + "extra/project"
+	result := m.shortenProjectPath(sibling)
+	if result != sibling {
+		t.Errorf("sibling path should not be shortened, got %q", result)
+	}
+}
+
 func TestNewHomeModel_DefaultPromptLanguage(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Config{

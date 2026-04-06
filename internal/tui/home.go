@@ -106,7 +106,10 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 
 	projectName := cfg.Project.Name
 	if projectName == "" && root != "" {
-		projectName = filepath.Base(root)
+		base := filepath.Base(root)
+		if base != "/" && base != "." {
+			projectName = base
+		}
 	}
 	if projectName == "" {
 		projectName = "(unnamed)"
@@ -155,8 +158,6 @@ func (m HomeModel) Init() tea.Cmd {
 // ── Update ───────────────────────────────────────────────────────────────────
 
 func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
-	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -175,7 +176,7 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			if m.ready {
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, tea.Batch(cmds...)
+			return m, nil
 		}
 
 		switch msg.String() {
@@ -251,7 +252,7 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 	}
 
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
 func (m HomeModel) selectAction(action homeAction) tea.Cmd {
@@ -735,8 +736,16 @@ func (m HomeModel) shortenProjectPath(path string) string {
 	if err != nil {
 		return path
 	}
-	if strings.HasPrefix(path, home) {
-		return "~" + path[len(home):]
+	// Ensure home ends with separator so "/home/user" doesn't match "/home/username".
+	homePrefix := home
+	if !strings.HasSuffix(homePrefix, string(filepath.Separator)) {
+		homePrefix += string(filepath.Separator)
+	}
+	if path == home {
+		return "~"
+	}
+	if strings.HasPrefix(path, homePrefix) {
+		return "~" + string(filepath.Separator) + path[len(homePrefix):]
 	}
 	return path
 }
@@ -901,12 +910,15 @@ func isValidProjectRoot(root string) bool {
 	if err == nil && filepath.Clean(root) == filepath.Clean(home) {
 		return false
 	}
-	// Reuses projectMarkers from dir_browser.go, plus .orchestrator workspace.
-	markers := append(projectMarkers, ".orchestrator")
-	for _, marker := range markers {
+	// Check project markers plus .orchestrator workspace.
+	// Avoid append(projectMarkers, ...) — it can mutate the shared slice.
+	for _, marker := range projectMarkers {
 		if _, err := os.Stat(filepath.Join(root, marker)); err == nil {
 			return true
 		}
+	}
+	if _, err := os.Stat(filepath.Join(root, ".orchestrator")); err == nil {
+		return true
 	}
 	return false
 }
