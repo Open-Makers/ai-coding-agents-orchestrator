@@ -12,6 +12,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/gitclient"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 type startupPhase int
@@ -281,7 +282,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *startupModel) cleanIfRequirementsChanged(newReqPath string) {
 	ws := artifacts.Workspace{Dir: m.wsDir}
 
-	newContent, err := os.ReadFile(newReqPath) //nolint:gosec // #nosec G304 -- path from user-selected requirements file
+	newContent, err := safefile.ReadFile(filepath.Dir(newReqPath), filepath.Base(newReqPath))
 	if err != nil {
 		return
 	}

@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 const (
@@ -27,14 +29,14 @@ func Setup() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
-// SetupFile opens (or creates) the given file path for append-mode logging
-// and configures the global slog logger to write there.
+// SetupFile opens (or creates) a log file scoped to dir and configures the
+// global slog logger to write there.
 // The caller should defer logging.Close() to flush the file.
-func SetupFile(path string) error {
+func SetupFile(dir, filename string) error {
 	logMu.Lock()
 	defer logMu.Unlock()
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // #nosec G304 -- path from workspace config
+	f, err := safefile.OpenFile(dir, filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}

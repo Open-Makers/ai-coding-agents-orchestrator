@@ -16,6 +16,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 const defaultMaxFixAttempts = 3
@@ -133,7 +134,7 @@ func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	promptsDir := filepath.Join(p.root, artifacts.DirName, appprompts.PromptsDirName)
 	appprompts.SetOverrideDir(promptsDir)
 
-	reqs, err := os.ReadFile(requirementsPath) //nolint:gosec // #nosec G304 -- path from user-selected requirements file
+	reqs, err := safefile.ReadFile(filepath.Dir(requirementsPath), filepath.Base(requirementsPath))
 	if err != nil {
 		return fmt.Errorf("read requirements: %w", err)
 	}

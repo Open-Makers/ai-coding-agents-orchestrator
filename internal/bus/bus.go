@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 const defaultRingSize = 500
@@ -26,19 +29,19 @@ func New() *Bus {
 	}
 }
 
-// SetLogPath opens the file for append-writing each published message as JSON.
-func (b *Bus) SetLogPath(path string) error {
+// SetLogPath opens a file scoped to dir for append-writing each published message as JSON.
+func (b *Bus) SetLogPath(dir, filename string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // #nosec G304 -- path from workspace config
+	f, err := safefile.OpenFile(dir, filename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("bus: open log: %w", err)
 	}
 	if b.logFile != nil {
 		_ = b.logFile.Close()
 	}
-	b.logPath = path
+	b.logPath = filepath.Join(dir, filename)
 	b.logFile = f
 	return nil
 }

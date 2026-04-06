@@ -99,7 +99,7 @@ func runCmd(args []string) {
 		fatal(err)
 	}
 
-	if err := logging.SetupFile(ws.Path(logging.LogFileName)); err != nil {
+	if err := logging.SetupFile(ws.Dir, logging.LogFileName); err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "warn: could not open log file: %v\n", err)
 	}
 	defer logging.Close()
@@ -175,7 +175,7 @@ func runCmd(args []string) {
 	resolvedUI := resolveUIMode(*ui)
 
 	b := bus.New()
-	if err := b.SetLogPath(ws.Path("runlog.jsonl")); err != nil {
+	if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
 		slog.Warn("could not open bus log", slog.String("error", err.Error()))
 	}
 	defer b.Close()
