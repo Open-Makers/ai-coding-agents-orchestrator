@@ -419,6 +419,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // updateOverlay dispatches to the currently active overlay.
 func (m Model) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.overlay {
+	case overlayNone:
+		// No overlay active — nothing to dispatch.
 	case overlayPicker:
 		switch msg := msg.(type) {
 		case PickerSelectedMsg:
@@ -472,9 +474,16 @@ func (m Model) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case overlayArtifact:
 		switch msg := msg.(type) {
 		case artifactViewerClosedMsg:
-			// ...existing code...
 			m.overlay = overlayNone
-			if msg.approved && m.pipeline != nil {
+			if msg.regenerate && m.pipeline != nil {
+				m.log.Info("regeneration requested",
+					slog.String("artifact", m.gateArtifact),
+				)
+				m.pipeline.Regenerate()
+				m.gateMsg = ""
+				m.gateArtifact = ""
+				m.statusbar = m.statusbar.WithState("regenerating…")
+			} else if msg.approved && m.pipeline != nil {
 				approved := m.gateArtifact
 				m.approvedGates[approved] = true
 				m.log.Info("gate approved",
@@ -517,7 +526,7 @@ func (m Model) View() string {
 
 	switch m.overlay {
 	case overlayNone:
-		// Fall through to main view rendering below.
+		// Fall through to main view below.
 	case overlayPicker:
 		return m.overlayPicker.View()
 	case overlayEditor:

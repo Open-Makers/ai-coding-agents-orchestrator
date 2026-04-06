@@ -2,10 +2,10 @@ package multiplexer
 
 import (
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 )
 
 // TmuxMultiplexer implements Multiplexer via the tmux CLI.
@@ -101,7 +101,7 @@ func (t *TmuxMultiplexer) Close() error {
 }
 
 func (t *TmuxMultiplexer) tmux(args ...string) error {
-	cmd := exec.Command("tmux", args...)
+	cmd := executil.Command("tmux", args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -111,7 +111,7 @@ func (t *TmuxMultiplexer) tmux(args ...string) error {
 }
 
 func (t *TmuxMultiplexer) tmuxOutput(args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...)
+	cmd := executil.Command("tmux", args...)
 	var stdout strings.Builder
 	var stderr strings.Builder
 	cmd.Stdout = &stdout

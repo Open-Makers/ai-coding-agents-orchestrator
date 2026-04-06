@@ -13,6 +13,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // CoderPayload is the request for initial code generation.
@@ -224,10 +225,10 @@ func (a *CoderAgent) writeOneFile(path, content string) error {
 		return fmt.Errorf("empty path after sanitization")
 	}
 	target := filepath.Join(a.root, path)
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return fmt.Errorf("mkdir for %s: %w", path, err)
 	}
-	return os.WriteFile(target, []byte(content), 0o644)
+	return os.WriteFile(target, []byte(content), 0o600)
 }
 
 // findPathInRecent scans recent non-fence lines (newest first) for a file path.
@@ -321,11 +322,14 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 	}
 	var sb strings.Builder
 	for _, path := range files {
-		content, err := os.ReadFile(filepath.Join(a.root, path))
+		content, err := safefile.ReadFile(a.root, path)
 		if err != nil {
 			continue
 		}
-		_, _ = fmt.Fprintf(&sb, "**%s**\n```\n%s\n```\n\n", path, string(content))
+		_, err = fmt.Fprintf(&sb, "**%s**\n```\n%s\n```\n\n", path, string(content))
+		if err != nil {
+			return ""
+		}
 	}
 	return sb.String()
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // TesterPayload carries the list of source files written by the coder.
@@ -64,7 +65,7 @@ func (a *TesterAgent) GenerateTests(ctx context.Context, files []string) error {
 	return a.generateTests(ctx, files)
 }
 
-func (a *TesterAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
+func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error) {
 
 	report := TestReport{Success: true}
 
@@ -123,7 +124,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 	var sourceContext strings.Builder
 
 	// Include go.mod so LLM knows the module path and available dependencies.
-	if gomod, err := os.ReadFile(filepath.Join(a.root, "go.mod")); err == nil {
+	if gomod, err := safefile.ReadFile(a.root, "go.mod"); err == nil {
 		sourceContext.WriteString("**go.mod**\n```\n")
 		sourceContext.Write(gomod)
 		sourceContext.WriteString("\n```\n\n")
@@ -133,11 +134,14 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(a.root, path))
+		content, err := safefile.ReadFile(a.root, path)
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(&sourceContext, "**%s**\n```\n%s\n```\n\n", path, string(content))
+		_, err = fmt.Fprintf(&sourceContext, "**%s**\n```\n%s\n```\n\n", path, string(content))
+		if err != nil {
+			return err
+		}
 	}
 
 	if sourceContext.Len() == 0 {
@@ -178,11 +182,11 @@ func (a *TesterAgent) writeTestBlocks(output string) []string {
 	var written []string
 	for _, f := range blocks {
 		target := filepath.Join(a.root, f.Path)
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			a.emitToken(fmt.Sprintf("warning: mkdir for test %s: %v\n", f.Path, err), false)
 			continue
 		}
-		if err := os.WriteFile(target, []byte(f.Content), 0o644); err != nil {
+		if err := os.WriteFile(target, []byte(f.Content), 0o600); err != nil {
 			a.emitToken(fmt.Sprintf("warning: write test %s: %v\n", f.Path, err), false)
 			continue
 		}

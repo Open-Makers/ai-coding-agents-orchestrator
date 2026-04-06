@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 const Filename = ".orchestrator.yaml" // legacy project config (root-level)
@@ -76,13 +78,13 @@ type AgentConfig struct {
 	Skills []string `yaml:"-"` // always from defaults, never persisted
 }
 
-// GlobalConfigPath returns the path to ~/.orchestrator/config.yaml.
-func GlobalConfigPath() string {
+// globalConfigDir returns the directory for the global config (~/.orchestrator).
+func globalConfigDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, GlobalDir, GlobalFilename)
+	return filepath.Join(home, GlobalDir)
 }
 
 // EnsureGlobalDir creates ~/.orchestrator if it doesn't exist.
@@ -92,7 +94,7 @@ func EnsureGlobalDir() (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(home, GlobalDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -105,7 +107,7 @@ func Save(root string, cfg Config) error {
 		return err
 	}
 	dir := filepath.Join(root, GlobalDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, ProjectFilename), data, 0o600)
@@ -119,8 +121,8 @@ func SaveGlobal(cfg Config) error {
 	}
 	// Merge with existing global config to preserve other settings.
 	existing := Config{}
-	if globalPath := GlobalConfigPath(); globalPath != "" {
-		if loaded, loadErr := loadFile(globalPath); loadErr == nil {
+	if gDir := globalConfigDir(); gDir != "" {
+		if loaded, loadErr := loadFile(gDir, GlobalFilename); loadErr == nil {
 			existing = loaded
 		}
 	}
@@ -140,23 +142,22 @@ func Load(root string) (Config, error) {
 	cfg := DefaultConfig()
 
 	// Layer 2: global user config.
-	if globalPath := GlobalConfigPath(); globalPath != "" {
-		if global, err := loadFile(globalPath); err == nil {
+	if gDir := globalConfigDir(); gDir != "" {
+		if global, err := loadFile(gDir, GlobalFilename); err == nil {
 			merge(&cfg, global)
 		}
 	}
 
 	// Layer 3: project-level config.
-	projectPath := filepath.Join(root, GlobalDir, ProjectFilename)
-	if project, err := loadFile(projectPath); err == nil {
+	projectDir := filepath.Join(root, GlobalDir)
+	if project, err := loadFile(projectDir, ProjectFilename); err == nil {
 		merge(&cfg, project)
 	} else if errors.Is(err, os.ErrNotExist) {
 		// Fallback: try legacy root-level config and auto-migrate.
-		legacyPath := filepath.Join(root, Filename)
-		if project, legacyErr := loadFile(legacyPath); legacyErr == nil {
+		if project, legacyErr := loadFile(root, Filename); legacyErr == nil {
 			merge(&cfg, project)
-			_ = Save(root, project)   // migrate to new location
-			_ = os.Remove(legacyPath) // remove legacy file
+			_ = Save(root, project)                      // migrate to new location
+			_ = os.Remove(filepath.Join(root, Filename)) // remove legacy file
 		}
 	} else {
 		return cfg, err
@@ -169,16 +170,16 @@ func Load(root string) (Config, error) {
 // without layering defaults or global settings. Returns an empty config if
 // the file does not exist.
 func LoadProject(root string) Config {
-	cfg, err := loadFile(filepath.Join(root, GlobalDir, ProjectFilename))
+	cfg, err := loadFile(filepath.Join(root, GlobalDir), ProjectFilename)
 	if err != nil {
 		return Config{}
 	}
 	return cfg
 }
 
-// loadFile reads and unmarshals a single YAML config file.
-func loadFile(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+// loadFile reads and unmarshals a single YAML config file scoped to dir.
+func loadFile(dir, filename string) (Config, error) {
+	data, err := safefile.ReadFile(dir, filename)
 	if err != nil {
 		return Config{}, err
 	}

@@ -243,7 +243,7 @@ func TestSaveGlobal_CreatesDir(t *testing.T) {
 		t.Fatal("expected global config to be created")
 	}
 
-	loaded, err := loadFile(globalPath)
+	loaded, err := loadFile(filepath.Join(home, GlobalDir), GlobalFilename)
 	if err != nil {
 		t.Fatalf("failed to read global config: %v", err)
 	}

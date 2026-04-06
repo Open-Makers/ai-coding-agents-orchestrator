@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -17,9 +16,11 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/skills"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tui"
 )
@@ -42,7 +43,7 @@ func main() {
 	case "agent":
 		agentCmd(os.Args[2:])
 	case "resume":
-		fmt.Fprintln(os.Stderr, "resume not implemented yet")
+		_, _ = fmt.Fprintln(os.Stderr, "resume not implemented yet")
 		os.Exit(2)
 	case "report":
 		reportCmd(os.Args[2:])
@@ -56,7 +57,7 @@ func main() {
 	case "-h", "--help", "help":
 		usage()
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
+		_, _ = fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		usage()
 		os.Exit(2)
 	}
@@ -99,8 +100,8 @@ func runCmd(args []string) {
 		fatal(err)
 	}
 
-	if err := logging.SetupFile(ws.Path(logging.LogFileName)); err != nil {
-		fmt.Fprintf(os.Stderr, "warn: could not open log file: %v\n", err)
+	if err := logging.SetupFile(ws.Dir, logging.LogFileName); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warn: could not open log file: %v\n", err)
 	}
 	defer logging.Close()
 
@@ -172,7 +173,7 @@ func runCmd(args []string) {
 	}
 
 	if *reqPath == "" {
-		fmt.Fprintln(os.Stderr, "--requirements is required in plain/dry-run mode")
+		_, _ = fmt.Fprintln(os.Stderr, "--requirements is required in plain/dry-run mode")
 		os.Exit(2)
 	}
 
@@ -190,7 +191,7 @@ func runCmd(args []string) {
 	resolvedUI := resolveUIMode(*ui)
 
 	b := bus.New()
-	if err := b.SetLogPath(ws.Path("runlog.jsonl")); err != nil {
+	if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
 		slog.Warn("could not open bus log", slog.String("error", err.Error()))
 	}
 	defer b.Close()
@@ -397,7 +398,7 @@ func approveCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: orchestrator approve <vision|architecture|plan|prompts|all>")
+		_, _ = fmt.Fprintln(os.Stderr, "usage: orchestrator approve <vision|architecture|plan|prompts|all>")
 		os.Exit(2)
 	}
 
@@ -418,7 +419,7 @@ func approveCmd(args []string) {
 	target := strings.ToLower(fs.Arg(0))
 	markers := markerList(target)
 	if markers == nil {
-		fmt.Fprintf(os.Stderr, "unknown approval target: %s\n", target)
+		_, _ = fmt.Fprintf(os.Stderr, "unknown approval target: %s\n", target)
 		os.Exit(2)
 	}
 	for _, m := range markers {
@@ -515,14 +516,14 @@ func writeApproval(ws artifacts.Workspace, marker string) error {
 }
 
 func checkoutBranch(root, branch string) error {
-	cmd := exec.Command("git", "checkout", "-b", branch)
+	cmd := executil.Command("git", "checkout", "-b", branch)
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err == nil {
 		return nil
 	}
-	cmd = exec.Command("git", "checkout", branch)
+	cmd = executil.Command("git", "checkout", branch)
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -530,13 +531,13 @@ func checkoutBranch(root, branch string) error {
 }
 
 func fatal(err error) {
-	fmt.Fprintln(os.Stderr, err)
+	_, _ = fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
 }
 
 // detectGoModulePath reads the module path from an existing go.mod file.
 func detectGoModulePath(root string) string {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	data, err := safefile.ReadFile(root, "go.mod")
 	if err != nil {
 		return ""
 	}

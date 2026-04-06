@@ -74,9 +74,11 @@ func TestConcurrentPublish(t *testing.T) {
 
 func TestLogFile(t *testing.T) {
 	b := New()
-	logPath := filepath.Join(t.TempDir(), "runlog.jsonl")
+	logDir := t.TempDir()
+	logFile := "runlog.jsonl"
+	logPath := filepath.Join(logDir, logFile)
 
-	if err := b.SetLogPath(logPath); err != nil {
+	if err := b.SetLogPath(logDir, logFile); err != nil {
 		t.Fatal(err)
 	}
 

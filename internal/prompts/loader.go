@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // PromptsDirName is the subdirectory within .orchestrator for custom prompts.
@@ -46,8 +48,7 @@ func (l *Loader) Load(name string) (string, error) {
 
 	// Check project-level override first.
 	if l.override != "" {
-		overridePath := filepath.Join(l.override, name+".md")
-		if data, err := os.ReadFile(overridePath); err == nil {
+		if data, err := safefile.ReadFile(l.override, name+".md"); err == nil {
 			content := string(data)
 			l.mu.Lock()
 			l.cache[name] = content
@@ -124,12 +125,12 @@ func ExportPrompt(promptName, destDir string) (string, error) {
 		return "", fmt.Errorf("prompt %q not found: %w", promptName, err)
 	}
 
-	if err := os.MkdirAll(destDir, 0o755); err != nil {
+	if err := os.MkdirAll(destDir, 0o750); err != nil {
 		return "", fmt.Errorf("create prompts dir: %w", err)
 	}
 
 	path := filepath.Join(destDir, promptName+".md")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", fmt.Errorf("write prompt: %w", err)
 	}
 
@@ -141,7 +142,6 @@ func OverrideExists(promptName, overrideDir string) bool {
 	if overrideDir == "" {
 		return false
 	}
-	path := filepath.Join(overrideDir, promptName+".md")
-	info, err := os.Stat(path)
+	info, err := safefile.Stat(overrideDir, promptName+".md")
 	return err == nil && !info.IsDir()
 }

@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 )
 
 const ollamaDefaultModel = "qwen2.5-coder:latest"
@@ -74,7 +75,7 @@ func (r *OllamaRunner) run(prompt, model string) ([]byte, error) {
 		"-p", prompt,
 	}
 
-	cmd := exec.Command("ollama", args...)
+	cmd := executil.Command("ollama", args...)
 	cmd.Env = os.Environ()
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -107,16 +108,6 @@ func OllamaListInstalled() ([]string, error) {
 		names[i] = m.Name
 	}
 	return names, nil
-}
-
-// OllamaPull pulls a model by running `ollama pull <name>`.
-// It blocks until the pull completes or ctx is cancelled.
-func OllamaPull(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "ollama", "pull", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("ollama pull %s: %w: %s", name, err, strings.TrimSpace(string(out)))
-	}
-	return nil
 }
 
 // OllamaPopularModels is a curated list of models useful for coding tasks.

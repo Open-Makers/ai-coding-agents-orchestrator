@@ -3,12 +3,13 @@ package context
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // maxSourceFileSize limits how large a single source file can be before truncation.
@@ -66,7 +67,7 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 		if !strings.HasPrefix(full+string(filepath.Separator), rootAbs+string(filepath.Separator)) {
 			continue
 		}
-		data, err := os.ReadFile(full)
+		data, err := safefile.ReadFile(rootAbs, cfgPath)
 		if err == nil {
 			pc.AlwaysInclude[cfgPath] = string(data)
 		}
@@ -100,7 +101,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	if p.ProjectType != "" {
-		fmt.Fprintf(&sb, "### Project Type: %s\n\n", p.ProjectType)
+		_, err := fmt.Fprintf(&sb, "### Project Type: %s\n\n", p.ProjectType)
+		if err != nil {
+			return ""
+		}
 	}
 
 	if p.TreeStructure != "" {
@@ -114,7 +118,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 		if len(p.Files) < limit {
 			limit = len(p.Files)
 		}
-		fmt.Fprintf(&sb, "### Files (%d total, showing first %d)\n```\n", len(p.Files), limit)
+		_, err := fmt.Fprintf(&sb, "### Files (%d total, showing first %d)\n```\n", len(p.Files), limit)
+		if err != nil {
+			return ""
+		}
 		sb.WriteString(strings.Join(p.Files[:limit], "\n"))
 		sb.WriteString("\n```\n\n")
 	}
@@ -141,7 +148,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 		sb.WriteString("### Existing Source Code\n")
 		sb.WriteString("Below are the key source files in the project. Study them carefully before making changes.\n\n")
 		for name, content := range p.SourceFiles {
-			fmt.Fprintf(&sb, "**%s**\n```\n", name)
+			_, err := fmt.Fprintf(&sb, "**%s**\n```\n", name)
+			if err != nil {
+				return ""
+			}
 			if len(content) > maxSourceFileSize {
 				sb.WriteString(content[:maxSourceFileSize])
 				sb.WriteString("\n... (truncated)")
@@ -153,7 +163,10 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	for name, content := range p.AlwaysInclude {
-		fmt.Fprintf(&sb, "### %s\n```\n", name)
+		_, err := fmt.Fprintf(&sb, "### %s\n```\n", name)
+		if err != nil {
+			return ""
+		}
 		if len(content) > 3000 {
 			sb.WriteString(content[:3000])
 			sb.WriteString("\n... (truncated)")
@@ -191,7 +204,7 @@ func detectProjectType(root string) string {
 }
 
 // detectBrownfield returns true if the project already has meaningful source code.
-func detectBrownfield(files []string, projectType string) bool {
+func detectBrownfield(files []string, _ string) bool {
 	sourceCount := 0
 	for _, f := range files {
 		if isSourceFile(f) {
@@ -238,7 +251,7 @@ func collectSourceFiles(root string, files []string) map[string]string {
 		if totalSize >= maxTotalSourceContext {
 			break
 		}
-		content, err := os.ReadFile(filepath.Join(root, path))
+		content, err := safefile.ReadFile(root, path)
 		if err != nil {
 			continue
 		}
@@ -342,7 +355,10 @@ func buildTreeStructure(files []string) string {
 		depth := strings.Count(d, string(filepath.Separator))
 		indent := strings.Repeat("  ", depth)
 		name := filepath.Base(d)
-		fmt.Fprintf(&sb, "%s%s/\n", indent, name)
+		_, err := fmt.Fprintf(&sb, "%s%s/\n", indent, name)
+		if err != nil {
+			return ""
+		}
 	}
 	return sb.String()
 }
@@ -359,7 +375,7 @@ func gitLines(root string, args ...string) ([]string, error) {
 }
 
 func gitOutput(root string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	cmd := executil.Command("git", args...)
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {

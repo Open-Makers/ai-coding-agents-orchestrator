@@ -15,6 +15,8 @@ import (
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // No default limit — quality gate iterates until all checks pass.
@@ -51,6 +53,9 @@ type Pipeline struct {
 
 	// gateCh receives a signal when a human gate is programmatically approved.
 	gateCh chan struct{}
+
+	// regenerateCh receives a signal when the user requests artifact regeneration.
+	regenerateCh chan struct{}
 }
 
 // logger returns a non-nil logger, falling back to the default if p.log is nil.
@@ -69,15 +74,16 @@ func NewPipeline(
 	root string,
 ) *Pipeline {
 	return &Pipeline{
-		b:          b,
-		agents:     agents,
-		cfg:        cfg,
-		ws:         ws,
-		root:       root,
-		state:      PipelineIdle,
-		log:        logging.ForComponent("pipeline"),
-		niceToHave: make(map[string][]string),
-		gateCh:     make(chan struct{}, 1),
+		b:            b,
+		agents:       agents,
+		cfg:          cfg,
+		ws:           ws,
+		root:         root,
+		state:        PipelineIdle,
+		log:          logging.ForComponent("pipeline"),
+		niceToHave:   make(map[string][]string),
+		gateCh:       make(chan struct{}, 1),
+		regenerateCh: make(chan struct{}, 1),
 	}
 }
 
@@ -88,6 +94,15 @@ func (p *Pipeline) Approve() {
 	default:
 	}
 	p.gateCh <- struct{}{}
+}
+
+// Regenerate signals the pipeline to delete existing artifacts and re-run the current agent.
+func (p *Pipeline) Regenerate() {
+	select {
+	case <-p.regenerateCh:
+	default:
+	}
+	p.regenerateCh <- struct{}{}
 }
 
 // CurrentState returns the current pipeline state.
@@ -108,7 +123,7 @@ func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	promptsDir := filepath.Join(p.root, artifacts.DirName, appprompts.PromptsDirName)
 	appprompts.SetOverrideDir(promptsDir)
 
-	reqs, err := os.ReadFile(requirementsPath)
+	reqs, err := safefile.ReadFile(filepath.Dir(requirementsPath), filepath.Base(requirementsPath))
 	if err != nil {
 		return fmt.Errorf("read requirements: %w", err)
 	}
@@ -124,56 +139,78 @@ func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	ctxFragment := projCtx.SystemPromptFragment()
 
 	// ── PM (Product Vision & MoSCoW) ──
-	p.setState(PipelinePM)
-
 	var moscowData, visionData []byte
-	if p.pmArtifactsExist() {
-		p.event("PM artifacts found from previous run — presenting for approval")
-		p.emitExistingPMArtifacts()
-		moscowData, _ = p.ws.ReadFile(artifacts.MoscowFile)
-		visionData, _ = p.ws.ReadFile(artifacts.VisionFile)
-	} else if _, ok := p.agents[bus.RolePM]; ok {
-		_, err = p.runAgent(ctx, bus.RolePM, agent.PMPayload{
-			Requirements:   string(reqs),
-			ProjectContext: ctxFragment,
-		})
-		if err != nil {
-			return fmt.Errorf("pm: %w", err)
-		}
-		moscowData, _ = p.ws.ReadFile(artifacts.MoscowFile)
-		visionData, _ = p.ws.ReadFile(artifacts.VisionFile)
-	} else {
-		p.event("no PM agent configured — planner will handle prioritization")
-	}
 
-	// Gate: user must approve PM output before planning begins.
-	if len(visionData) > 0 || len(moscowData) > 0 {
-		if err := p.waitPMApproval(ctx); err != nil {
-			return err
+	for {
+		p.setState(PipelinePM)
+
+		if p.pmArtifactsExist() {
+			p.event("PM artifacts found from previous run — presenting for approval")
+			p.emitExistingPMArtifacts()
+			moscowData, _ = p.ws.ReadFile(artifacts.MoscowFile)
+			visionData, _ = p.ws.ReadFile(artifacts.VisionFile)
+		} else if _, ok := p.agents[bus.RolePM]; ok {
+			_, err = p.runAgent(ctx, bus.RolePM, agent.PMPayload{
+				Requirements:   string(reqs),
+				ProjectContext: ctxFragment,
+			})
+			if err != nil {
+				return fmt.Errorf("pm: %w", err)
+			}
+			moscowData, _ = p.ws.ReadFile(artifacts.MoscowFile)
+			visionData, _ = p.ws.ReadFile(artifacts.VisionFile)
+		} else {
+			p.event("no PM agent configured — planner will handle prioritization")
+			break
 		}
+
+		// Gate: user must approve PM output before planning begins.
+		if len(visionData) > 0 || len(moscowData) > 0 {
+			approved, err := p.waitPMApproval(ctx)
+			if err != nil {
+				return err
+			}
+			if approved {
+				break
+			}
+			// Regeneration requested — delete PM artifacts and re-run.
+			p.event("regenerating PM artifacts…")
+			p.deletePMArtifacts()
+			continue
+		}
+		break
 	}
 
 	// ── PLAN ──
-	p.setState(PipelinePlanning)
+	for {
+		p.setState(PipelinePlanning)
 
-	if p.planningArtifactsExist() {
-		p.event("planning artifacts found from previous run — presenting for approval")
-		p.logger().Info("reusing existing planning artifacts")
-		p.emitExistingArtifacts()
-	} else {
-		_, err = p.runAgent(ctx, bus.RolePlanner, agent.PlannerPayload{
-			Requirements:   string(reqs),
-			MoscowPlan:     string(moscowData),
-			ProductVision:  string(visionData),
-			ProjectContext: ctxFragment,
-		})
-		if err != nil {
-			return fmt.Errorf("plan: %w", err)
+		if p.planningArtifactsExist() {
+			p.event("planning artifacts found from previous run — presenting for approval")
+			p.logger().Info("reusing existing planning artifacts")
+			p.emitExistingArtifacts()
+		} else {
+			_, err = p.runAgent(ctx, bus.RolePlanner, agent.PlannerPayload{
+				Requirements:   string(reqs),
+				MoscowPlan:     string(moscowData),
+				ProductVision:  string(visionData),
+				ProjectContext: ctxFragment,
+			})
+			if err != nil {
+				return fmt.Errorf("plan: %w", err)
+			}
 		}
-	}
 
-	if err := p.waitPlanningApproval(ctx); err != nil {
-		return err
+		approved, err := p.waitPlanningApproval(ctx)
+		if err != nil {
+			return err
+		}
+		if approved {
+			break
+		}
+		// Regeneration requested — delete planning artifacts and re-run.
+		p.event("regenerating planning artifacts…")
+		p.deletePlanningArtifacts()
 	}
 
 	// ── CODE → TEST → REVIEW (staged) ──
@@ -612,6 +649,31 @@ func (p *Pipeline) planningArtifactsExist() bool {
 		p.ws.FileExists(artifacts.PromptsFile)
 }
 
+// deletePMArtifacts removes PM artifacts so they can be regenerated.
+func (p *Pipeline) deletePMArtifacts() {
+	for _, f := range []string{
+		artifacts.VisionFile,
+		artifacts.VisionApprovedFile,
+		artifacts.MoscowFile,
+	} {
+		_ = os.Remove(p.ws.Path(f))
+	}
+}
+
+// deletePlanningArtifacts removes planning artifacts so they can be regenerated.
+func (p *Pipeline) deletePlanningArtifacts() {
+	for _, f := range []string{
+		artifacts.ArchitectureFile,
+		artifacts.ArchitectureApprovedFile,
+		artifacts.ImplementationPlanFile,
+		artifacts.PlanApprovedFile,
+		artifacts.PromptsFile,
+		artifacts.PromptsApprovedFile,
+	} {
+		_ = os.Remove(p.ws.Path(f))
+	}
+}
+
 // emitExistingArtifacts publishes the content of existing planning artifacts
 // to the bus so the TUI can display them.
 func (p *Pipeline) emitExistingArtifacts() {
@@ -649,42 +711,55 @@ func (p *Pipeline) emitExistingPMArtifacts() {
 }
 
 // waitPMApproval gates on PM artifacts (vision + MoSCoW) before planning.
-func (p *Pipeline) waitPMApproval(ctx context.Context) error {
+// Returns false if the user requested regeneration.
+func (p *Pipeline) waitPMApproval(ctx context.Context) (bool, error) {
 	for _, filename := range []string{
 		artifacts.VisionFile,
 		artifacts.MoscowFile,
 	} {
-		if err := p.waitArtifact(ctx, filename); err != nil {
-			return err
+		approved, err := p.waitArtifact(ctx, filename)
+		if err != nil {
+			return false, err
+		}
+		if !approved {
+			return false, nil
 		}
 	}
-	return nil
+	return true, nil
 }
 
 // waitPlanningApproval gates on each planning artifact in sequence.
-func (p *Pipeline) waitPlanningApproval(ctx context.Context) error {
+// Returns false if the user requested regeneration.
+func (p *Pipeline) waitPlanningApproval(ctx context.Context) (bool, error) {
 	for _, filename := range []string{
 		artifacts.ArchitectureFile,
 		artifacts.ImplementationPlanFile,
 		artifacts.PromptsFile,
 	} {
-		if err := p.waitArtifact(ctx, filename); err != nil {
-			return err
+		approved, err := p.waitArtifact(ctx, filename)
+		if err != nil {
+			return false, err
+		}
+		if !approved {
+			return false, nil
 		}
 	}
-	return nil
+	return true, nil
 }
 
-func (p *Pipeline) waitArtifact(ctx context.Context, filename string) error {
+func (p *Pipeline) waitArtifact(ctx context.Context, filename string) (bool, error) {
 	p.logger().Info("waiting for artifact approval", slog.String("artifact", filename))
 	p.setState(PipelineGate)
 	p.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgHumanGate, filename))
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return false, ctx.Err()
+	case <-p.regenerateCh:
+		p.logger().Info("artifact regeneration requested", slog.String("artifact", filename))
+		return false, nil
 	case <-p.gateCh:
 		p.logger().Info("artifact approved", slog.String("artifact", filename))
-		return nil
+		return true, nil
 	}
 }
 
@@ -776,22 +851,37 @@ func (p *Pipeline) emitSummary() {
 
 	for _, ph := range phases {
 		if _, ok := p.agents[ph.role]; !ok {
-			fmt.Fprintf(&sb, "  ○ %s — skipped\n", ph.name)
+			_, err := fmt.Fprintf(&sb, "  ○ %s — skipped\n", ph.name)
+			if err != nil {
+				return
+			}
 			continue
 		}
 		if p.ws.FileExists(ph.file) {
-			fmt.Fprintf(&sb, "  ✓ %s — passed\n", ph.name)
+			_, err := fmt.Fprintf(&sb, "  ✓ %s — passed\n", ph.name)
+			if err != nil {
+				return
+			}
 		} else {
-			fmt.Fprintf(&sb, "  ? %s — no output\n", ph.name)
+			_, err := fmt.Fprintf(&sb, "  ? %s — no output\n", ph.name)
+			if err != nil {
+				return
+			}
 		}
 	}
 
 	// Nice-to-have summary.
 	total := p.totalNiceToHave()
 	if total > 0 {
-		fmt.Fprintf(&sb, "\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile)
+		_, err := fmt.Fprintf(&sb, "\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile)
+		if err != nil {
+			return
+		}
 		for phase, items := range p.niceToHave {
-			fmt.Fprintf(&sb, "     • %s: %d items\n", phase, len(items))
+			_, err := fmt.Fprintf(&sb, "     • %s: %d items\n", phase, len(items))
+			if err != nil {
+				return
+			}
 		}
 	}
 
@@ -803,7 +893,10 @@ func (p *Pipeline) emitSummary() {
 		artifacts.NiceToHaveFile,
 	} {
 		if p.ws.FileExists(file) {
-			fmt.Fprintf(&sb, "    • %s\n", file)
+			_, err := fmt.Fprintf(&sb, "    • %s\n", file)
+			if err != nil {
+				return
+			}
 		}
 	}
 

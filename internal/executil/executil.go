@@ -56,7 +56,7 @@ func (r *Runner) Run(command string) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = r.root
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -73,7 +73,10 @@ func (r *Runner) Run(command string) Result {
 		}
 		if ctx.Err() == context.DeadlineExceeded {
 			exitCode = 124 // same as timeout(1)
-			fmt.Fprintf(&stderrBuf, "\ncommand timed out after %s", r.timeout)
+			_, err := fmt.Fprintf(&stderrBuf, "\ncommand timed out after %s", r.timeout)
+			if err != nil {
+				return Result{}
+			}
 		}
 	}
 
@@ -91,7 +94,7 @@ func (r *Runner) RunUnchecked(command string) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = r.root
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -108,7 +111,10 @@ func (r *Runner) RunUnchecked(command string) Result {
 		}
 		if ctx.Err() == context.DeadlineExceeded {
 			exitCode = 124
-			fmt.Fprintf(&stderrBuf, "\ncommand timed out after %s", r.timeout)
+			_, err := fmt.Fprintf(&stderrBuf, "\ncommand timed out after %s", r.timeout)
+			if err != nil {
+				return Result{}
+			}
 		}
 	}
 

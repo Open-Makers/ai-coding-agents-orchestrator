@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -125,34 +126,148 @@ func (m PickerModel) View() string {
 		return m.tree.View()
 	}
 
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
-	cursorStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
-	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
-	dateStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	p := homePalette
 
-	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("orchestrator  ·  select requirements") + "\n")
-	sb.WriteString(strings.Repeat("─", m.width) + "\n\n")
+	headerStyle := lipgloss.NewStyle().
+		Background(p.headerBg).
+		Foreground(p.accent).
+		Bold(true).
+		Padding(0, 2).
+		Width(m.width)
+
+	footerStyle := lipgloss.NewStyle().
+		Background(p.footerBg).
+		Foreground(p.dim).
+		Padding(0, 1).
+		Width(m.width)
+
+	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
+	greenStyle := lipgloss.NewStyle().Foreground(p.green).Bold(true)
+	brightStyle := lipgloss.NewStyle().Foreground(p.bright)
+	goldStyle := lipgloss.NewStyle().Foreground(p.gold).Bold(true)
+	cyanStyle := lipgloss.NewStyle().Foreground(p.cyan)
+	dateStyle := lipgloss.NewStyle().Foreground(p.dim).Italic(true)
+
+	header := headerStyle.Render("◆  orchestrator  ·  select requirements")
+
+	// Build menu card content.
+	cardW := m.width - 8
+	if cardW < 40 {
+		cardW = 40
+	}
+	if cardW > 80 {
+		cardW = 80
+	}
+	innerW := cardW - 6
+	if innerW < 20 {
+		innerW = 20
+	}
+
+	var lines []string
+	lines = append(lines, goldStyle.Render(" ◆ Requirements Source"))
+	lines = append(lines, "")
 
 	for i, item := range m.items {
-		line := item.label
+		var icon, label string
+		switch {
+		case item.isNew:
+			icon = "✚"
+			label = "New — open editor"
+		case item.isPicker:
+			icon = "📂"
+			label = "Pick file from repo…"
+		default:
+			icon = "◇"
+			label = m.shortenRecentPath(item.path)
+		}
+
 		suffix := ""
 		if item.date != "" {
-			suffix = dateStyle.Render(fmt.Sprintf("  %s", item.date))
+			suffix = "  " + dateStyle.Render(item.date)
 		}
+
 		if i == m.cursor {
-			sb.WriteString(cursorStyle.Render("► "+line) + suffix + "\n")
+			activeLine := lipgloss.NewStyle().
+				Background(p.activeBg).
+				Foreground(p.green).
+				Bold(true).
+				Width(innerW).
+				Render(fmt.Sprintf(" %s %s", icon, label))
+			lines = append(lines, greenStyle.Render("▸")+activeLine+suffix)
+			if item.isNew {
+				lines = append(lines, "  "+dimStyle.Render("  Create requirements from scratch"))
+			} else if item.isPicker {
+				lines = append(lines, "  "+dimStyle.Render("  Browse repository files"))
+			} else {
+				lines = append(lines, "  "+dimStyle.Render("  Re-use previous requirements"))
+			}
 		} else {
-			sb.WriteString(dimStyle.Render("  "+line) + suffix + "\n")
+			var styledLabel string
+			if item.isNew {
+				styledLabel = cyanStyle.Render(fmt.Sprintf("  %s %s", icon, label))
+			} else if item.isPicker {
+				styledLabel = brightStyle.Render(fmt.Sprintf("  %s %s", icon, label))
+			} else {
+				styledLabel = dimStyle.Render(fmt.Sprintf("  %s %s", icon, label))
+			}
+			lines = append(lines, styledLabel+suffix)
+		}
+		if i < len(m.items)-1 {
+			lines = append(lines, "")
 		}
 	}
+
+	card := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.border).
+		Padding(1, 2).
+		Width(cardW).
+		Render(strings.Join(lines, "\n"))
 
 	if m.treeErr != "" {
-		sb.WriteString("\n" + lipgloss.NewStyle().Foreground(crt.warn).Render("error: "+m.treeErr) + "\n")
+		errBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("203")).
+			Foreground(lipgloss.Color("203")).
+			Padding(0, 2).
+			Width(cardW).
+			Render("⚠  " + m.treeErr)
+		card = lipgloss.JoinVertical(lipgloss.Left, card, "", errBox)
 	}
 
-	sb.WriteString("\n" + dimStyle.Render("↑↓ navigate   Enter select   q quit"))
-	return sb.String()
+	// Center card in available space.
+	vpH := m.height - 2
+	if vpH < 4 {
+		vpH = 4
+	}
+	body := lipgloss.Place(m.width, vpH, lipgloss.Center, lipgloss.Center, card)
+
+	// Footer with key hints.
+	keyStyle := lipgloss.NewStyle().
+		Background(p.footerBg).
+		Foreground(p.accent).
+		Bold(true)
+	hintText := func(k, desc string) string {
+		return keyStyle.Render(k) + lipgloss.NewStyle().Background(p.footerBg).Foreground(p.dim).Render(" "+desc)
+	}
+	footer := footerStyle.Render(
+		hintText("↑↓", "navigate") + "  " +
+			hintText("Enter", "select") + "  " +
+			hintText("q", "quit"),
+	)
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
+}
+
+func (m PickerModel) shortenRecentPath(path string) string {
+	rel, err := filepath.Rel(m.root, path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	if len(rel) > 45 {
+		return "…" + rel[len(rel)-44:]
+	}
+	return rel
 }
 
 func (m *PickerModel) SetSize(w, h int) {
