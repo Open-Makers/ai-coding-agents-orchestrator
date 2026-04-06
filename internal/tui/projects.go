@@ -82,7 +82,7 @@ func SaveRecentProject(projectPath string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filePath, data, 0o644)
+	return os.WriteFile(filePath, data, 0o600)
 }
 
 // RemoveRecentProject deletes a project from the recent list.
@@ -104,7 +104,7 @@ func RemoveRecentProject(projectPath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filePath, data, 0o644)
+	return os.WriteFile(filePath, data, 0o600)
 }
 
 // isHomeDir returns true when path is the user's home directory.

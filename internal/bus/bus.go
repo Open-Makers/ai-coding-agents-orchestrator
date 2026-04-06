@@ -11,13 +11,13 @@ const defaultRingSize = 500
 const defaultSubBuf = 100
 
 type Bus struct {
-	mu       sync.RWMutex
-	ring     []Message
-	head     int
-	count    int
-	subs     []chan Message
-	logPath  string
-	logFile  *os.File
+	mu      sync.RWMutex
+	ring    []Message
+	head    int
+	count   int
+	subs    []chan Message
+	logPath string
+	logFile *os.File
 }
 
 func New() *Bus {
@@ -31,7 +31,7 @@ func (b *Bus) SetLogPath(path string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("bus: open log: %w", err)
 	}

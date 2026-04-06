@@ -108,7 +108,7 @@ func Save(root string, cfg Config) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, ProjectFilename), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, ProjectFilename), data, 0o600)
 }
 
 // SaveGlobal writes cfg to ~/.orchestrator/config.yaml.
@@ -129,7 +129,7 @@ func SaveGlobal(cfg Config) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, GlobalFilename), data, 0o644)
+	return os.WriteFile(filepath.Join(dir, GlobalFilename), data, 0o600)
 }
 
 // Load reads config with layered precedence:
