@@ -15,11 +15,10 @@ import (
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
-const defaultMaxFixAttempts = 3
+// No default limit — quality gate iterates until all checks pass.
 
 // PipelineState represents the current phase of the pipeline.
 type PipelineState string
@@ -108,24 +107,13 @@ func (p *Pipeline) Regenerate() {
 // CurrentState returns the current pipeline state.
 func (p *Pipeline) CurrentState() PipelineState { return p.state }
 
-// maxFix returns the configured max fix attempts, falling back to the default.
-// For local runners (ollama, opencode with local model) there is no limit.
+// maxFix returns 0 (unlimited) — the quality gate iterates until all checks pass.
+// Users can still set max_fix_attempts in config to impose a hard cap if desired.
 func (p *Pipeline) maxFix() int {
-	if p.isLocal() {
-		return 0 // 0 means unlimited
-	}
 	if p.cfg.Project.MaxFixAttempts > 0 {
 		return p.cfg.Project.MaxFixAttempts
 	}
-	return defaultMaxFixAttempts
-}
-
-// isLocal returns true when the coder agent uses a local runner.
-func (p *Pipeline) isLocal() bool {
-	if ac, ok := p.cfg.Agents["coder"]; ok {
-		return runner.IsLocalRunner(ac)
-	}
-	return false
+	return 0
 }
 
 // Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate: TEST → REVIEW → UX → SECURITY → QA) → PR.
@@ -580,11 +568,10 @@ func (p *Pipeline) runQAReview(ctx context.Context) (string, error) {
 // fixAndRebuild sends failure to coder, rebuilds, and returns.
 // The caller (qualityGate) will restart the full quality pipeline.
 func (p *Pipeline) fixAndRebuild(ctx context.Context, ctxFragment, failure string, files *[]string, phase string, attempt, maxAttempts int) error {
-	if maxAttempts > 0 && attempt >= maxAttempts-1 {
-		return fmt.Errorf("%s issues not resolved after %d attempts", phase, maxAttempts)
-	}
-
 	if maxAttempts > 0 {
+		if attempt >= maxAttempts-1 {
+			return fmt.Errorf("%s issues not resolved after %d attempts", phase, maxAttempts)
+		}
 		p.event(fmt.Sprintf("%s issues found, sending to coder (attempt %d/%d)", phase, attempt+1, maxAttempts))
 	} else {
 		p.event(fmt.Sprintf("%s issues found, sending to coder (attempt %d)", phase, attempt+1))

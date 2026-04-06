@@ -5,27 +5,33 @@ import (
 	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // StatusBarModel renders a single-line status bar at the bottom.
 type StatusBarModel struct {
-	branch     string
-	state      string
-	stageInfo  string // e.g. "Stage 2/5: Must Have — Auth"
-	runner     string
-	model      string
-	tokenChars int // cumulative output characters (used to estimate tokens)
-	width      int
+	branch       string
+	state        string
+	stageInfo    string // e.g. "Stage 2/5: Must Have — Auth"
+	runner       string
+	model        string
+	tokenChars   int // cumulative output characters (used to estimate tokens)
+	width        int
+	scrollOffset int // marquee scroll position for stageInfo
 }
 
 func NewStatusBar(width int) StatusBarModel {
 	return StatusBarModel{width: width, state: "idle"}
 }
 
-func (m StatusBarModel) WithBranch(b string) StatusBarModel    { m.branch = b; return m }
-func (m StatusBarModel) WithState(s string) StatusBarModel     { m.state = s; return m }
-func (m StatusBarModel) WithStageInfo(s string) StatusBarModel { m.stageInfo = s; return m }
-func (m StatusBarModel) WithWidth(w int) StatusBarModel        { m.width = w; return m }
+func (m StatusBarModel) WithBranch(b string) StatusBarModel { m.branch = b; return m }
+func (m StatusBarModel) WithState(s string) StatusBarModel  { m.state = s; return m }
+func (m StatusBarModel) WithStageInfo(s string) StatusBarModel {
+	m.stageInfo = s
+	m.scrollOffset = 0
+	return m
+}
+func (m StatusBarModel) WithWidth(w int) StatusBarModel { m.width = w; return m }
 func (m StatusBarModel) WithRunnerModel(r, mdl string) StatusBarModel {
 	m.runner = r
 	m.model = mdl
@@ -35,6 +41,12 @@ func (m StatusBarModel) WithRunnerModel(r, mdl string) StatusBarModel {
 // AddTokenChars adds n output characters to the cumulative counter.
 func (m StatusBarModel) AddTokenChars(n int) StatusBarModel {
 	m.tokenChars += n
+	return m
+}
+
+// AdvanceScroll moves the marquee scroll position forward by one.
+func (m StatusBarModel) AdvanceScroll() StatusBarModel {
+	m.scrollOffset++
 	return m
 }
 
@@ -52,39 +64,107 @@ func formatTokens(chars int) string {
 	}
 }
 
+// statusBarShortcut defines a keyboard shortcut displayed in the status bar.
+type statusBarShortcut struct {
+	key   string
+	desc  string
+	color lipgloss.Color
+}
+
+// statusBarShortcuts defines the shortcut hints with per-action accent colors.
+var statusBarShortcuts = []statusBarShortcut{
+	{"↑↓", "scroll", lipgloss.Color("#7aa2f7")},      // blue — navigation
+	{"Ctrl+R", "req", lipgloss.Color("#9ece6a")},     // green — requirements
+	{"Ctrl+G", "git", lipgloss.Color("#73daca")},     // teal — git
+	{"Ctrl+C", "chat", lipgloss.Color("#2ac3de")},    // cyan — chat
+	{"Ctrl+A", "approve", lipgloss.Color("#9ece6a")}, // green — approve
+	{"Ctrl+X", "cancel", lipgloss.Color("#f7768e")},  // coral — cancel
+	{"q", "quit", lipgloss.Color("#6b553f")},         // dim — quit
+}
+
 func (m StatusBarModel) View() string {
-	left := ""
+	// ── Right side (always fully visible) ──
+	descStyle := lipgloss.NewStyle().
+		Background(crt.panelBg).
+		Foreground(crt.dim)
+
+	var hints []string
+	for _, sc := range statusBarShortcuts {
+		keyStyle := lipgloss.NewStyle().
+			Background(crt.panelBg).
+			Foreground(sc.color).
+			Bold(true)
+		hints = append(hints, keyStyle.Render(sc.key)+descStyle.Render(" "+sc.desc))
+	}
+
+	versionTag := lipgloss.NewStyle().
+		Background(crt.panelBg).
+		Foreground(lipgloss.Color("#e0af68")).
+		Bold(true).
+		Render("v" + Version)
+
+	rightSide := strings.Join(hints, "  ") + "  " + versionTag
+	rightWidth := lipglossLen(rightSide)
+
+	// ── Left side: fixed prefix + scrollable stageInfo + fixed suffix ──
+	prefix := ""
 	if m.branch != "" {
-		left = styleStatusKey.Render(m.branch) + "  "
+		prefix = styleStatusKey.Render(m.branch) + "  "
 	}
-	left += styleStatusBar.Render("● " + m.state)
+	prefix += styleStatusBar.Render("● " + m.state)
 
-	if m.stageInfo != "" {
-		left += "  " + styleStatusKey.Render("▸ "+m.stageInfo)
-	}
-
+	suffix := ""
 	if m.runner != "" || m.model != "" {
 		info := m.runner
 		if m.model != "" {
 			info += "/" + m.model
 		}
-		left += "  " + styleStatusKey.Render(info)
+		suffix += "  " + styleStatusKey.Render(info)
 	}
-
 	if m.tokenChars > 0 {
-		left += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.tokenChars))
+		suffix += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.tokenChars))
 	}
 
-	shortcuts := styleStatusBar.Render(
-		" ↑↓ scroll  Ctrl+R req  Ctrl+G git  Ctrl+C chat  Ctrl+A approve  Ctrl+X cancel  q quit  v" + Version,
-	)
+	prefixWidth := lipglossLen(prefix)
+	suffixWidth := lipglossLen(suffix)
+	separatorWidth := 2 // "  " between prefix and stageInfo
 
-	gap := m.width - lipglossLen(left) - lipglossLen(shortcuts)
+	availableForStage := m.width - rightWidth - prefixWidth - suffixWidth - separatorWidth - 2
+	stageRendered := ""
+	if m.stageInfo != "" && availableForStage > 4 {
+		stageRendered = "  " + m.renderScrollingStage(availableForStage)
+	}
+
+	left := prefix + stageRendered + suffix
+
+	gap := m.width - lipglossLen(left) - rightWidth
 	if gap < 0 {
 		gap = 0
 	}
 
-	return left + strings.Repeat(" ", gap) + shortcuts
+	return left + strings.Repeat(" ", gap) + rightSide
+}
+
+// renderScrollingStage returns the stageInfo text, applying marquee scrolling
+// if it exceeds the available width.
+func (m StatusBarModel) renderScrollingStage(availableWidth int) string {
+	label := "▸ " + m.stageInfo
+	runes := []rune(label)
+
+	if len(runes) <= availableWidth {
+		return styleStatusKey.Render(label)
+	}
+
+	separator := []rune("   ···   ")
+	cycle := append(runes, separator...)
+	cycleLen := len(cycle)
+
+	visible := make([]rune, availableWidth)
+	for i := 0; i < availableWidth; i++ {
+		visible[i] = cycle[(m.scrollOffset+i)%cycleLen]
+	}
+
+	return styleStatusKey.Render(string(visible))
 }
 
 // lipglossLen approximates the visible width of a rendered string by stripping ANSI escapes.

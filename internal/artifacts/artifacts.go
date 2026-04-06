@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
@@ -57,11 +58,18 @@ func EnsureWorkspace(root string) (Workspace, error) {
 }
 
 // Path returns a path to a known artifact file inside the workspace.
+// Returns an empty string if name is empty.
 func (w Workspace) Path(name string) string {
+	if name == "" {
+		return w.Dir
+	}
 	return filepath.Join(w.Dir, name)
 }
 
 func (w Workspace) WriteFile(name string, data []byte) error {
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("write %s: path traversal rejected", name)
+	}
 	path := w.Path(name)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", name, err)

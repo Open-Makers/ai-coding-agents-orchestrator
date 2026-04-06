@@ -19,6 +19,7 @@ type homeAction int
 
 const (
 	homeActionRun homeAction = iota
+	homeActionOpenProject
 	homeActionGlobalSettings
 	homeActionSetup
 	homeActionClean
@@ -41,17 +42,17 @@ var homePalette = struct {
 	accent, green, dim, bright, gold, cyan, red lipgloss.Color
 	border, activeBg, headerBg, footerBg        lipgloss.Color
 }{
-	accent:   lipgloss.Color("69"),
-	green:    lipgloss.Color("82"),
-	dim:      lipgloss.Color("240"),
-	bright:   lipgloss.Color("252"),
-	gold:     lipgloss.Color("178"),
-	cyan:     lipgloss.Color("86"),
-	red:      lipgloss.Color("203"),
-	border:   lipgloss.Color("237"),
-	activeBg: lipgloss.Color("236"),
-	headerBg: lipgloss.Color("234"),
-	footerBg: lipgloss.Color("235"),
+	accent:   lipgloss.Color("#7aa2f7"), // blue accent for titles
+	green:    lipgloss.Color("#9ece6a"), // green
+	dim:      crt.dim,
+	bright:   crt.bright,
+	gold:     lipgloss.Color("#e0af68"), // warm gold
+	cyan:     lipgloss.Color("#2ac3de"), // cyan
+	red:      lipgloss.Color("#f7768e"), // coral
+	border:   lipgloss.Color("#3b4261"), // slightly brighter border
+	activeBg: crt.muted,
+	headerBg: crt.panelBg,
+	footerBg: crt.panelBg,
 }
 
 // ── HomeModel ────────────────────────────────────────────────────────────────
@@ -67,6 +68,10 @@ type HomeModel struct {
 	width   int
 	height  int
 
+	// projectValid is false when root is not a real project directory
+	// (e.g. home dir or missing project markers). Disables Run, Setup, Clean.
+	projectValid bool
+
 	// Cached project info — computed once in NewHomeModel, stable across renders.
 	cachedRunner     string
 	cachedModel      string
@@ -75,6 +80,9 @@ type HomeModel struct {
 	cachedPromptLang string
 	cachedBranch     string
 	cachedOverrides  []agentOverride
+
+	// Recent projects from ~/.orchestrator/projects.json.
+	recentProjects []RecentProject
 
 	confirmQuit bool // true when showing quit confirmation
 	scrollX     int  // horizontal scroll offset (visible chars)
@@ -98,7 +106,10 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 
 	projectName := cfg.Project.Name
 	if projectName == "" && root != "" {
-		projectName = filepath.Base(root)
+		base := filepath.Base(root)
+		if base != "/" && base != "." {
+			projectName = base
+		}
 	}
 	if projectName == "" {
 		projectName = "(unnamed)"
@@ -118,6 +129,7 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		root:             root,
 		wsPath:           wsPath,
 		history:          history,
+		projectValid:     isValidProjectRoot(root),
 		cachedRunner:     runnerName,
 		cachedModel:      modelName,
 		cachedProject:    projectName,
@@ -125,11 +137,13 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		cachedPromptLang: promptLang,
 		cachedBranch:     gitBranch,
 		cachedOverrides:  overrides,
+		recentProjects:   LoadRecentProjects(),
 		items: []homeMenuItem{
 			{icon: "▶", label: "Run Pipeline", desc: "Select requirements and start agents", action: homeActionRun, key: "Enter"},
+			{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
 			{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
 			{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
-			{icon: "✦", label: "Clean Workspace", desc: "Remove artifacts, keep config", action: homeActionClean, key: "c"},
+			{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports, keep code and config", action: homeActionClean, key: "c"},
 			{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
 		},
 		width:  80,
@@ -144,8 +158,6 @@ func (m HomeModel) Init() tea.Cmd {
 // ── Update ───────────────────────────────────────────────────────────────────
 
 func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
-	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -164,7 +176,7 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			if m.ready {
 				m.viewport.SetContent(m.renderContent())
 			}
-			return m, tea.Batch(cmds...)
+			return m, nil
 		}
 
 		switch msg.String() {
@@ -178,16 +190,27 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			}
 		case "enter", " ":
 			selected := m.items[m.cursor].action
+			if !m.projectValid && requiresProject(selected) {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			if selected == homeActionQuit {
 				m.confirmQuit = true
 			} else {
 				return m, m.selectAction(selected)
 			}
 		case "s", "S":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionSetup)
 		case "g", "G":
 			return m, m.selectAction(homeActionGlobalSettings)
+		case "o", "O":
+			return m, m.selectAction(homeActionOpenProject)
 		case "c", "C":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionClean)
 		case "q", "Q":
 			m.confirmQuit = true
@@ -201,14 +224,25 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 		case "right":
 			m.scrollX += horizontalScrollStep
 		case "1":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
 			return m, m.selectAction(homeActionRun)
 		case "2":
-			return m, m.selectAction(homeActionGlobalSettings)
+			return m, m.selectAction(homeActionOpenProject)
 		case "3":
-			return m, m.selectAction(homeActionSetup)
+			return m, m.selectAction(homeActionGlobalSettings)
 		case "4":
-			return m, m.selectAction(homeActionClean)
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
+			return m, m.selectAction(homeActionSetup)
 		case "5":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
+			return m, m.selectAction(homeActionClean)
+		case "6":
 			m.confirmQuit = true
 		}
 	}
@@ -218,7 +252,7 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 		m.viewport.SetContent(m.renderContent())
 	}
 
-	return m, tea.Batch(cmds...)
+	return m, nil
 }
 
 func (m HomeModel) selectAction(action homeAction) tea.Cmd {
@@ -244,7 +278,7 @@ func (m HomeModel) View() string {
 		Width(m.width)
 
 	header := headerStyle.Render(
-		"◆  orchestrator v" + Version,
+		"◈  O R C H E S T R A T O R  v" + Version,
 	)
 
 	footer := m.renderFooter(footerStyle)
@@ -298,7 +332,7 @@ func (m HomeModel) renderContent() string {
 	logoBlock := m.renderLogo(contentWidth)
 	pipelineBlock := m.renderPipeline(contentWidth)
 
-	sep := dimStyle.Render(strings.Repeat("─", contentWidth))
+	sep := lipgloss.NewStyle().Foreground(homePalette.border).Render(strings.Repeat("─", contentWidth))
 
 	infoBlock := m.renderInfoCard(contentWidth)
 	menuBlock := m.renderMenu(contentWidth)
@@ -339,17 +373,17 @@ func (m HomeModel) renderContent() string {
 
 	// Quit confirmation overlay.
 	if m.confirmQuit {
-		warnStyle := lipgloss.NewStyle().Foreground(homePalette.red).Bold(true)
+		warnStyle := lipgloss.NewStyle().Foreground(crt.warn).Bold(true)
 		confirmBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(homePalette.red).
+			BorderForeground(crt.warn).
 			Padding(1, 3).
 			Render(
-				warnStyle.Render("  Quit orchestrator?") + "\n\n" +
+				warnStyle.Render("  QUIT ORCHESTRATOR?") + "\n\n" +
 					dimStyle.Render("  Press ") +
-					lipgloss.NewStyle().Foreground(homePalette.bright).Bold(true).Render("y") +
+					lipgloss.NewStyle().Foreground(crt.bright).Bold(true).Render("y") +
 					dimStyle.Render(" or ") +
-					lipgloss.NewStyle().Foreground(homePalette.bright).Bold(true).Render("Enter") +
+					lipgloss.NewStyle().Foreground(crt.bright).Bold(true).Render("Enter") +
 					dimStyle.Render(" to confirm, any other key to cancel"),
 			)
 		placeW := m.width
@@ -382,35 +416,97 @@ func (m HomeModel) renderContent() string {
 	return horizontalSlice(content, scrollX, m.width)
 }
 
+// ── Block-art pixel font ─────────────────────────────────────────────────────
+
+// blockGlyphs defines each letter as a 4-wide × 5-tall pixel grid.
+// '#' = filled pixel, '.' = empty pixel.
+var blockGlyphs = map[rune][]string{
+	'O': {".##.", "#..#", "#..#", "#..#", ".##."},
+	'R': {"###.", "#..#", "###.", "#.#.", "#..#"},
+	'C': {".###", "#...", "#...", "#...", ".###"},
+	'H': {"#..#", "#..#", "####", "#..#", "#..#"},
+	'E': {"####", "#...", "###.", "#...", "####"},
+	'S': {"####", "#...", ".##.", "...#", "####"},
+	'T': {"####", ".##.", ".##.", ".##.", ".##."},
+	'A': {".##.", "#..#", "####", "#..#", "#..#"},
+	' ': {"....", "....", "....", "....", "...."},
+}
+
+// renderBlockText renders text as chunky pixel-art using Unicode half-block characters.
+// 5 pixel rows → 3 display rows via ▀▄█ compositing.
+func renderBlockText(text string) []string {
+	pixelRows := make([]string, 5)
+	for i, ch := range text {
+		glyph := blockGlyphs[ch]
+		if glyph == nil {
+			glyph = blockGlyphs[' ']
+		}
+		if i > 0 {
+			for r := range pixelRows {
+				pixelRows[r] += "."
+			}
+		}
+		for r := range pixelRows {
+			pixelRows[r] += glyph[r]
+		}
+	}
+
+	pairs := [][2]int{{0, 1}, {2, 3}, {4, -1}}
+	result := make([]string, len(pairs))
+	for i, pair := range pairs {
+		top := pixelRows[pair[0]]
+		bot := ""
+		if pair[1] >= 0 {
+			bot = pixelRows[pair[1]]
+		} else {
+			bot = strings.Repeat(".", len(top))
+		}
+		var sb strings.Builder
+		for j := 0; j < len(top); j++ {
+			t, b := top[j] == '#', bot[j] == '#'
+			switch {
+			case t && b:
+				sb.WriteRune('█')
+			case t:
+				sb.WriteRune('▀')
+			case b:
+				sb.WriteRune('▄')
+			default:
+				sb.WriteRune(' ')
+			}
+		}
+		result[i] = sb.String()
+	}
+	return result
+}
+
 // ── Logo ─────────────────────────────────────────────────────────────────────
 
 func (m HomeModel) renderLogo(maxW int) string {
-	p := homePalette
-	logoStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
-	tagStyle := lipgloss.NewStyle().Foreground(p.dim).Italic(true)
+	tagStyle := lipgloss.NewStyle().Foreground(homePalette.dim)
 
-	logo := []string{
-		`                 _               _             _              `,
-		`   ___  _ __ ___| |__   ___  ___| |_ _ __ __ _| |_ ___  _ __ `,
-		`  / _ \| '__/ __| '_ \ / _ \/ __| __| '__/ _' | __/ _ \| '__|`,
-		` | (_) | | | (__| | | |  __/\__ \ |_| | | (_| | || (_) | |   `,
-		`  \___/|_|  \___|_| |_|\___||___/\__|_|  \__,_|\__\___/|_|   `,
-	}
-
-	compact := maxW < 64
-	if compact {
-		// Smaller terminals get a simple one-liner.
+	if maxW < 62 {
+		titleStyle := lipgloss.NewStyle().Foreground(homePalette.gold).Bold(true)
 		return lipgloss.JoinVertical(lipgloss.Center,
-			logoStyle.Render("◆ ORCHESTRATOR"),
-			tagStyle.Render("AI-powered multi-agent coding pipeline"),
+			titleStyle.Render("◈ ORCHESTRATOR"),
+			tagStyle.Render("AI multi-agent coding pipeline"),
 		)
 	}
 
+	blockLines := renderBlockText("ORCHESTRATOR")
+
+	glowBright := lipgloss.NewStyle().Foreground(lipgloss.Color("#ffd787")).Bold(true)
+	glowDim := lipgloss.NewStyle().Foreground(lipgloss.Color("#d7af5f"))
+
 	var lines []string
-	for _, l := range logo {
-		lines = append(lines, logoStyle.Render(l))
+	for i, bl := range blockLines {
+		if i < 2 {
+			lines = append(lines, glowBright.Render(bl))
+		} else {
+			lines = append(lines, glowDim.Render(bl))
+		}
 	}
-	lines = append(lines, tagStyle.Render("  AI-powered multi-agent coding pipeline"))
+	lines = append(lines, tagStyle.Render("       AI-powered multi-agent coding pipeline"))
 
 	return strings.Join(lines, "\n")
 }
@@ -418,36 +514,22 @@ func (m HomeModel) renderLogo(maxW int) string {
 // ── Pipeline visualisation ───────────────────────────────────────────────────
 
 func (m HomeModel) renderPipeline(maxW int) string {
-	agents := []struct {
-		label string
-		role  string
-	}{
-		{"PM", "pm"},
-		{"Plan", "planner"},
-		{"Code", "coder"},
-		{"Test", "tester"},
-		{"Review", "reviewer"},
-		{"UX", "ux_reviewer"},
-		{"Sec", "security"},
-		{"QA", "qa"},
-		{"PR", "pr"},
-	}
+	agents := []string{"PM", "PLAN", "CODE", "TEST", "REVIEW", "UX", "SEC", "QA", "PR"}
 
-	dimArrow := lipgloss.NewStyle().Foreground(homePalette.dim).Render(" → ")
+	arrow := lipgloss.NewStyle().Foreground(crt.dim).Render(" → ")
 
 	var parts []string
-	for _, ag := range agents {
-		c := roleColor(ag.role)
-		badge := lipgloss.NewStyle().
-			Foreground(c).
-			Bold(true).
-			Render(ag.label)
-		parts = append(parts, badge)
+	for _, label := range agents {
+		color := crt.primary
+		if c, ok := pipelineColors[label]; ok {
+			color = c
+		}
+		style := lipgloss.NewStyle().Foreground(color).Bold(true)
+		parts = append(parts, style.Render(label))
 	}
 
-	pipeline := strings.Join(parts, dimArrow)
+	pipeline := strings.Join(parts, arrow)
 
-	// Center within available width.
 	return lipgloss.PlaceHorizontal(maxW, lipgloss.Center, pipeline)
 }
 
@@ -458,45 +540,62 @@ func (m HomeModel) renderInfoCard(contentWidth int) string {
 	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
 	valueStyle := lipgloss.NewStyle().Foreground(p.bright)
 	labelStyle := lipgloss.NewStyle().Foreground(p.dim).Width(12)
-	goldStyle := lipgloss.NewStyle().Foreground(p.gold).Bold(true)
-	cyanStyle := lipgloss.NewStyle().Foreground(p.cyan)
+	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
+
+	cardW := contentWidth/2 - 2
+	if contentWidth < 90 {
+		cardW = contentWidth - 4
+	}
 
 	var lines []string
-	lines = append(lines, goldStyle.Render(" ◆ Project"))
+	lines = append(lines, titleStyle.Render(" ◈ PROJECT"))
 	lines = append(lines, "")
+
+	if !m.projectValid {
+		warnStyle := lipgloss.NewStyle().Foreground(p.gold)
+		lines = append(lines, warnStyle.Render("  ⚠ No project selected"))
+		lines = append(lines, "")
+		lines = append(lines, dimStyle.Render("  Press ")+
+			lipgloss.NewStyle().Foreground(p.accent).Bold(true).Render("o")+
+			dimStyle.Render(" to open a project directory"))
+		lines = append(lines, "")
+		lines = append(lines, dimStyle.Render("  Current directory is not a"))
+		lines = append(lines, dimStyle.Render("  recognized project root."))
+
+		return lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(p.gold).
+			Padding(0, 1).
+			Width(cardW).
+			Render(strings.Join(lines, "\n"))
+	}
 
 	row := func(label, value string, style lipgloss.Style) {
 		lines = append(lines, fmt.Sprintf("  %s %s", labelStyle.Render(label), style.Render(value)))
 	}
 
-	row("name", m.cachedProject, valueStyle)
+	row("NAME", m.cachedProject, valueStyle)
 	if m.cachedLanguage != "" {
-		row("language", m.cachedLanguage, valueStyle)
+		row("LANG", m.cachedLanguage, valueStyle)
 	}
 	if m.cachedBranch != "" {
-		row("branch", " "+m.cachedBranch, cyanStyle)
+		row("BRANCH", " "+m.cachedBranch, valueStyle)
 	}
-	row("runner", m.cachedRunner+dimStyle.Render(" (global)"), valueStyle)
-	row("model", m.cachedModel+dimStyle.Render(" (global)"), valueStyle)
-	row("response lang", m.cachedPromptLang+dimStyle.Render(" (global)"), valueStyle)
+	row("RUNNER", m.cachedRunner+dimStyle.Render(" (global)"), valueStyle)
+	row("MODEL", m.cachedModel+dimStyle.Render(" (global)"), valueStyle)
+	row("RESP LANG", m.cachedPromptLang+dimStyle.Render(" (global)"), valueStyle)
 
 	if len(m.cachedOverrides) > 0 {
 		lines = append(lines, "")
-		lines = append(lines, dimStyle.Render("  agents:"))
+		lines = append(lines, dimStyle.Render("  AGENTS:"))
 		for _, ov := range m.cachedOverrides {
 			info := valueStyle.Render(ov.runner + " / " + ov.model)
-			c := roleColor(ov.role)
-			roleStyle := lipgloss.NewStyle().Foreground(c)
+			agentStyle := lipgloss.NewStyle().Foreground(roleColor(ov.role))
 			lines = append(lines, fmt.Sprintf("   %s %s",
-				roleStyle.Render(fmt.Sprintf("%-12s", ov.role)),
+				agentStyle.Render(fmt.Sprintf("%-12s", strings.ToUpper(ov.role))),
 				info,
 			))
 		}
-	}
-
-	cardW := contentWidth/2 - 2
-	if contentWidth < 90 {
-		cardW = contentWidth - 4
 	}
 
 	return lipgloss.NewStyle().
@@ -512,41 +611,65 @@ func (m HomeModel) renderInfoCard(contentWidth int) string {
 func (m HomeModel) renderMenu(contentWidth int) string {
 	p := homePalette
 	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
-	valueStyle := lipgloss.NewStyle().Foreground(p.bright)
-	greenStyle := lipgloss.NewStyle().Foreground(p.green).Bold(true)
-	goldStyle := lipgloss.NewStyle().Foreground(p.gold).Bold(true)
+	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
+
+	// Each menu item gets its own accent color.
+	itemColors := []lipgloss.Color{
+		p.green,  // Run Pipeline
+		p.accent, // Open Project
+		p.cyan,   // Global Settings
+		p.gold,   // Project Setup
+		p.red,    // Reset Artifacts
+		p.dim,    // Quit
+	}
 
 	cardW := contentWidth/2 - 2
 	if contentWidth < 90 {
 		cardW = contentWidth - 4
 	}
-	// Inner width available for text (card border + padding eat ~4 chars).
 	innerW := cardW - 6
 	if innerW < 20 {
 		innerW = 20
 	}
 
 	var lines []string
-	lines = append(lines, goldStyle.Render(" ◆ Actions"))
+	lines = append(lines, titleStyle.Render(" ◈ ACTIONS"))
 	lines = append(lines, "")
 
 	for i, item := range m.items {
+		disabled := !m.projectValid && requiresProject(item.action)
+
+		itemColor := p.bright
+		if i < len(itemColors) {
+			itemColor = itemColors[i]
+		}
+		if disabled {
+			itemColor = p.dim
+		}
+
 		key := dimStyle.Render("[" + item.key + "]")
 
+		desc := item.desc
+		if disabled {
+			desc = "Open a project first (o)"
+		}
+
 		if i == m.cursor {
-			label := fmt.Sprintf(" %s %s", item.icon, item.label)
+			label := fmt.Sprintf(" %s %s", item.icon, strings.ToUpper(item.label))
 			activeLine := lipgloss.NewStyle().
 				Background(p.activeBg).
-				Foreground(p.green).
+				Foreground(itemColor).
 				Bold(true).
 				Width(innerW).
 				Render(label)
-			lines = append(lines, greenStyle.Render("▸")+activeLine+" "+key)
-			lines = append(lines, "  "+dimStyle.Render("  "+item.desc))
+			activeMarker := lipgloss.NewStyle().Foreground(itemColor).Bold(true)
+			lines = append(lines, activeMarker.Render("▸")+activeLine+" "+key)
+			lines = append(lines, "  "+dimStyle.Render("  "+desc))
 		} else {
-			label := fmt.Sprintf("  %s %s", item.icon, item.label)
-			lines = append(lines, valueStyle.Render(label)+"  "+key)
-			lines = append(lines, "  "+dimStyle.Render("  "+item.desc))
+			inactiveStyle := lipgloss.NewStyle().Foreground(itemColor)
+			label := fmt.Sprintf("  %s %s", item.icon, strings.ToUpper(item.label))
+			lines = append(lines, inactiveStyle.Render(label)+"  "+key)
+			lines = append(lines, "  "+dimStyle.Render("  "+desc))
 		}
 		if i < len(m.items)-1 {
 			lines = append(lines, "")
@@ -561,25 +684,70 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 		Render(strings.Join(lines, "\n"))
 }
 
-// ── History ──────────────────────────────────────────────────────────────────
+// ── Recent Projects ──────────────────────────────────────────────────────────
 
 func (m HomeModel) renderHistory() string {
-	if len(m.history) == 0 {
+	p := homePalette
+	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
+	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
+	nameStyle := lipgloss.NewStyle().Foreground(p.bright)
+	pathStyle := lipgloss.NewStyle().Foreground(p.dim)
+	activeStyle := lipgloss.NewStyle().Foreground(p.green)
+
+	// Show recent projects (excluding current).
+	var filtered []RecentProject
+	for _, proj := range m.recentProjects {
+		if proj.Path != m.root {
+			filtered = append(filtered, proj)
+		}
+	}
+
+	if len(filtered) == 0 {
 		return ""
 	}
-	dimStyle := lipgloss.NewStyle().Foreground(homePalette.dim)
 
 	var lines []string
-	lines = append(lines, dimStyle.Render("  ◆ Recent Requirements"))
-	maxShow := 3
-	if len(m.history) < maxShow {
-		maxShow = len(m.history)
+	lines = append(lines, titleStyle.Render("  ◈ RECENT PROJECTS")+"  "+dimStyle.Render("(o to switch)"))
+
+	maxShow := 5
+	if len(filtered) < maxShow {
+		maxShow = len(filtered)
 	}
 	for i := 0; i < maxShow; i++ {
-		display := m.shortenPath(m.history[i])
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("    · %s", display)))
+		proj := filtered[i]
+		exists := dirExists(proj.Path)
+		marker := activeStyle.Render("●")
+		if !exists {
+			marker = dimStyle.Render("○")
+		}
+		name := nameStyle.Render(proj.Name)
+		short := m.shortenProjectPath(proj.Path)
+		line := fmt.Sprintf("    %s %s  %s", marker, name, pathStyle.Render(short))
+		lines = append(lines, line)
+	}
+	if len(filtered) > maxShow {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("    … and %d more", len(filtered)-maxShow)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m HomeModel) shortenProjectPath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	// Ensure home ends with separator so "/home/user" doesn't match "/home/username".
+	homePrefix := home
+	if !strings.HasSuffix(homePrefix, string(filepath.Separator)) {
+		homePrefix += string(filepath.Separator)
+	}
+	if path == home {
+		return "~"
+	}
+	if strings.HasPrefix(path, homePrefix) {
+		return "~" + string(filepath.Separator) + path[len(homePrefix):]
+	}
+	return path
 }
 
 // ── Footer ───────────────────────────────────────────────────────────────────
@@ -601,9 +769,10 @@ func (m HomeModel) renderFooter(style lipgloss.Style) string {
 	}
 	hints = append(hints,
 		hint("Enter", "select"),
+		hint("o", "project"),
 		hint("g", "global"),
 		hint("s", "setup"),
-		hint("c", "clean"),
+		hint("c", "reset"),
 		hint("q", "quit"),
 	)
 	left := strings.Join(hints, "  ")
@@ -617,12 +786,23 @@ func (m HomeModel) renderFooter(style lipgloss.Style) string {
 			Render(fmt.Sprintf("%.0f%%", pct))
 	}
 
-	gap := m.width - lipglossLen(left) - lipglossLen(scrollInfo) - 2
+	versionTag := lipgloss.NewStyle().
+		Background(p.footerBg).
+		Foreground(p.gold).
+		Bold(true).
+		Render("v" + Version)
+
+	right := versionTag
+	if scrollInfo != "" {
+		right = scrollInfo + "  " + versionTag
+	}
+
+	gap := m.width - lipglossLen(left) - lipglossLen(right) - 2
 	if gap < 0 {
 		gap = 0
 	}
 
-	return style.Render(left + strings.Repeat(" ", gap) + scrollInfo)
+	return style.Render(left + strings.Repeat(" ", gap) + right)
 }
 
 // ── Data resolution helpers ──────────────────────────────────────────────────
@@ -718,4 +898,38 @@ func (m HomeModel) workspaceStatus() string {
 		return "◇ workspace ready"
 	}
 	return "◆ artifacts: " + strings.Join(found, ", ")
+}
+
+// isValidProjectRoot returns true when root looks like a real project directory.
+// It rejects the user's home directory and directories without any project markers.
+func isValidProjectRoot(root string) bool {
+	if root == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && filepath.Clean(root) == filepath.Clean(home) {
+		return false
+	}
+	// Check project markers plus .orchestrator workspace.
+	// Avoid append(projectMarkers, ...) — it can mutate the shared slice.
+	for _, marker := range projectMarkers {
+		if _, err := os.Stat(filepath.Join(root, marker)); err == nil {
+			return true
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, ".orchestrator")); err == nil {
+		return true
+	}
+	return false
+}
+
+// requiresProject returns true for actions that need a valid project directory.
+func requiresProject(action homeAction) bool {
+	switch action {
+	case homeActionRun, homeActionSetup, homeActionClean:
+		return true
+	case homeActionOpenProject, homeActionGlobalSettings, homeActionQuit:
+		return false
+	}
+	return false
 }

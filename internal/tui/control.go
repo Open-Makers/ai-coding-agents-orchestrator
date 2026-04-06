@@ -302,8 +302,8 @@ func (m ControlModel) View() string {
 	}
 
 	convLabel := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("240")).
-		Render("  Conversation")
+		Foreground(crt.dim).
+		Render("  CONVERSATION")
 
 	parts := []string{
 		m.renderAgentSummary(),
@@ -321,15 +321,15 @@ func (m ControlModel) View() string {
 	mainView := strings.Join(parts, "\n")
 
 	if m.confirmQuit {
-		dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-		brightStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+		dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+		warnStyle := lipgloss.NewStyle().Foreground(crt.warn).Bold(true)
+		brightStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
 		confirmBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("203")).
+			BorderForeground(crt.warn).
 			Padding(1, 3).
 			Render(
-				warnStyle.Render("  Quit orchestrator?") + "\n\n" +
+				warnStyle.Render("  QUIT ORCHESTRATOR?") + "\n\n" +
 					dimStyle.Render("  Press ") +
 					brightStyle.Render("y") +
 					dimStyle.Render(" or ") +
@@ -353,22 +353,30 @@ func (m *ControlModel) layout() {
 
 // renderPhaseBar renders a one-line pipeline progress indicator with planning sub-stages.
 func (m ControlModel) renderPhaseBar() string {
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	sepStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
-	doneStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Bold(true)
-	activeStyle := lipgloss.NewStyle().Foreground(roleColor("planner")).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	sepStyle := lipgloss.NewStyle().Foreground(crt.muted)
+	doneStyle := lipgloss.NewStyle().Foreground(crt.success).Bold(true)
+
+	phaseActiveStyle := func(label string) lipgloss.Style {
+		if c, ok := pipelineColors[label]; ok {
+			return lipgloss.NewStyle().Foreground(c).Bold(true)
+		}
+		return lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+	}
 
 	var parts []string
 
 	for _, gate := range planningGates {
-		label := gateLabel(gate)
+		label := strings.ToUpper(gateLabel(gate))
 		switch {
 		case m.approvedGates[gate]:
 			parts = append(parts, doneStyle.Render("✓ "+label))
 		case m.gateArtifact == gate:
-			parts = append(parts, activeStyle.Render("⏸ "+label))
+			style := phaseActiveStyle(label)
+			parts = append(parts, style.Render("⏸ "+label))
 		case strings.Contains(m.phase, "planning") && !m.approvedGates[gate] && m.gateArtifact == "":
-			parts = append(parts, activeStyle.Render("◉ "+label))
+			style := phaseActiveStyle(label)
+			parts = append(parts, style.Render("◉ "+label))
 		default:
 			parts = append(parts, dimStyle.Render("○ "+label))
 		}
@@ -376,11 +384,12 @@ func (m ControlModel) renderPhaseBar() string {
 
 	postPhases := []string{"coding", "testing", "reviewing", "fixing", "done"}
 	for _, ph := range postPhases {
+		label := strings.ToUpper(ph)
 		if strings.Contains(m.phase, ph) {
-			c := roleColor(phaseRole(ph))
-			parts = append(parts, lipgloss.NewStyle().Foreground(c).Bold(true).Render("◉ "+ph))
+			style := phaseActiveStyle(label)
+			parts = append(parts, style.Render("◉ "+label))
 		} else {
-			parts = append(parts, dimStyle.Render("○ "+ph))
+			parts = append(parts, dimStyle.Render("○ "+label))
 		}
 	}
 
@@ -399,19 +408,20 @@ func (m ControlModel) renderAgentSummary() string {
 }
 
 func renderAgentPill(role bus.AgentRole, state AgentState) string {
-	roleText := roleStyle(string(role)).Bold(true).Render(strings.ToUpper(string(role)))
+	color := roleColor(string(role))
+	roleText := lipgloss.NewStyle().Foreground(color).Bold(true).Render(strings.ToUpper(string(role)))
 	var stateText string
 	switch state {
 	case AgentRunning:
-		stateText = styleRunning.Render("running")
+		stateText = styleRunning.Render("RUNNING")
 	case AgentDone:
-		stateText = styleDone.Render("done")
+		stateText = styleDone.Render("DONE")
 	case AgentError:
-		stateText = styleError.Render("error")
+		stateText = styleError.Render("ERROR")
 	case AgentGate:
-		stateText = styleGate.Render("gate")
+		stateText = styleGate.Render("GATE")
 	default:
-		stateText = styleWaiting.Render("waiting")
+		stateText = styleWaiting.Render("WAITING")
 	}
 	return roleText + " " + stateText
 }

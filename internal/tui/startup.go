@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,34 +19,41 @@ import (
 type startupPhase int
 
 const (
-	startupPhaseHome       startupPhase = iota
-	startupPhaseSetup                   // API key / model config
-	startupPhaseModulePath              // Go module path input
-	startupPhasePicker                  // file picker
-	startupPhaseEditor                  // inline requirements editor
+	startupPhaseHome        startupPhase = iota // main menu
+	startupPhaseSetup                           // API key / model config
+	startupPhaseModulePath                      // Go module path input
+	startupPhasePicker                          // file picker
+	startupPhaseEditor                          // inline requirements editor
+	startupPhaseOpenProject                     // project directory browser
+	startupPhaseProjectList                     // recent projects + browse
 )
 
 // startupModel is a standalone Bubble Tea model shown when the orchestrator is
 // launched without a requirements file. It progresses through:
-// home → (setup →) picker → (editor →) done.
+// home → (open project →) (setup →) picker → (editor →) done.
 type startupModel struct {
-	phase       startupPhase
-	home        HomeModel
-	setup       SetupModel
-	moduleInput textinput.Model
-	picker      PickerModel
-	editor      EditorModel
-	root        string
-	wsDir       string // .orchestrator directory path
-	wsReqPath   string // absolute path to write new requirements
-	cfg         config.Config
-	reqPath     string // result — non-empty when resolved
-	width       int
-	height      int
+	phase         startupPhase
+	projectPicker ProjectPickerModel
+	dirBrowser    DirBrowserModel
+	home          HomeModel
+	setup         SetupModel
+	moduleInput   textinput.Model
+	picker        PickerModel
+	editor        EditorModel
+	root          string
+	wsDir         string // .orchestrator directory path
+	wsReqPath     string // absolute path to write new requirements
+	cfg           config.Config
+	reqPath       string // result — non-empty when resolved
+	width         int
+	height        int
 }
 
 func newStartupModel(root, wsReqPath string, cfg config.Config) startupModel {
+	// Auto-save current project to recent list.
+	_ = SaveRecentProject(root)
 	return startupModel{
+		phase:     startupPhaseHome,
 		root:      root,
 		wsDir:     filepath.Join(root, artifacts.DirName),
 		wsReqPath: wsReqPath,
@@ -77,10 +85,15 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.picker.SetSize(wm.Width, wm.Height)
 		case startupPhaseEditor:
 			m.editor.SetSize(wm.Width, wm.Height)
+		case startupPhaseOpenProject:
+			m.dirBrowser.SetSize(wm.Width, wm.Height)
+		case startupPhaseProjectList:
+			m.projectPicker, _ = m.projectPicker.Update(msg)
 		}
 	}
 
 	switch m.phase {
+
 	case startupPhaseHome:
 		switch msg := msg.(type) {
 		case homeSelectedMsg:
@@ -93,6 +106,12 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.showModulePathInput()
 				}
 				return m, m.showPicker()
+			case homeActionOpenProject:
+				picker := NewProjectPicker(m.root)
+				picker.width, picker.height = m.width, m.height
+				m.projectPicker = picker
+				m.phase = startupPhaseProjectList
+				return m, m.projectPicker.Init()
 			case homeActionClean:
 				cleanWorkspace(m.wsDir)
 				m.home = NewHomeModel(m.cfg, m.root)
@@ -222,9 +241,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					projectCfg := config.LoadProject(m.root)
 					projectCfg.Project.ModulePath = val
 					_ = config.Save(m.root, projectCfg)
-					m.home = NewHomeModel(m.cfg, m.root)
-					m.home.width, m.home.height = m.width, m.height
-					return m, m.showPicker()
+					return m, m.transitionToHome()
 				}
 			case "esc":
 				m.phase = startupPhaseHome
@@ -270,6 +287,30 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		m.editor, cmd = m.editor.Update(msg)
+		return m, cmd
+
+	case startupPhaseProjectList:
+		switch msg := msg.(type) {
+		case ProjectSelectedMsg:
+			return m, m.switchProject(msg.Path)
+		case ProjectPickerCancelledMsg:
+			m.phase = startupPhaseHome
+			return m, m.home.Init()
+		}
+		var cmd tea.Cmd
+		m.projectPicker, cmd = m.projectPicker.Update(msg)
+		return m, cmd
+
+	case startupPhaseOpenProject:
+		switch msg := msg.(type) {
+		case DirSelectedMsg:
+			return m, m.switchProject(msg.Path)
+		case DirBrowserCancelledMsg:
+			m.phase = startupPhaseHome
+			return m, m.home.Init()
+		}
+		var cmd tea.Cmd
+		m.dirBrowser, cmd = m.dirBrowser.Update(msg)
 		return m, cmd
 	}
 
@@ -327,6 +368,10 @@ func (m startupModel) View() string {
 		return m.picker.View()
 	case startupPhaseEditor:
 		return m.editor.View()
+	case startupPhaseProjectList:
+		return m.projectPicker.View()
+	case startupPhaseOpenProject:
+		return m.dirBrowser.View()
 	default:
 		return m.home.View()
 	}
@@ -389,11 +434,71 @@ func (m *startupModel) showPicker() tea.Cmd {
 	return m.picker.Init()
 }
 
+// transitionToHome builds a fresh HomeModel for the current root/cfg and
+// switches to the home phase. Used after project selection and module path input.
+func (m *startupModel) transitionToHome() tea.Cmd {
+	m.home = NewHomeModel(m.cfg, m.root)
+	m.home.width, m.home.height = m.width, m.height
+	m.home.syncViewport()
+	m.phase = startupPhaseHome
+	return m.home.Init()
+}
+
+// switchProject handles switching to a different project directory.
+// It updates root, config, workspace paths, checks module path, and transitions to home.
+func (m *startupModel) switchProject(projectPath string) tea.Cmd {
+	if isHomeDir(projectPath) {
+		// Never allow the home directory as a project root.
+		m.phase = startupPhaseHome
+		return m.home.Init()
+	}
+
+	m.root = projectPath
+	_ = os.Chdir(projectPath)
+	_ = SaveRecentProject(projectPath)
+
+	newCfg, err := config.Load(projectPath)
+	if err != nil {
+		newCfg = m.cfg
+	}
+	m.cfg = newCfg
+	m.wsDir = filepath.Join(projectPath, artifacts.DirName)
+	m.wsReqPath = filepath.Join(projectPath, artifacts.DirName, artifacts.RequirementsFile)
+
+	// Auto-detect module path from go.mod.
+	if m.cfg.Project.ModulePath == "" {
+		m.cfg.Project.ModulePath = detectGoModulePath(m.root)
+	}
+
+	// If this Go project needs a module path, ask before showing home.
+	if m.needsModulePath() {
+		return m.showModulePathInput()
+	}
+
+	return m.transitionToHome()
+}
+
+// detectGoModulePath reads the module path from an existing go.mod file.
+func detectGoModulePath(root string) string {
+	// Use DirFS to safely scope file access within root directory
+	data, err := fs.ReadFile(os.DirFS(root), "go.mod")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module"))
+		}
+	}
+	return ""
+}
+
 func (m startupModel) viewModulePath() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	exampleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	exampleStyle := lipgloss.NewStyle().Foreground(crt.primary)
+	hintStyle := lipgloss.NewStyle().Foreground(crt.success)
 	sep := strings.Repeat("─", m.width)
 
 	projectName := filepath.Base(m.root)
@@ -578,10 +683,10 @@ func (m modulePathModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m modulePathModel) View() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	exampleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("117"))
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	exampleStyle := lipgloss.NewStyle().Foreground(crt.primary)
+	hintStyle := lipgloss.NewStyle().Foreground(crt.success)
 	sep := strings.Repeat("─", m.width)
 
 	projectName := filepath.Base(m.root)

@@ -1,181 +1,192 @@
-# AI Coding Agents Orchestrator
+<p align="center">
+  <h1 align="center">AI Coding Agents Orchestrator</h1>
+  <p align="center">
+    A terminal-native orchestrator that coordinates multiple AI agents to plan, code, test, review, and fix your projects — autonomously.
+  </p>
+</p>
 
-Minimal Go-based orchestrator for a PLAN → CODE → TEST → REVIEW → FIX → DONE workflow.
+<p align="center">
+  <a href="https://github.com/Open-Makers/ai-coding-agents-orchestrator/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Open-Makers/ai-coding-agents-orchestrator?style=flat-square" alt="MIT License"></a>
+  <a href="https://github.com/Open-Makers/ai-coding-agents-orchestrator/releases"><img src="https://img.shields.io/github/v/release/Open-Makers/ai-coding-agents-orchestrator?style=flat-square" alt="Latest Release"></a>
+  <a href="https://github.com/Open-Makers/ai-coding-agents-orchestrator/actions"><img src="https://img.shields.io/github/actions/workflow/status/Open-Makers/ai-coding-agents-orchestrator/ci.yml?style=flat-square&label=CI" alt="CI"></a>
+  <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.25+">
+  <a href="https://goreportcard.com/report/github.com/Open-Makers/ai-coding-agents-orchestrator"><img src="https://goreportcard.com/badge/github.com/Open-Makers/ai-coding-agents-orchestrator?style=flat-square" alt="Go Report Card"></a>
+  <img src="https://img.shields.io/badge/status-experimental-orange?style=flat-square" alt="Experimental">
+</p>
 
-## Requirements
+> **⚠️ Status: Experimental**
+> This project is in early development — it works, but it has only been tested on the author's machine. Expect rough edges, breaking changes, and missing documentation. Contributions and feedback are welcome!
 
-- `codex` CLI available in `PATH`
-- a git repository where the orchestrator can apply patches
+---
 
-## Installation
+## What Is It?
 
-Build the binary:
+AI Coding Agents Orchestrator is an open-source CLI tool written in Go that drives a team of specialized AI agents through a structured software development pipeline. Instead of chatting with a single LLM, you define requirements in Markdown and the orchestrator runs a full **PM → Plan → Code → Test → Review → Fix → Done** workflow — with human approval gates at every critical step.
 
-```bash
-go build -o orchestrator ./cmd/orchestrator
-```
+It ships with a rich terminal UI (built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)) and also supports a headless plain-text mode for CI or scripting.
 
-Install it into your system `PATH`:
+## What Problem Does It Solve?
 
-macOS / Linux:
+Manual back-and-forth with AI coding assistants is slow, error-prone, and hard to reproduce. This orchestrator:
 
-```bash
-install ./orchestrator /usr/local/bin/orchestrator
-```
+- **Structures the work** into well-defined phases so nothing gets skipped.
+- **Runs multiple specialist agents** (PM, Planner, Coder, Tester, Reviewer, UX Reviewer, Security Auditor, QA) — each with its own prompt, skills, and model.
+- **Iterates automatically** — if tests fail or reviewers find must-fix issues, the Coder fixes and the entire quality gate restarts.
+- **Keeps humans in the loop** — approval gates let you review and revise architecture, plan, and prompts before any code is written.
 
-Windows PowerShell:
+## Features
 
-```powershell
-go build -o orchestrator.exe .\cmd\orchestrator
-New-Item -ItemType Directory -Force "$HOME\bin" | Out-Null
-Copy-Item .\orchestrator.exe "$HOME\bin\orchestrator.exe"
-```
+### 8 Specialized Agents
 
-On Windows, make sure the target directory such as `%USERPROFILE%\bin` is added to `PATH`.
+| Agent | Role |
+|-------|------|
+| **PM** | Produces product vision and MoSCoW prioritization |
+| **Planner** | Generates architecture, implementation plan, and stage prompts |
+| **Coder** | Writes and fixes code, runs builds |
+| **Tester** | Generates tests and executes test suites |
+| **Reviewer** | Code review with must-fix / nice-to-have classification |
+| **UX Reviewer** | UX/UI heuristic review |
+| **Security** | Security audit and vulnerability scanning |
+| **QA** | Corner-case and edge-case analysis |
 
-Verify installation:
+### Interactive TUI
 
-```bash
-orchestrator help
-```
+Full-featured terminal user interface with agent panels, live token streaming, artifact viewer, chat-based revision, and project picker.
+
+<p align="center">
+  <img src="doc/images/menu.png" width="700" alt="Main Menu">
+</p>
+
+<p align="center">
+  <img src="doc/images/project-manager.png" width="700" alt="Project Manager Agent">
+</p>
+
+<p align="center">
+  <img src="doc/images/coder.png" width="700" alt="Coder Agent">
+</p>
+
+<p align="center">
+  <img src="doc/images/tester.png" width="700" alt="Tester Agent">
+</p>
+
+<p align="center">
+  <img src="doc/images/reviewer.png" width="700" alt="Reviewer Agent">
+</p>
+
+<p align="center">
+  <img src="doc/images/ux-reviewer.png" width="700" alt="UX Reviewer Agent">
+</p>
+
+### Configurable LLM Backends
+
+Supports multiple runners out of the box:
+
+- **OpenCode** (default)
+- **Claude CLI**
+- **Ollama** (local models)
+- **Codex**
+
+Each agent can use a different runner and model — configure globally (`~/.orchestrator/config.yaml`) or per-project (`.orchestrator/project.yaml`).
+
+<p align="center">
+  <img src="doc/images/global-settings.png" width="700" alt="Global Settings">
+</p>
+
+<p align="center">
+  <img src="doc/images/project-settings.png" width="700" alt="Project Settings">
+</p>
+
+### Layered Configuration
+
+Three-layer config with sensible defaults:
+
+1. **Built-in defaults** — works out of the box for Go projects
+2. **Global user config** (`~/.orchestrator/config.yaml`) — your preferred models and runners
+3. **Project config** (`.orchestrator/project.yaml`) — project-specific overrides (language, test commands, scoping)
+
+### Skills System
+
+Agents are augmented with embedded skill documents (Go patterns, testing strategies, security checklists, etc.) that are injected into their system prompts.
+
+### Human Approval Gates
+
+The pipeline pauses for your approval at key stages:
+- Product vision & MoSCoW prioritization
+- Architecture
+- Implementation plan
+- Stage prompts
+
+You can review, revise via chat, and approve — all from the TUI.
+
+### Quality Gate Loop
+
+After coding, the pipeline runs all quality checks in a single loop:
+**Test → Code Review → UX Review → Security Audit → QA**
+
+If any phase finds must-fix issues, the Coder fixes them and the loop restarts from the beginning. The cycle continues until all checks pass (or a configurable max attempt limit is reached).
+
+### Multi-Language Prompts
+
+LLM responses can be generated in 20+ languages — configure `prompt_language` in your config.
 
 ## Quick Start
 
-1. Prepare a markdown file with requirements, for example:
+### Prerequisites
 
-```md
-# Task
+- **Go 1.25+**
+- **Git** repository to work in
+- At least one LLM backend configured (e.g. OpenCode, Claude CLI, or Ollama)
 
-- Add a new CLI flag `--verbose`
-- Keep backward compatibility
-- Add tests for the new behavior
+### Install
+
+```bash
+# Clone and build
+git clone https://github.com/Open-Makers/ai-coding-agents-orchestrator.git
+cd ai-coding-agents-orchestrator
+make build install
+
+# Verify
+orchestrator help
 ```
 
-2. Run the orchestrator from the repository root:
+Or install directly:
+
+```bash
+go install github.com/Open-Makers/ai-coding-agents-orchestrator/cmd/orchestrator@latest
+```
+
+### Run
+
+**Interactive mode** — launch the TUI, pick requirements from a file browser:
+
+```bash
+cd /path/to/your/project
+orchestrator
+```
+
+**CLI mode** — pass requirements directly:
 
 ```bash
 orchestrator run --requirements path/to/requirements.md
 ```
 
-3. Wait for the first approval gate and inspect `.orchestrator/architecture.md`.
-
-4. Approve the architecture step:
+**On a feature branch:**
 
 ```bash
-orchestrator approve architecture
+orchestrator run --requirements requirements.md --branch feat/my-feature
 ```
 
-5. Repeat the same flow for the plan and prompts:
+### What Happens Next
 
-```bash
-orchestrator approve plan
-orchestrator approve prompts
-```
+1. The **PM agent** analyzes your requirements and produces a product vision + MoSCoW plan.
+2. You **review and approve** (or revise via chat).
+3. The **Planner** generates architecture, an implementation plan, and per-stage prompts.
+4. You **review and approve** each artifact.
+5. For each stage, the **Coder** writes code, **Tester** generates and runs tests, then all reviewers run.
+6. If issues are found, the Coder fixes and the quality gate restarts.
+7. A final summary with all artifacts lands in `.orchestrator/`.
 
-6. After the approvals, the orchestrator will:
-- generate a patch
-- apply it to the current repository
-- run tests from `.orchestrator/test_cmds.txt`
-- run review and, if needed, try up to 3 fix iterations
 
-7. Review results in `.orchestrator/`.
+## License
 
-## Usage
-
-Run a task:
-
-```bash
-orchestrator run --requirements path/to/requirements.md
-```
-
-Optional flags:
-- `--branch <name>` create or checkout a branch before running
-- `--dry-run` prepare workspace and exit
-- `--human-approve` prompt before applying patches
-
-Typical runs:
-
-```bash
-# only prepare .orchestrator/ and copy requirements
-orchestrator run --requirements doc/example_requirements.md --dry-run
-
-# run on a dedicated branch
-orchestrator run --requirements doc/example_requirements.md --branch feat/orchestrated-change
-
-# require confirmation before patch/test execution
-orchestrator run --requirements doc/example_requirements.md --human-approve
-```
-
-Report the last run:
-
-```bash
-orchestrator report
-```
-
-Approve manual gates:
-
-```bash
-orchestrator approve architecture
-orchestrator approve plan
-orchestrator approve prompts
-orchestrator approve all
-```
-
-Clean artifacts:
-
-```bash
-orchestrator clean
-```
-
-## Recommended Workflow
-
-1. Create a focused requirements file in Markdown.
-2. Start the run from the target repository root.
-3. Read each generated artifact before approving it.
-4. Use `report` and `.orchestrator/runlog.txt` to understand the current state.
-5. Use `clean` before starting over if the workspace contains stale artifacts.
-
-## What To Check In `.orchestrator/`
-
-- `requirements.md` copied input used for the run
-- `architecture.md` proposed solution shape
-- `implementation_plan.md` execution plan for the change
-- `prompts.md` prompts prepared for later implementation phases
-- `patch.diff` patch produced by CODE or FIX
-- `changes.md` summary of implemented changes
-- `test_cmds.txt` test commands selected by the agent
-- `test_report.json` test execution result
-- `review.md` review outcome used to decide whether FIX is needed
-- `pr_description.md` final delivery summary
-- `runlog.txt` chronological trace of the workflow
-
-## How It Works (Artifacts = Results)
-
-Each phase writes its **result** to a file in `.orchestrator/`. The orchestrator reads those results to decide what to do next, with manual approvals between architecture, plan, and prompts.
-
-Artifacts:
-- `requirements.md` — input requirements
-- `architecture.md` — proposed architecture
-- `architecture.approved` — manual approval marker (create empty file to approve)
-- `implementation_plan.md` — implementation plan
-- `plan.approved` — manual approval marker
-- `prompts.md` — prompts for each implementation phase
-- `prompts.approved` — manual approval marker
-- `patch.diff` — code changes from CODE/FIX
-- `changes.md` — summary of changes from CODE
-- `test_cmds.txt` — commands to run tests
-- `test_report.json` — test results from TEST
-- `review.md` — review result from REVIEW
-- `pr_description.md` — PR description from DONE
-- `runlog.txt` — timeline of phase results and failures
-
-Notes:
-- `resume` exists in the CLI but is not implemented yet
-- approvals are file-based markers inside `.orchestrator/`
-- if tests or review fail, the orchestrator enters FIX and retries up to 3 times
-
-## Docs
-- `doc/usage.md`
-- `doc/implementation_plan.md`
-- `doc/prompts_go_implementation.md`
-- `doc/example_task.md`
+[MIT](LICENSE) © Open-Makers

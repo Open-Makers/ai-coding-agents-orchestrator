@@ -7,6 +7,10 @@ import (
 	"os"
 )
 
+// maxSocketMessageSize caps the size of a single JSON message on the socket
+// to prevent denial-of-service via memory exhaustion.
+const maxSocketMessageSize = 10 << 20 // 10 MiB
+
 // ServeUnix starts a Unix domain socket server at path.
 // Each connecting client may:
 //   - publish messages to this bus (sends JSON-encoded Message objects)
@@ -20,6 +24,11 @@ func (b *Bus) ServeUnix(path string, stop <-chan struct{}) error {
 	l, err := net.Listen("unix", path)
 	if err != nil {
 		return fmt.Errorf("bus: unix listen: %w", err)
+	}
+	// Restrict socket to owner only to prevent local privilege escalation.
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = l.Close()
+		return fmt.Errorf("bus: chmod socket: %w", err)
 	}
 
 	go func() {
@@ -76,6 +85,11 @@ func (b *Bus) handleSocketConn(conn net.Conn) {
 		var m Message
 		if err := dec.Decode(&m); err != nil {
 			close(readerDone) // signal writer to stop
+			return
+		}
+		// Reject oversized payloads by checking serialized size.
+		if raw, err := json.Marshal(m); err == nil && int64(len(raw)) > maxSocketMessageSize {
+			close(readerDone)
 			return
 		}
 		b.Publish(m)

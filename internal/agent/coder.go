@@ -469,6 +469,11 @@ func (a *CoderAgent) ensureGoMod() {
 		return
 	}
 
+	if !isValidModulePath(modulePath) {
+		a.emitToken(fmt.Sprintf("skipping go mod init: invalid module path %q\n", modulePath), false)
+		return
+	}
+
 	a.emitToken(fmt.Sprintf("$ go mod init %s\n", modulePath), false)
 	res := a.exec.RunUnchecked(fmt.Sprintf("go mod init %s", modulePath))
 	if res.ExitCode != 0 {
@@ -977,4 +982,23 @@ func guessFilePathFromContent(lines []string) string {
 	}
 
 	return ""
+}
+
+// isValidModulePath checks that a Go module path contains only safe characters
+// and cannot be used for shell injection when passed to `go mod init`.
+func isValidModulePath(path string) bool {
+	if path == "" || len(path) > 256 {
+		return false
+	}
+	for _, r := range path {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '/' || r == '-' || r == '_' || r == '~':
+		default:
+			return false
+		}
+	}
+	return !strings.Contains(path, "..")
 }

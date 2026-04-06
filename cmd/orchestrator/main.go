@@ -48,7 +48,8 @@ func main() {
 	case "report":
 		reportCmd(os.Args[2:])
 	case "monitor":
-		monitorCmd(os.Args[2:])
+		fmt.Fprintln(os.Stderr, "monitor not implemented yet")
+		os.Exit(2)
 	case "approve":
 		approveCmd(os.Args[2:])
 	case "clean":
@@ -132,7 +133,8 @@ func runCmd(args []string) {
 	}
 
 	// If module path is still missing for a Go project, prompt the user.
-	if tui.NeedsModulePath(root, cfg) && !*dryRun && *ui != "plain" {
+	// Only when --requirements is provided (TUI startup handles this internally).
+	if *reqPath != "" && tui.NeedsModulePath(root, cfg) && !*dryRun && *ui != "plain" {
 		chosen, err := tui.RunModulePathPrompt(root, ws.Path(""))
 		if err != nil {
 			fatal(fmt.Errorf("module path prompt: %w", err))
@@ -154,6 +156,20 @@ func runCmd(args []string) {
 		}
 		*reqPath = chosen
 		cfg = updatedCfg
+
+		// Project may have changed via project picker (os.Chdir).
+		// Refresh root, config, and workspace to match the selected project.
+		newRoot, err := os.Getwd()
+		if err == nil && newRoot != root {
+			root = newRoot
+			if reloadedCfg, loadErr := config.Load(root); loadErr == nil {
+				cfg = reloadedCfg
+			}
+			ws, err = artifacts.EnsureWorkspace(root)
+			if err != nil {
+				fatal(err)
+			}
+		}
 	}
 
 	if *reqPath == "" {
@@ -236,6 +252,19 @@ func runCmd(args []string) {
 
 		*reqPath = chosen
 		cfg = updatedCfg
+
+		// Refresh root if project changed.
+		newRoot, rootErr := os.Getwd()
+		if rootErr == nil && newRoot != root {
+			root = newRoot
+			if reloadedCfg, loadErr := config.Load(root); loadErr == nil {
+				cfg = reloadedCfg
+			}
+			ws, err = artifacts.EnsureWorkspace(root)
+			if err != nil {
+				fatal(err)
+			}
+		}
 	}
 }
 

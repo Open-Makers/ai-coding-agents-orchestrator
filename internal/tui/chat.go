@@ -200,9 +200,9 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 }
 
 func (m *ChatModel) refreshViewport() {
-	userStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("69")).Bold(true)
-	assistantStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	userStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
+	assistantStyle := lipgloss.NewStyle().Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
 
 	var sb strings.Builder
 	for _, line := range m.lines {
@@ -230,9 +230,9 @@ func (m *ChatModel) SetSize(w, h int) {
 }
 
 func (m ChatModel) View() string {
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
-	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	inputStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255"))
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	inputStyle := lipgloss.NewStyle().Foreground(crt.bright)
 
 	sep := strings.Repeat("─", m.width)
 

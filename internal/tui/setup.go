@@ -790,7 +790,7 @@ func (m SetupModel) renderModelCard(contentWidth int, label, focusLabel, active,
 	case providerOpenCode:
 		modelLines = append(modelLines, m.viewOpenCodeModels(active, inactive, dim, focusLabel)...)
 		if m.modelsStatus != "" {
-			warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+			warnStyle := lipgloss.NewStyle().Foreground(crt.warn)
 			modelLines = append(modelLines, "", warnStyle.Render("  "+m.modelsStatus))
 		}
 	case providerClaude:
