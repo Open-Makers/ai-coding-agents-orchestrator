@@ -15,7 +15,6 @@ import (
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
