@@ -138,7 +138,7 @@ func (w Workspace) CleanGeneratedArtifacts() {
 // AppendRunLog appends a single line with RFC3339 timestamp.
 func (w Workspace) AppendRunLog(message string) error {
 	path := w.Path(RunLogFile)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // G304: path scoped to workspace dir
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // #nosec G304 -- path scoped to workspace dir
 	if err != nil {
 		return fmt.Errorf("open runlog: %w", err)
 	}

@@ -111,7 +111,7 @@ func (t *TmuxMultiplexer) tmux(args ...string) error {
 }
 
 func (t *TmuxMultiplexer) tmuxOutput(args ...string) (string, error) {
-	cmd := exec.Command("tmux", args...) //nolint:gosec // G204: args built internally for tmux session management
+	cmd := exec.Command("tmux", args...) //nolint:gosec // #nosec G204 -- args built internally for tmux session management
 	var stdout strings.Builder
 	var stderr strings.Builder
 	cmd.Stdout = &stdout

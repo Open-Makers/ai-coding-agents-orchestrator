@@ -374,7 +374,7 @@ func gitLines(root string, args ...string) ([]string, error) {
 }
 
 func gitOutput(root string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...) //nolint:gosec // G204: args built internally for git operations
+	cmd := exec.Command("git", args...) //nolint:gosec // #nosec G204 -- args built internally for git operations
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {

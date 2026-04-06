@@ -11,7 +11,7 @@ const historyMax = 10
 
 // LoadHistory reads the list of recently used requirements paths.
 func LoadHistory(wsPath string) []string {
-	data, err := os.ReadFile(filepath.Join(wsPath, historyFile)) //nolint:gosec // G304: path scoped to workspace dir
+	data, err := os.ReadFile(filepath.Join(wsPath, historyFile)) //nolint:gosec // #nosec G304 -- path scoped to workspace dir
 	if err != nil {
 		return nil
 	}

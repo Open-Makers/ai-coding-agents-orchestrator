@@ -178,7 +178,7 @@ func LoadProject(root string) Config {
 
 // loadFile reads and unmarshals a single YAML config file.
 func loadFile(path string) (Config, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path from known config locations
+	data, err := os.ReadFile(path) //nolint:gosec // #nosec G304 -- path from known config locations
 	if err != nil {
 		return Config{}, err
 	}

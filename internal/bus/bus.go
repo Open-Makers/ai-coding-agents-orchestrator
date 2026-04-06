@@ -31,7 +31,7 @@ func (b *Bus) SetLogPath(path string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: path from workspace config
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // #nosec G304 -- path from workspace config
 	if err != nil {
 		return fmt.Errorf("bus: open log: %w", err)
 	}

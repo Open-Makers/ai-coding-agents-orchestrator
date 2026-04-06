@@ -68,7 +68,7 @@ func (r ClaudeRunner) run(prompt, systemPrompt string) ([]byte, error) {
 	}
 	args = append(args, "-p", prompt)
 
-	cmd := exec.Command(bin, args...) //nolint:gosec // G204: bin resolved from config, args built internally
+	cmd := exec.Command(bin, args...) //nolint:gosec // #nosec G204 -- bin resolved from config, args built internally
 	cmd.Env = os.Environ()
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out

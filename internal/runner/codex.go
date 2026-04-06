@@ -54,7 +54,7 @@ func readCodexConfigModel() string {
 	if err != nil {
 		return ""
 	}
-	f, err := os.Open(filepath.Join(home, ".codex", "config.toml")) //nolint:gosec // G304: path scoped to user home config
+	f, err := os.Open(filepath.Join(home, ".codex", "config.toml")) //nolint:gosec // #nosec G304 -- path scoped to user home config
 	if err != nil {
 		return ""
 	}

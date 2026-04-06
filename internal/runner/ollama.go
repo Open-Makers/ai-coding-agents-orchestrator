@@ -74,7 +74,7 @@ func (r *OllamaRunner) run(prompt, model string) ([]byte, error) {
 		"-p", prompt,
 	}
 
-	cmd := exec.Command("ollama", args...) //nolint:gosec // G204: args built internally for ollama CLI
+	cmd := exec.Command("ollama", args...) //nolint:gosec // #nosec G204 -- args built internally for ollama CLI
 	cmd.Env = os.Environ()
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out

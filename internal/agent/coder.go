@@ -321,7 +321,7 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 	}
 	var sb strings.Builder
 	for _, path := range files {
-		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // G304: path from git-tracked files in project
+		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // #nosec G304 -- path from git-tracked files in project
 		if err != nil {
 			continue
 		}

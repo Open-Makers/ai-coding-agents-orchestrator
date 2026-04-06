@@ -133,7 +133,7 @@ func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	promptsDir := filepath.Join(p.root, artifacts.DirName, appprompts.PromptsDirName)
 	appprompts.SetOverrideDir(promptsDir)
 
-	reqs, err := os.ReadFile(requirementsPath) //nolint:gosec // G304: path from user-selected requirements file
+	reqs, err := os.ReadFile(requirementsPath) //nolint:gosec // #nosec G304 -- path from user-selected requirements file
 	if err != nil {
 		return fmt.Errorf("read requirements: %w", err)
 	}

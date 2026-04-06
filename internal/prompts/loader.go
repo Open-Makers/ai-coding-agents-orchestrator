@@ -47,7 +47,7 @@ func (l *Loader) Load(name string) (string, error) {
 	// Check project-level override first.
 	if l.override != "" {
 		overridePath := filepath.Join(l.override, name+".md")
-		if data, err := os.ReadFile(overridePath); err == nil { //nolint:gosec // G304: path scoped to project override dir
+		if data, err := os.ReadFile(overridePath); err == nil { //nolint:gosec // #nosec G304 -- path scoped to project override dir
 			content := string(data)
 			l.mu.Lock()
 			l.cache[name] = content

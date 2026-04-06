@@ -507,7 +507,7 @@ func fatal(err error) {
 
 // detectGoModulePath reads the module path from an existing go.mod file.
 func detectGoModulePath(root string) string {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod")) //nolint:gosec // G304: path scoped to project root
+	data, err := os.ReadFile(filepath.Join(root, "go.mod")) //nolint:gosec // #nosec G304 -- path scoped to project root
 	if err != nil {
 		return ""
 	}

@@ -133,7 +133,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // G304: path from git-tracked files in project
+		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // #nosec G304 -- path from git-tracked files in project
 		if err != nil {
 			continue
 		}

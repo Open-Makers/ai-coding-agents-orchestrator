@@ -34,7 +34,7 @@ func SetupFile(path string) error {
 	logMu.Lock()
 	defer logMu.Unlock()
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // G304: path from workspace config
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // #nosec G304 -- path from workspace config
 	if err != nil {
 		return err
 	}

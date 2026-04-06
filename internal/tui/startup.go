@@ -281,7 +281,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *startupModel) cleanIfRequirementsChanged(newReqPath string) {
 	ws := artifacts.Workspace{Dir: m.wsDir}
 
-	newContent, err := os.ReadFile(newReqPath) //nolint:gosec // G304: path from user-selected requirements file
+	newContent, err := os.ReadFile(newReqPath) //nolint:gosec // #nosec G304 -- path from user-selected requirements file
 	if err != nil {
 		return
 	}

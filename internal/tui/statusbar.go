@@ -107,7 +107,7 @@ func lipglossLen(s string) int {
 
 // GitBranch returns the current git branch name for root, or "" on error.
 func GitBranch(root string) string {
-	out, err := exec.Command("git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD").Output() //nolint:gosec // G204: args are controlled internally
+	out, err := exec.Command("git", "-C", root, "rev-parse", "--abbrev-ref", "HEAD").Output() //nolint:gosec // #nosec G204 -- args are controlled internally
 	if err != nil {
 		return ""
 	}

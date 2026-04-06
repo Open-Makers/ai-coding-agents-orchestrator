@@ -202,7 +202,7 @@ func (m ArtifactViewerModel) Update(msg tea.Msg) (ArtifactViewerModel, tea.Cmd) 
 		case "e":
 			if m.wsDir != "" && m.filename != "review" {
 				filePath := filepath.Join(m.wsDir, m.filename)
-				data, err := os.ReadFile(filePath) //nolint:gosec // G304: path scoped to workspace dir
+				data, err := os.ReadFile(filePath) //nolint:gosec // #nosec G304 -- path scoped to workspace dir
 				if err != nil {
 					return m, nil
 				}
