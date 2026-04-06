@@ -14,6 +14,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
+	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
 
@@ -115,6 +116,10 @@ func (p *Pipeline) isLocal() bool {
 
 // Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate: TEST → REVIEW → UX → SECURITY → QA) → PR.
 func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
+	// Configure project-level prompt overrides before agents run.
+	promptsDir := filepath.Join(p.root, artifacts.DirName, appprompts.PromptsDirName)
+	appprompts.SetOverrideDir(promptsDir)
+
 	reqs, err := os.ReadFile(requirementsPath)
 	if err != nil {
 		return fmt.Errorf("read requirements: %w", err)

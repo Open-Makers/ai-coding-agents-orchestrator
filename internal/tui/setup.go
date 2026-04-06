@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -9,7 +11,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
 
@@ -134,12 +138,15 @@ type SetupModel struct {
 	agentEditProv  providerKind // provider being edited for current agent
 	agentEditIdx   int          // model index within the editing provider
 
-	globalOnly bool // when true, hide agent overrides section
+	globalOnly bool   // when true, hide agent overrides section
+	root       string // project root for prompt export
 
 	spinner  spinner.Model
 	viewport viewport.Model
 	ready    bool
 	scrollX  int // horizontal scroll offset
+
+	promptStatus string // status message after prompt export
 
 	width  int
 	height int
@@ -284,6 +291,9 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 		} else if msg.err != nil {
 			m.modelsStatus = fmt.Sprintf("could not fetch models: %v", msg.err)
 		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
 
 	case ollamaModelsListMsg:
 		m.ollamaModelsLoading = false
@@ -296,6 +306,9 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 			if m.provider == providerOllama {
 				m.modelIdx = findModelIndex(m.ollamaModels, prevModel)
 			}
+		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
 		}
 
 	case codexModelsListMsg:
@@ -310,6 +323,9 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 				m.modelIdx = findModelIndex(m.codexModels, prevModel)
 			}
 		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
 
 	case claudeModelsListMsg:
 		m.claudeModelsLoading = false
@@ -323,15 +339,29 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 				m.modelIdx = findModelIndex(m.claudeModels, prevModel)
 			}
 		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
 
 	case tea.KeyMsg:
 		var cmd tea.Cmd
+		prevSection := m.section
+		prevEditing := m.agentEditing
+		prevEditStep := m.agentEditStep
 		m, cmd = m.handleKey(msg)
 		cmds = append(cmds, cmd)
-	}
 
-	if m.ready {
-		m.viewport.SetContent(m.renderContent())
+		// Update viewport content after key handling.
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+
+			// If section, editing state, or edit step changed, the handler
+			// already called ensureSectionVisible which set the correct
+			// YOffset. Re-apply it since SetContent may have adjusted it.
+			if m.section != prevSection || m.agentEditing != prevEditing || m.agentEditStep != prevEditStep {
+				m.ensureSectionVisible()
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -481,9 +511,14 @@ func (m SetupModel) handleAgentSetupKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 			m.agentEditProv = m.provider
 		}
 		m.agentEditIdx = 0
+		m.ensureSectionVisible()
 	case "backspace", "delete":
 		role := m.agentRoles[m.agentCursor]
 		delete(m.agentOverrides, role)
+	case "p":
+		m.exportAgentPrompts()
+	case "d":
+		m.deleteAgentPrompts()
 	case "tab":
 		m.section = sectionProvider
 		m.ensureSectionVisible()
@@ -516,6 +551,7 @@ func (m SetupModel) handleAgentEditKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 					}
 				}
 			}
+			m.ensureSectionVisible()
 		}
 		return m, nil
 	}
@@ -840,14 +876,26 @@ func (m SetupModel) renderAgentCard(contentWidth int, label, focusLabel, active,
 			display = runnerPart + dim.Render(" / ") + modelPart
 		}
 
+		// Show indicator if custom prompt exists.
+		promptTag := ""
+		if m.hasCustomPrompt(role) {
+			promptTag = goldStyle.Render(" ✎")
+		}
+
 		isActive := m.section == sectionAgentSetup && i == m.agentCursor && !m.agentEditing
 		if isActive {
 			agentLines = append(agentLines,
-				active.Render("  ▶ ")+rs.Render(fmt.Sprintf("%-14s", role))+display)
+				active.Render("  ▶ ")+rs.Render(fmt.Sprintf("%-14s", role))+display+promptTag)
 		} else {
 			agentLines = append(agentLines,
-				"    "+rs.Render(fmt.Sprintf("%-14s", role))+display)
+				"    "+rs.Render(fmt.Sprintf("%-14s", role))+display+promptTag)
 		}
+	}
+
+	// Prompt status message.
+	if m.promptStatus != "" {
+		agentLines = append(agentLines, "")
+		agentLines = append(agentLines, goldStyle.Render("  "+m.promptStatus))
 	}
 
 	// Editing panel.
@@ -1064,6 +1112,8 @@ func (m SetupModel) renderFooter(style lipgloss.Style) string {
 		hints = []string{
 			hint("↑↓", "navigate"),
 			hint("Enter", "configure"),
+			hint("p", "export prompt"),
+			hint("d", "delete prompt"),
 			hint("Bksp", "reset"),
 			hint("Tab", "provider"),
 			hint("Ctrl+S", "save"),
@@ -1136,15 +1186,17 @@ func (m SetupModel) isLoadingModels() bool {
 }
 
 // ensureSectionVisible scrolls the viewport so the focused section is visible.
-// It estimates line positions based on section markers in the rendered content.
 func (m *SetupModel) ensureSectionVisible() {
 	if !m.ready {
 		return
 	}
-	content := m.renderContent()
-	lines := strings.Split(content, "\n")
 
-	// Find section markers to estimate positions.
+	// Re-render content with current state to get accurate line positions.
+	content := m.renderContent()
+	m.viewport.SetContent(content)
+	lines := strings.Split(content, "\n")
+	totalLines := len(lines)
+
 	var targetLine int
 	switch m.section {
 	case sectionProvider:
@@ -1154,22 +1206,25 @@ func (m *SetupModel) ensureSectionVisible() {
 	case sectionLanguage:
 		targetLine = findLineContaining(lines, "Response Language")
 	case sectionAgentSetup:
-		targetLine = findLineContaining(lines, "Agent Overrides")
+		if m.agentEditing {
+			// When editing, scroll to the bottom to show the editing panel.
+			targetLine = totalLines - m.viewport.Height
+		} else {
+			targetLine = findLineContaining(lines, "Agent Overrides")
+		}
 	}
 
 	if targetLine <= 0 {
 		return
 	}
 
-	// Scroll so the target section is near the top of the viewport with some margin.
 	margin := 2
 	target := targetLine - margin
 	if target < 0 {
 		target = 0
 	}
 
-	vpHeight := m.viewport.Height
-	maxOffset := m.viewport.TotalLineCount() - vpHeight
+	maxOffset := totalLines - m.viewport.Height
 	if maxOffset < 0 {
 		maxOffset = 0
 	}
@@ -1188,4 +1243,69 @@ func findLineContaining(lines []string, substr string) int {
 		}
 	}
 	return -1
+}
+
+// promptsDir returns the project-level prompts override directory.
+func (m SetupModel) promptsDir() string {
+	if m.root == "" {
+		return ""
+	}
+	return filepath.Join(m.root, artifacts.DirName, prompts.PromptsDirName)
+}
+
+// hasCustomPrompt returns true if any prompt override exists for the given role.
+func (m SetupModel) hasCustomPrompt(role string) bool {
+	dir := m.promptsDir()
+	if dir == "" {
+		return false
+	}
+	for _, name := range prompts.PromptsForRole(role) {
+		if prompts.OverrideExists(name, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// exportAgentPrompts exports the default prompt templates for the currently selected agent.
+func (m *SetupModel) exportAgentPrompts() {
+	if m.root == "" {
+		m.promptStatus = "no project root — cannot export"
+		return
+	}
+	role := m.agentRoles[m.agentCursor]
+	promptNames := prompts.PromptsForRole(role)
+	if len(promptNames) == 0 {
+		m.promptStatus = fmt.Sprintf("no prompts for %s", role)
+		return
+	}
+
+	destDir := m.promptsDir()
+	var exported []string
+	for _, name := range promptNames {
+		path, err := prompts.ExportPrompt(name, destDir)
+		if err != nil {
+			m.promptStatus = fmt.Sprintf("error: %v", err)
+			return
+		}
+		exported = append(exported, filepath.Base(path))
+	}
+
+	m.promptStatus = fmt.Sprintf("exported %s → .orchestrator/prompts/", strings.Join(exported, ", "))
+}
+
+// deleteAgentPrompts removes project-level prompt overrides for the selected agent.
+func (m *SetupModel) deleteAgentPrompts() {
+	if m.root == "" {
+		return
+	}
+	role := m.agentRoles[m.agentCursor]
+	promptNames := prompts.PromptsForRole(role)
+	destDir := m.promptsDir()
+
+	for _, name := range promptNames {
+		path := filepath.Join(destDir, name+".md")
+		_ = os.Remove(path)
+	}
+	m.promptStatus = fmt.Sprintf("removed custom prompts for %s", role)
 }

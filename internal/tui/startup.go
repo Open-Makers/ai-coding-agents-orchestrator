@@ -66,6 +66,8 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Forward WindowSizeMsg to home so it can resize its viewport.
 		m.home, _ = m.home.Update(msg)
 		switch m.phase {
+		case startupPhaseHome:
+			// Already handled above via m.home.Update(msg).
 		case startupPhaseSetup:
 			m.setup, _ = m.setup.Update(msg)
 		case startupPhaseModulePath:
@@ -106,6 +108,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					projectOverrides = projectCfg.Agents
 				}
 				setup := NewSetupModelWithOverrides(currentRunner, currentModel, m.cfg.PromptLanguage, projectOverrides)
+				setup.root = m.root
 				setup.width, setup.height = m.width, m.height
 				setup.syncViewport()
 				m.setup = setup

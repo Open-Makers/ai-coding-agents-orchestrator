@@ -2,14 +2,20 @@ package prompts
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 )
 
-// Loader provides system prompt templates from embedded files.
-// Prompts are bundled into the binary at compile time.
+// PromptsDirName is the subdirectory within .orchestrator for custom prompts.
+const PromptsDirName = "prompts"
+
+// Loader provides system prompt templates from embedded files,
+// with optional project-level overrides from .orchestrator/prompts/.
 type Loader struct {
-	mu    sync.RWMutex
-	cache map[string]string
+	mu       sync.RWMutex
+	cache    map[string]string
+	override string // project override directory (empty = no overrides)
 }
 
 // New creates a Loader backed by embedded prompt files.
@@ -19,7 +25,17 @@ func New() *Loader {
 	}
 }
 
-// Load returns the content of a prompt template by name from embedded files.
+// SetOverrideDir configures a project-level directory to check for prompt overrides.
+// Files in this directory take precedence over embedded defaults.
+func SetOverrideDir(dir string) {
+	defaultLoader.mu.Lock()
+	defaultLoader.override = dir
+	defaultLoader.cache = make(map[string]string) // clear cache to pick up overrides
+	defaultLoader.mu.Unlock()
+}
+
+// Load returns the content of a prompt template by name.
+// It checks project-level overrides first, then falls back to embedded.
 func (l *Loader) Load(name string) (string, error) {
 	l.mu.RLock()
 	if content, ok := l.cache[name]; ok {
@@ -28,6 +44,19 @@ func (l *Loader) Load(name string) (string, error) {
 	}
 	l.mu.RUnlock()
 
+	// Check project-level override first.
+	if l.override != "" {
+		overridePath := filepath.Join(l.override, name+".md")
+		if data, err := os.ReadFile(overridePath); err == nil {
+			content := string(data)
+			l.mu.Lock()
+			l.cache[name] = content
+			l.mu.Unlock()
+			return content, nil
+		}
+	}
+
+	// Fall back to embedded.
 	data, err := embeddedPrompts.ReadFile("embedded/" + name + ".md")
 	if err != nil {
 		return "", fmt.Errorf("prompt %q not found: %w", name, err)
@@ -68,4 +97,51 @@ func (l *Loader) Available() []string {
 		}
 	}
 	return names
+}
+
+// agentPromptMap maps agent roles to their primary prompt template names.
+var agentPromptMap = map[string][]string{
+	"pm":          {"pm-system"},
+	"planner":     {"planner-system"},
+	"coder":       {"coder-initial", "coder-fix", "coder-build-fix"},
+	"tester":      {"tester-generate"},
+	"reviewer":    {"reviewer-system"},
+	"ux_reviewer": {"ux-reviewer-system"},
+	"security":    {"security-system"},
+	"qa":          {"qa-system"},
+}
+
+// PromptsForRole returns the prompt template names used by a given agent role.
+func PromptsForRole(role string) []string {
+	return agentPromptMap[role]
+}
+
+// ExportPrompt writes the default embedded prompt to a project-level override file.
+// Returns the path of the written file.
+func ExportPrompt(promptName, destDir string) (string, error) {
+	data, err := embeddedPrompts.ReadFile("embedded/" + promptName + ".md")
+	if err != nil {
+		return "", fmt.Errorf("prompt %q not found: %w", promptName, err)
+	}
+
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return "", fmt.Errorf("create prompts dir: %w", err)
+	}
+
+	path := filepath.Join(destDir, promptName+".md")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", fmt.Errorf("write prompt: %w", err)
+	}
+
+	return path, nil
+}
+
+// OverrideExists returns true if a project-level override exists for the given prompt.
+func OverrideExists(promptName, overrideDir string) bool {
+	if overrideDir == "" {
+		return false
+	}
+	path := filepath.Join(overrideDir, promptName+".md")
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
