@@ -688,12 +688,17 @@ func (m Model) renderCongratulations(height int) string {
 
 	// Read summary from artifacts if available.
 	summaryPath := filepath.Join(m.wsPath, artifacts.SummaryFile)
-	if data, err := os.ReadFile(summaryPath); err == nil {
-		summary := strings.TrimSpace(string(data))
-		if summary != "" {
-			content.WriteString("\n")
-			content.WriteString(dimStyle.Render(summary))
-			content.WriteString("\n")
+	// Validate path doesn't escape workspace directory
+	absWs, _ := filepath.Abs(m.wsPath)
+	absSummary, _ := filepath.Abs(summaryPath)
+	if strings.HasPrefix(absSummary, absWs) {
+		if data, err := os.ReadFile(summaryPath); err == nil {
+			summary := strings.TrimSpace(string(data))
+			if summary != "" {
+				content.WriteString("\n")
+				content.WriteString(dimStyle.Render(summary))
+				content.WriteString("\n")
+			}
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
@@ -32,6 +33,16 @@ func projectsFilePath() string {
 func LoadRecentProjects() []RecentProject {
 	path := projectsFilePath()
 	if path == "" {
+		return nil
+	}
+	// Validate path is within home directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	absHome, _ := filepath.Abs(home)
+	absPath, _ := filepath.Abs(path)
+	if !strings.HasPrefix(absPath, absHome) {
 		return nil
 	}
 	data, err := os.ReadFile(path)
@@ -79,7 +90,7 @@ func SaveRecentProject(projectPath string) error {
 	}
 
 	dir := filepath.Dir(filePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
 	return os.WriteFile(filePath, data, 0o600)

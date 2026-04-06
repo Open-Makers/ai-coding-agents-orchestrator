@@ -479,7 +479,14 @@ func (m *startupModel) switchProject(projectPath string) tea.Cmd {
 
 // detectGoModulePath reads the module path from an existing go.mod file.
 func detectGoModulePath(root string) string {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	gomodPath := filepath.Join(root, "go.mod")
+	// Validate path doesn't escape root directory
+	absRoot, _ := filepath.Abs(root)
+	absGomod, _ := filepath.Abs(gomodPath)
+	if !strings.HasPrefix(absGomod, absRoot) {
+		return ""
+	}
+	data, err := os.ReadFile(gomodPath)
 	if err != nil {
 		return ""
 	}
