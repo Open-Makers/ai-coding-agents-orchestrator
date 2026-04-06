@@ -11,7 +11,11 @@
   <a href="https://github.com/Open-Makers/ai-coding-agents-orchestrator/actions"><img src="https://img.shields.io/github/actions/workflow/status/Open-Makers/ai-coding-agents-orchestrator/ci.yml?style=flat-square&label=CI" alt="CI"></a>
   <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.25+">
   <a href="https://goreportcard.com/report/github.com/Open-Makers/ai-coding-agents-orchestrator"><img src="https://goreportcard.com/badge/github.com/Open-Makers/ai-coding-agents-orchestrator?style=flat-square" alt="Go Report Card"></a>
+  <img src="https://img.shields.io/badge/status-experimental-orange?style=flat-square" alt="Experimental">
 </p>
+
+> **⚠️ Status: Experimental**
+> This project is in early development — it works, but it has only been tested on the author's machine. Expect rough edges, breaking changes, and missing documentation. Contributions and feedback are welcome!
 
 ---
 
