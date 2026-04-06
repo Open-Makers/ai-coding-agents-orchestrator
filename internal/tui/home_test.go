@@ -98,12 +98,13 @@ func TestNewHomeModel_MenuItems(t *testing.T) {
 	root := t.TempDir()
 	m := NewHomeModel(newTestConfig(), root)
 
-	if len(m.items) != 5 {
-		t.Fatalf("expected 5 menu items, got %d", len(m.items))
+	if len(m.items) != 6 {
+		t.Fatalf("expected 6 menu items, got %d", len(m.items))
 	}
 
 	expectedActions := []homeAction{
 		homeActionRun,
+		homeActionOpenProject,
 		homeActionGlobalSettings,
 		homeActionSetup,
 		homeActionClean,
@@ -336,10 +337,10 @@ func TestHomeModel_NumberShortcuts(t *testing.T) {
 	m.width, m.height = 120, 40
 	m.syncViewport()
 
-	// '5' should trigger quit confirmation.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
+	// '6' should trigger quit confirmation.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
 	if !m.confirmQuit {
-		t.Error("expected confirmQuit after pressing '5'")
+		t.Error("expected confirmQuit after pressing '6'")
 	}
 }
 
@@ -536,7 +537,7 @@ func TestHomeModel_RenderLogo_Compact(t *testing.T) {
 func TestHomeModel_RenderHistory_Empty(t *testing.T) {
 	root := t.TempDir()
 	m := NewHomeModel(newTestConfig(), root)
-	m.history = nil
+	m.recentProjects = nil
 
 	hist := m.renderHistory()
 	if hist != "" {
@@ -547,22 +548,25 @@ func TestHomeModel_RenderHistory_Empty(t *testing.T) {
 func TestHomeModel_RenderHistory_WithEntries(t *testing.T) {
 	root := t.TempDir()
 	m := NewHomeModel(newTestConfig(), root)
-	m.history = []string{
-		filepath.Join(root, "req1.md"),
-		filepath.Join(root, "req2.md"),
-		filepath.Join(root, "req3.md"),
-		filepath.Join(root, "req4.md"),
+	m.recentProjects = []RecentProject{
+		{Path: "/home/user/project-a", Name: "project-a"},
+		{Path: "/home/user/project-b", Name: "project-b"},
+		{Path: "/home/user/project-c", Name: "project-c"},
+		{Path: "/home/user/project-d", Name: "project-d"},
+		{Path: "/home/user/project-e", Name: "project-e"},
+		{Path: "/home/user/project-f", Name: "project-f"},
+		{Path: "/home/user/project-g", Name: "project-g"},
 	}
 
 	hist := m.renderHistory()
-	if !containsText(hist, "req1.md") {
+	if !containsText(hist, "project-a") {
 		t.Error("history should contain first entry")
 	}
-	if !containsText(hist, "req3.md") {
+	if !containsText(hist, "project-c") {
 		t.Error("history should contain third entry")
 	}
-	if containsText(hist, "req4.md") {
-		t.Error("history should not show more than 3 entries")
+	if containsText(hist, "project-f") {
+		t.Error("history should not show more than 5 entries")
 	}
 }
 

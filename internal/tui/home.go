@@ -19,6 +19,7 @@ type homeAction int
 
 const (
 	homeActionRun homeAction = iota
+	homeActionOpenProject
 	homeActionGlobalSettings
 	homeActionSetup
 	homeActionClean
@@ -76,6 +77,9 @@ type HomeModel struct {
 	cachedBranch     string
 	cachedOverrides  []agentOverride
 
+	// Recent projects from ~/.orchestrator/projects.json.
+	recentProjects []RecentProject
+
 	confirmQuit bool // true when showing quit confirmation
 	scrollX     int  // horizontal scroll offset (visible chars)
 
@@ -125,8 +129,10 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		cachedPromptLang: promptLang,
 		cachedBranch:     gitBranch,
 		cachedOverrides:  overrides,
+		recentProjects:   LoadRecentProjects(),
 		items: []homeMenuItem{
 			{icon: "▶", label: "Run Pipeline", desc: "Select requirements and start agents", action: homeActionRun, key: "Enter"},
+			{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
 			{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
 			{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
 			{icon: "✦", label: "Clean Workspace", desc: "Remove artifacts, keep config", action: homeActionClean, key: "c"},
@@ -187,6 +193,8 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			return m, m.selectAction(homeActionSetup)
 		case "g", "G":
 			return m, m.selectAction(homeActionGlobalSettings)
+		case "o", "O":
+			return m, m.selectAction(homeActionOpenProject)
 		case "c", "C":
 			return m, m.selectAction(homeActionClean)
 		case "q", "Q":
@@ -203,12 +211,14 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 		case "1":
 			return m, m.selectAction(homeActionRun)
 		case "2":
-			return m, m.selectAction(homeActionGlobalSettings)
+			return m, m.selectAction(homeActionOpenProject)
 		case "3":
-			return m, m.selectAction(homeActionSetup)
+			return m, m.selectAction(homeActionGlobalSettings)
 		case "4":
-			return m, m.selectAction(homeActionClean)
+			return m, m.selectAction(homeActionSetup)
 		case "5":
+			return m, m.selectAction(homeActionClean)
+		case "6":
 			m.confirmQuit = true
 		}
 	}
@@ -562,11 +572,12 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 
 	// Each menu item gets its own accent color.
 	itemColors := []lipgloss.Color{
-		p.green, // Run Pipeline
-		p.cyan,  // Global Settings
-		p.gold,  // Project Setup
-		p.red,   // Clean Workspace
-		p.dim,   // Quit
+		p.green,  // Run Pipeline
+		p.accent, // Open Project
+		p.cyan,   // Global Settings
+		p.gold,   // Project Setup
+		p.red,    // Clean Workspace
+		p.dim,    // Quit
 	}
 
 	cardW := contentWidth/2 - 2
@@ -619,25 +630,62 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 		Render(strings.Join(lines, "\n"))
 }
 
-// ── History ──────────────────────────────────────────────────────────────────
+// ── Recent Projects ──────────────────────────────────────────────────────────
 
 func (m HomeModel) renderHistory() string {
-	if len(m.history) == 0 {
+	p := homePalette
+	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
+	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
+	nameStyle := lipgloss.NewStyle().Foreground(p.bright)
+	pathStyle := lipgloss.NewStyle().Foreground(p.dim)
+	activeStyle := lipgloss.NewStyle().Foreground(p.green)
+
+	// Show recent projects (excluding current).
+	var filtered []RecentProject
+	for _, proj := range m.recentProjects {
+		if proj.Path != m.root {
+			filtered = append(filtered, proj)
+		}
+	}
+
+	if len(filtered) == 0 {
 		return ""
 	}
-	dimStyle := lipgloss.NewStyle().Foreground(homePalette.dim)
 
 	var lines []string
-	lines = append(lines, dimStyle.Render("  ◈ RECENT REQUIREMENTS"))
-	maxShow := 3
-	if len(m.history) < maxShow {
-		maxShow = len(m.history)
+	lines = append(lines, titleStyle.Render("  ◈ RECENT PROJECTS")+"  "+dimStyle.Render("(o to switch)"))
+
+	maxShow := 5
+	if len(filtered) < maxShow {
+		maxShow = len(filtered)
 	}
 	for i := 0; i < maxShow; i++ {
-		display := m.shortenPath(m.history[i])
-		lines = append(lines, dimStyle.Render(fmt.Sprintf("    · %s", display)))
+		proj := filtered[i]
+		exists := dirExists(proj.Path)
+		marker := activeStyle.Render("●")
+		if !exists {
+			marker = dimStyle.Render("○")
+		}
+		name := nameStyle.Render(proj.Name)
+		short := m.shortenProjectPath(proj.Path)
+		line := fmt.Sprintf("    %s %s  %s", marker, name, pathStyle.Render(short))
+		lines = append(lines, line)
+	}
+	if len(filtered) > maxShow {
+		lines = append(lines, dimStyle.Render(fmt.Sprintf("    … and %d more", len(filtered)-maxShow)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m HomeModel) shortenProjectPath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if strings.HasPrefix(path, home) {
+		return "~" + path[len(home):]
+	}
+	return path
 }
 
 // ── Footer ───────────────────────────────────────────────────────────────────
@@ -659,6 +707,7 @@ func (m HomeModel) renderFooter(style lipgloss.Style) string {
 	}
 	hints = append(hints,
 		hint("Enter", "select"),
+		hint("o", "project"),
 		hint("g", "global"),
 		hint("s", "setup"),
 		hint("c", "clean"),
@@ -675,12 +724,23 @@ func (m HomeModel) renderFooter(style lipgloss.Style) string {
 			Render(fmt.Sprintf("%.0f%%", pct))
 	}
 
-	gap := m.width - lipglossLen(left) - lipglossLen(scrollInfo) - 2
+	versionTag := lipgloss.NewStyle().
+		Background(p.footerBg).
+		Foreground(p.gold).
+		Bold(true).
+		Render("v" + Version)
+
+	right := versionTag
+	if scrollInfo != "" {
+		right = scrollInfo + "  " + versionTag
+	}
+
+	gap := m.width - lipglossLen(left) - lipglossLen(right) - 2
 	if gap < 0 {
 		gap = 0
 	}
 
-	return style.Render(left + strings.Repeat(" ", gap) + scrollInfo)
+	return style.Render(left + strings.Repeat(" ", gap) + right)
 }
 
 // ── Data resolution helpers ──────────────────────────────────────────────────
