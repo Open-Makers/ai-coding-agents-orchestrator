@@ -2,9 +2,9 @@ package tui
 
 import (
 	"encoding/json"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
@@ -31,21 +31,14 @@ func projectsFilePath() string {
 // LoadRecentProjects reads the list of recently opened projects from ~/.orchestrator/projects.json.
 // The user's home directory is always excluded.
 func LoadRecentProjects() []RecentProject {
-	path := projectsFilePath()
-	if path == "" {
-		return nil
-	}
-	// Validate path is within home directory
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil
 	}
-	absHome, _ := filepath.Abs(home)
-	absPath, _ := filepath.Abs(path)
-	if !strings.HasPrefix(absPath, absHome) {
-		return nil
-	}
-	data, err := os.ReadFile(path)
+
+	// Use DirFS to safely scope file access within home directory
+	homeFS := os.DirFS(home)
+	data, err := fs.ReadFile(homeFS, filepath.Join(config.GlobalDir, projectsFile))
 	if err != nil {
 		return nil
 	}

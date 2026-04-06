@@ -3,9 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -687,18 +687,14 @@ func (m Model) renderCongratulations(height int) string {
 	content.WriteString("\n")
 
 	// Read summary from artifacts if available.
-	summaryPath := filepath.Join(m.wsPath, artifacts.SummaryFile)
-	// Validate path doesn't escape workspace directory
-	absWs, _ := filepath.Abs(m.wsPath)
-	absSummary, _ := filepath.Abs(summaryPath)
-	if strings.HasPrefix(absSummary, absWs) {
-		if data, err := os.ReadFile(summaryPath); err == nil {
-			summary := strings.TrimSpace(string(data))
-			if summary != "" {
-				content.WriteString("\n")
-				content.WriteString(dimStyle.Render(summary))
-				content.WriteString("\n")
-			}
+	// Use DirFS to safely scope file access within workspace directory
+	wsFS := os.DirFS(m.wsPath)
+	if data, err := fs.ReadFile(wsFS, artifacts.SummaryFile); err == nil {
+		summary := strings.TrimSpace(string(data))
+		if summary != "" {
+			content.WriteString("\n")
+			content.WriteString(dimStyle.Render(summary))
+			content.WriteString("\n")
 		}
 	}
 
