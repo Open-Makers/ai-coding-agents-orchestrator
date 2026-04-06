@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // StatusBarModel renders a single-line status bar at the bottom.
@@ -51,6 +53,24 @@ func formatTokens(chars int) string {
 	}
 }
 
+// statusBarShortcut defines a keyboard shortcut displayed in the status bar.
+type statusBarShortcut struct {
+	key   string
+	desc  string
+	color lipgloss.Color
+}
+
+// statusBarShortcuts defines the shortcut hints with per-action accent colors.
+var statusBarShortcuts = []statusBarShortcut{
+	{"↑↓", "scroll", lipgloss.Color("#7aa2f7")},      // blue — navigation
+	{"Ctrl+R", "req", lipgloss.Color("#9ece6a")},     // green — requirements
+	{"Ctrl+G", "git", lipgloss.Color("#73daca")},     // teal — git
+	{"Ctrl+C", "chat", lipgloss.Color("#2ac3de")},    // cyan — chat
+	{"Ctrl+A", "approve", lipgloss.Color("#9ece6a")}, // green — approve
+	{"Ctrl+X", "cancel", lipgloss.Color("#f7768e")},  // coral — cancel
+	{"q", "quit", lipgloss.Color("#6b553f")},         // dim — quit
+}
+
 func (m StatusBarModel) View() string {
 	left := ""
 	if m.branch != "" {
@@ -74,9 +94,26 @@ func (m StatusBarModel) View() string {
 		left += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.tokenChars))
 	}
 
-	shortcuts := styleStatusBar.Render(
-		" ↑↓ scroll  Ctrl+R req  Ctrl+G git  Ctrl+C chat  Ctrl+A approve  Ctrl+X cancel  q quit  v" + Version,
-	)
+	descStyle := lipgloss.NewStyle().
+		Background(crt.panelBg).
+		Foreground(crt.dim)
+
+	var hints []string
+	for _, sc := range statusBarShortcuts {
+		keyStyle := lipgloss.NewStyle().
+			Background(crt.panelBg).
+			Foreground(sc.color).
+			Bold(true)
+		hints = append(hints, keyStyle.Render(sc.key)+descStyle.Render(" "+sc.desc))
+	}
+
+	versionTag := lipgloss.NewStyle().
+		Background(crt.panelBg).
+		Foreground(lipgloss.Color("#e0af68")).
+		Bold(true).
+		Render("v" + Version)
+
+	shortcuts := strings.Join(hints, "  ") + "  " + versionTag
 
 	gap := m.width - lipglossLen(left) - lipglossLen(shortcuts)
 	if gap < 0 {

@@ -344,7 +344,13 @@ func (m ControlModel) renderPhaseBar() string {
 	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
 	sepStyle := lipgloss.NewStyle().Foreground(crt.muted)
 	doneStyle := lipgloss.NewStyle().Foreground(crt.success).Bold(true)
-	activeStyle := lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+
+	phaseActiveStyle := func(label string) lipgloss.Style {
+		if c, ok := pipelineColors[label]; ok {
+			return lipgloss.NewStyle().Foreground(c).Bold(true)
+		}
+		return lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+	}
 
 	var parts []string
 
@@ -354,9 +360,11 @@ func (m ControlModel) renderPhaseBar() string {
 		case m.approvedGates[gate]:
 			parts = append(parts, doneStyle.Render("✓ "+label))
 		case m.gateArtifact == gate:
-			parts = append(parts, activeStyle.Render("⏸ "+label))
+			style := phaseActiveStyle(label)
+			parts = append(parts, style.Render("⏸ "+label))
 		case strings.Contains(m.phase, "planning") && !m.approvedGates[gate] && m.gateArtifact == "":
-			parts = append(parts, activeStyle.Render("◉ "+label))
+			style := phaseActiveStyle(label)
+			parts = append(parts, style.Render("◉ "+label))
 		default:
 			parts = append(parts, dimStyle.Render("○ "+label))
 		}
@@ -366,7 +374,8 @@ func (m ControlModel) renderPhaseBar() string {
 	for _, ph := range postPhases {
 		label := strings.ToUpper(ph)
 		if strings.Contains(m.phase, ph) {
-			parts = append(parts, activeStyle.Render("◉ "+label))
+			style := phaseActiveStyle(label)
+			parts = append(parts, style.Render("◉ "+label))
 		} else {
 			parts = append(parts, dimStyle.Render("○ "+label))
 		}
@@ -387,7 +396,8 @@ func (m ControlModel) renderAgentSummary() string {
 }
 
 func renderAgentPill(role bus.AgentRole, state AgentState) string {
-	roleText := lipgloss.NewStyle().Foreground(crt.primary).Bold(true).Render(strings.ToUpper(string(role)))
+	color := roleColor(string(role))
+	roleText := lipgloss.NewStyle().Foreground(color).Bold(true).Render(strings.ToUpper(string(role)))
 	var stateText string
 	switch state {
 	case AgentRunning:
