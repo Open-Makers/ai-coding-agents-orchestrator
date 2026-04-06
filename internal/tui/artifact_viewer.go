@@ -48,7 +48,10 @@ type ArtifactViewerModel struct {
 	editTA   textarea.Model
 }
 
-type artifactViewerClosedMsg struct{ approved bool }
+type artifactViewerClosedMsg struct {
+	approved   bool
+	regenerate bool
+}
 type artifactRevisionDoneMsg struct{ err error }
 type artifactEditedMsg struct{ err error }
 
@@ -186,6 +189,8 @@ func (m ArtifactViewerModel) Update(msg tea.Msg) (ArtifactViewerModel, tea.Cmd) 
 			return m, func() tea.Msg { return artifactViewerClosedMsg{approved: true} }
 		case "esc", "q":
 			return m, func() tea.Msg { return artifactViewerClosedMsg{approved: false} }
+		case "r":
+			return m, func() tea.Msg { return artifactViewerClosedMsg{regenerate: true} }
 		case "[", "left":
 			if m.artifactIdx > 0 {
 				m.switchToArtifact(m.artifactIdx - 1)
@@ -413,7 +418,7 @@ func (m ArtifactViewerModel) View() string {
 		if m.revise != nil {
 			parts = append(parts, "c revise")
 		}
-		parts = append(parts, "Ctrl+A approve", "Esc close")
+		parts = append(parts, "r regenerate", "Ctrl+A approve", "Esc close")
 		hintLine = dimStyle.Render(strings.Join(parts, "  "))
 	}
 
