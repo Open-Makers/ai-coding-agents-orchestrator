@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -12,6 +13,16 @@ import (
 // BusMessageMsg wraps a bus.Message as a tea.Msg.
 type BusMessageMsg struct {
 	Msg bus.Message
+}
+
+// statusBarTickMsg triggers scroll animation for the status bar marquee.
+type statusBarTickMsg struct{}
+
+// statusBarTick returns a tea.Cmd that fires a statusBarTickMsg after a short delay.
+func statusBarTick() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return statusBarTickMsg{}
+	})
 }
 
 // AgentState represents the display state of an agent panel.

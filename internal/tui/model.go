@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -100,12 +102,6 @@ type Model struct {
 	overlayArtifact ArtifactViewerModel
 }
 
-// PipelineReadyMsg returns a tea.Msg that delivers the pipeline to the TUI model
-// after it has been constructed (avoiding log output between TUI sessions).
-func PipelineReadyMsg(p *orchestrator.Pipeline) tea.Msg {
-	return pipelineReadyMsg{p: p}
-}
-
 // PipelineReadyWithCancelMsg returns a tea.Msg with pipeline and cancel func.
 func PipelineReadyWithCancelMsg(p *orchestrator.Pipeline, cancel context.CancelFunc) tea.Msg {
 	return pipelineReadyMsg{p: p, cancel: cancel}
@@ -118,7 +114,7 @@ func (m Model) ReturnToMenu() bool {
 }
 
 // New creates the root TUI model.
-// pipeline may be nil initially; send PipelineReadyMsg once it is ready.
+// pipeline may be nil initially; send PipelineReadyWithCancelMsg once it is ready.
 // llm is used for the chat overlay (may be nil).
 func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPath string, llm runner.LLMRunner, cfg config.Config) Model {
 	panels := make(map[bus.AgentRole]AgentPanelModel)
@@ -230,7 +226,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if s, ok := bm.Payload.(string); ok {
 				// Detect stage transitions (e.g. "── Stage 2/5: Must Have — Auth ──").
 				if stageInfo := extractStageInfo(s); stageInfo != "" {
+					prevStage := m.statusbar.stageInfo
 					m.statusbar = m.statusbar.WithStageInfo(stageInfo)
+					if prevStage == "" {
+						cmds = append(cmds, statusBarTick())
+					}
 				}
 				// Clear stage info only when pipeline is fully done.
 				if s == "done" {
@@ -399,6 +399,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusbar = m.statusbar.WithState("✓ done — m menu  q quit")
 		}
 
+	case statusBarTickMsg:
+		if m.statusbar.stageInfo != "" {
+			m.statusbar = m.statusbar.AdvanceScroll()
+			cmds = append(cmds, statusBarTick())
+		}
+
 	case spinner.TickMsg:
 		for role, p := range m.panels {
 			updated, cmd := p.Update(msg)
@@ -495,6 +501,9 @@ func (m Model) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlayArtifact, cmd = m.overlayArtifact.Update(msg)
 			return m, cmd
 		}
+
+	default:
+		// overlayNone is handled before this method is called.
 	}
 
 	// Overlay closed — resume listening to bus events.
@@ -507,6 +516,8 @@ func (m Model) View() string {
 	}
 
 	switch m.overlay {
+	case overlayNone:
+		// Fall through to main view rendering below.
 	case overlayPicker:
 		return m.overlayPicker.View()
 	case overlayEditor:
@@ -523,15 +534,22 @@ func (m Model) View() string {
 		}, "\n")
 	}
 
-	// Main area: single active agent panel.
+	// Main area: single active agent panel (or congratulations on completion).
 	panelH := m.height - 3 // phase bar (1) + status bar (1) + newline
 	if panelH < 4 {
 		panelH = 4
 	}
-	p := m.panels[m.activeRole]
-	p.SetSize(m.width, panelH)
 
-	parts := []string{p.View()}
+	var parts []string
+
+	if m.pipelineDone && m.pipelineErr == "" {
+		parts = append(parts, m.renderCongratulations(panelH))
+	} else {
+		p := m.panels[m.activeRole]
+		p.SetSize(m.width, panelH)
+		parts = append(parts, p.View())
+	}
+
 	if m.pipelineErr != "" {
 		banner := lipgloss.NewStyle().
 			Background(crt.border).
@@ -643,6 +661,47 @@ func (m Model) renderPhaseBar() string {
 	}
 
 	return "  " + strings.Join(parts, sepStyle.Render(" → "))
+}
+
+// renderCongratulations renders a centered congratulations banner with pipeline summary.
+func (m Model) renderCongratulations(height int) string {
+	titleStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#73daca")).
+		Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	accentStyle := lipgloss.NewStyle().Foreground(crt.primary)
+
+	var content strings.Builder
+	content.WriteString(titleStyle.Render("🎉  Congratulations!"))
+	content.WriteString("\n\n")
+	content.WriteString(accentStyle.Render("Pipeline completed successfully."))
+	content.WriteString("\n")
+
+	// Read summary from artifacts if available.
+	summaryPath := filepath.Join(m.wsPath, artifacts.SummaryFile)
+	if data, err := os.ReadFile(summaryPath); err == nil {
+		summary := strings.TrimSpace(string(data))
+		if summary != "" {
+			content.WriteString("\n")
+			content.WriteString(dimStyle.Render(summary))
+			content.WriteString("\n")
+		}
+	}
+
+	content.WriteString("\n")
+	content.WriteString(dimStyle.Render("Press ") +
+		accentStyle.Render("m") +
+		dimStyle.Render(" for menu  or  ") +
+		accentStyle.Render("q") +
+		dimStyle.Render(" to quit"))
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#73daca")).
+		Padding(1, 4).
+		Render(content.String())
+
+	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 func (m *Model) layout() {

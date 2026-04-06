@@ -10,23 +10,28 @@ import (
 
 // StatusBarModel renders a single-line status bar at the bottom.
 type StatusBarModel struct {
-	branch     string
-	state      string
-	stageInfo  string // e.g. "Stage 2/5: Must Have — Auth"
-	runner     string
-	model      string
-	tokenChars int // cumulative output characters (used to estimate tokens)
-	width      int
+	branch       string
+	state        string
+	stageInfo    string // e.g. "Stage 2/5: Must Have — Auth"
+	runner       string
+	model        string
+	tokenChars   int // cumulative output characters (used to estimate tokens)
+	width        int
+	scrollOffset int // marquee scroll position for stageInfo
 }
 
 func NewStatusBar(width int) StatusBarModel {
 	return StatusBarModel{width: width, state: "idle"}
 }
 
-func (m StatusBarModel) WithBranch(b string) StatusBarModel    { m.branch = b; return m }
-func (m StatusBarModel) WithState(s string) StatusBarModel     { m.state = s; return m }
-func (m StatusBarModel) WithStageInfo(s string) StatusBarModel { m.stageInfo = s; return m }
-func (m StatusBarModel) WithWidth(w int) StatusBarModel        { m.width = w; return m }
+func (m StatusBarModel) WithBranch(b string) StatusBarModel { m.branch = b; return m }
+func (m StatusBarModel) WithState(s string) StatusBarModel  { m.state = s; return m }
+func (m StatusBarModel) WithStageInfo(s string) StatusBarModel {
+	m.stageInfo = s
+	m.scrollOffset = 0
+	return m
+}
+func (m StatusBarModel) WithWidth(w int) StatusBarModel { m.width = w; return m }
 func (m StatusBarModel) WithRunnerModel(r, mdl string) StatusBarModel {
 	m.runner = r
 	m.model = mdl
@@ -36,6 +41,12 @@ func (m StatusBarModel) WithRunnerModel(r, mdl string) StatusBarModel {
 // AddTokenChars adds n output characters to the cumulative counter.
 func (m StatusBarModel) AddTokenChars(n int) StatusBarModel {
 	m.tokenChars += n
+	return m
+}
+
+// AdvanceScroll moves the marquee scroll position forward by one.
+func (m StatusBarModel) AdvanceScroll() StatusBarModel {
+	m.scrollOffset++
 	return m
 }
 
@@ -72,28 +83,7 @@ var statusBarShortcuts = []statusBarShortcut{
 }
 
 func (m StatusBarModel) View() string {
-	left := ""
-	if m.branch != "" {
-		left = styleStatusKey.Render(m.branch) + "  "
-	}
-	left += styleStatusBar.Render("● " + m.state)
-
-	if m.stageInfo != "" {
-		left += "  " + styleStatusKey.Render("▸ "+m.stageInfo)
-	}
-
-	if m.runner != "" || m.model != "" {
-		info := m.runner
-		if m.model != "" {
-			info += "/" + m.model
-		}
-		left += "  " + styleStatusKey.Render(info)
-	}
-
-	if m.tokenChars > 0 {
-		left += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.tokenChars))
-	}
-
+	// ── Right side (always fully visible) ──
 	descStyle := lipgloss.NewStyle().
 		Background(crt.panelBg).
 		Foreground(crt.dim)
@@ -113,14 +103,68 @@ func (m StatusBarModel) View() string {
 		Bold(true).
 		Render("v" + Version)
 
-	shortcuts := strings.Join(hints, "  ") + "  " + versionTag
+	rightSide := strings.Join(hints, "  ") + "  " + versionTag
+	rightWidth := lipglossLen(rightSide)
 
-	gap := m.width - lipglossLen(left) - lipglossLen(shortcuts)
+	// ── Left side: fixed prefix + scrollable stageInfo + fixed suffix ──
+	prefix := ""
+	if m.branch != "" {
+		prefix = styleStatusKey.Render(m.branch) + "  "
+	}
+	prefix += styleStatusBar.Render("● " + m.state)
+
+	suffix := ""
+	if m.runner != "" || m.model != "" {
+		info := m.runner
+		if m.model != "" {
+			info += "/" + m.model
+		}
+		suffix += "  " + styleStatusKey.Render(info)
+	}
+	if m.tokenChars > 0 {
+		suffix += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.tokenChars))
+	}
+
+	prefixWidth := lipglossLen(prefix)
+	suffixWidth := lipglossLen(suffix)
+	separatorWidth := 2 // "  " between prefix and stageInfo
+
+	availableForStage := m.width - rightWidth - prefixWidth - suffixWidth - separatorWidth - 2
+	stageRendered := ""
+	if m.stageInfo != "" && availableForStage > 4 {
+		stageRendered = "  " + m.renderScrollingStage(availableForStage)
+	}
+
+	left := prefix + stageRendered + suffix
+
+	gap := m.width - lipglossLen(left) - rightWidth
 	if gap < 0 {
 		gap = 0
 	}
 
-	return left + strings.Repeat(" ", gap) + shortcuts
+	return left + strings.Repeat(" ", gap) + rightSide
+}
+
+// renderScrollingStage returns the stageInfo text, applying marquee scrolling
+// if it exceeds the available width.
+func (m StatusBarModel) renderScrollingStage(availableWidth int) string {
+	label := "▸ " + m.stageInfo
+	runes := []rune(label)
+
+	if len(runes) <= availableWidth {
+		return styleStatusKey.Render(label)
+	}
+
+	separator := []rune("   ···   ")
+	cycle := append(runes, separator...)
+	cycleLen := len(cycle)
+
+	visible := make([]rune, availableWidth)
+	for i := 0; i < availableWidth; i++ {
+		visible[i] = cycle[(m.scrollOffset+i)%cycleLen]
+	}
+
+	return styleStatusKey.Render(string(visible))
 }
 
 // lipglossLen approximates the visible width of a rendered string by stripping ANSI escapes.
