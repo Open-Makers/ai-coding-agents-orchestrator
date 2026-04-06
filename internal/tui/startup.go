@@ -445,6 +445,12 @@ func (m *startupModel) transitionToHome() tea.Cmd {
 // switchProject handles switching to a different project directory.
 // It updates root, config, workspace paths, checks module path, and transitions to home.
 func (m *startupModel) switchProject(projectPath string) tea.Cmd {
+	if isHomeDir(projectPath) {
+		// Never allow the home directory as a project root.
+		m.phase = startupPhaseHome
+		return m.home.Init()
+	}
+
 	m.root = projectPath
 	_ = os.Chdir(projectPath)
 	_ = SaveRecentProject(projectPath)

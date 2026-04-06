@@ -50,10 +50,37 @@ func NewProjectPicker(currentDir string) ProjectPickerModel {
 
 func (m ProjectPickerModel) Init() tea.Cmd { return nil }
 
-// totalItems returns the number of selectable rows:
-// [0] current dir, [1] open project…, [2..] recent projects.
+// showCurrentDir returns true when the current directory is a valid
+// project directory (i.e. not the user's home directory).
+func (m ProjectPickerModel) showCurrentDir() bool {
+	return !isHomeDir(m.currentDir)
+}
+
+// totalItems returns the number of selectable rows.
+// When the current dir is the home directory, it is hidden.
 func (m ProjectPickerModel) totalItems() int {
-	return 2 + len(m.projects)
+	n := 1 + len(m.projects) // "Open project…" + recent
+	if m.showCurrentDir() {
+		n++ // "Use current directory"
+	}
+	return n
+}
+
+// itemIndex maps a cursor position to a logical item.
+// Returns: "current", "browse", or 0-based recent project index.
+func (m ProjectPickerModel) itemAt(cursor int) (kind string, recentIdx int) {
+	i := 0
+	if m.showCurrentDir() {
+		if cursor == i {
+			return "current", -1
+		}
+		i++
+	}
+	if cursor == i {
+		return "browse", -1
+	}
+	i++
+	return "recent", cursor - i
 }
 
 func (m ProjectPickerModel) Update(msg tea.Msg) (ProjectPickerModel, tea.Cmd) {
@@ -109,13 +136,12 @@ func (m ProjectPickerModel) Update(msg tea.Msg) (ProjectPickerModel, tea.Cmd) {
 				m.cursor++
 			}
 		case "enter", " ":
-			switch m.cursor {
-			case 0:
-				// Use current directory.
+			kind, recentIdx := m.itemAt(m.cursor)
+			switch kind {
+			case "current":
 				dir := m.currentDir
 				return m, func() tea.Msg { return ProjectSelectedMsg{Path: dir} }
-			case 1:
-				// Open project… → directory browser.
+			case "browse":
 				browser, err := NewDirBrowser()
 				if err == nil {
 					browser.SetSize(m.width, m.height)
@@ -123,11 +149,9 @@ func (m ProjectPickerModel) Update(msg tea.Msg) (ProjectPickerModel, tea.Cmd) {
 					m.mode = projectPickerModeBrowse
 				}
 				return m, nil
-			default:
-				// Recent project selected.
-				idx := m.cursor - 2
-				if idx < len(m.projects) {
-					proj := m.projects[idx]
+			case "recent":
+				if recentIdx >= 0 && recentIdx < len(m.projects) {
+					proj := m.projects[recentIdx]
 					if dirExists(proj.Path) {
 						path := proj.Path
 						return m, func() tea.Msg { return ProjectSelectedMsg{Path: path} }
@@ -135,10 +159,9 @@ func (m ProjectPickerModel) Update(msg tea.Msg) (ProjectPickerModel, tea.Cmd) {
 				}
 			}
 		case "d", "D", "delete", "backspace":
-			// Delete from recent list (only for recent project entries).
-			idx := m.cursor - 2
-			if idx >= 0 && idx < len(m.projects) {
-				m.confirmDel = idx
+			kind, recentIdx := m.itemAt(m.cursor)
+			if kind == "recent" && recentIdx >= 0 && recentIdx < len(m.projects) {
+				m.confirmDel = recentIdx
 			}
 		case "q", "Q", "esc":
 			return m, func() tea.Msg { return ProjectPickerCancelledMsg{} }
@@ -164,21 +187,25 @@ func (m ProjectPickerModel) View() string {
 	lines = append(lines, titleStyle.Render("  ◈ SELECT PROJECT"))
 	lines = append(lines, "")
 
-	// --- Item 0: Current directory ---
-	currentLabel := "📂 Use current directory"
-	currentPath := dimStyle.Render("     " + m.currentDir)
-	if m.cursor == 0 {
-		lines = append(lines, activeStyle.Render("  ▸ "+currentLabel))
-		lines = append(lines, "  "+currentPath)
-	} else {
-		lines = append(lines, "    "+currentLabel)
-		lines = append(lines, "  "+currentPath)
+	// --- Current directory (hidden when cwd is the home directory) ---
+	if m.showCurrentDir() {
+		currentLabel := "📂 Use current directory"
+		currentPath := dimStyle.Render("     " + m.currentDir)
+		kind, _ := m.itemAt(m.cursor)
+		if kind == "current" {
+			lines = append(lines, activeStyle.Render("  ▸ "+currentLabel))
+			lines = append(lines, "  "+currentPath)
+		} else {
+			lines = append(lines, "    "+currentLabel)
+			lines = append(lines, "  "+currentPath)
+		}
+		lines = append(lines, "")
 	}
-	lines = append(lines, "")
 
-	// --- Item 1: Open project… ---
+	// --- Open project… ---
 	openLabel := "📂 Open project…"
-	if m.cursor == 1 {
+	kindBrowse, _ := m.itemAt(m.cursor)
+	if kindBrowse == "browse" {
 		lines = append(lines, activeStyle.Render("  ▸ "+openLabel))
 		lines = append(lines, "  "+dimStyle.Render("     Browse filesystem for a project directory"))
 	} else {
@@ -208,7 +235,8 @@ func (m ProjectPickerModel) View() string {
 				detail = dimStyle.Render("     " + proj.Path + " (not found)")
 			}
 
-			if m.cursor == i+2 {
+			kind, recentIdx := m.itemAt(m.cursor)
+			if kind == "recent" && recentIdx == i {
 				lines = append(lines, activeStyle.Render("  ▸ "+label))
 			} else {
 				lines = append(lines, "    "+label)

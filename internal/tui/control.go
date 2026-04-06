@@ -193,6 +193,8 @@ func (m ControlModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m ControlModel) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.overlay {
+	case overlayNone:
+		return m, nil
 	case overlayPicker:
 		switch msg := msg.(type) {
 		case PickerSelectedMsg:
@@ -273,6 +275,8 @@ func (m ControlModel) View() string {
 	}
 
 	switch m.overlay {
+	case overlayNone:
+		// No overlay — fall through to normal rendering.
 	case overlayPicker:
 		return m.overlayPicker.View()
 	case overlayEditor:

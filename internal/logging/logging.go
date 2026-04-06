@@ -1,14 +1,11 @@
 package logging
 
 import (
-	"context"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
-
-	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -67,19 +64,6 @@ func Close() {
 // ForComponent returns a logger with a pre-set "component" attribute.
 func ForComponent(component string) *slog.Logger {
 	return slog.Default().With(slog.String("component", component))
-}
-
-// WithTraceContext enriches log attributes with OpenTelemetry trace/span IDs
-// extracted from the context, enabling log-trace correlation.
-func WithTraceContext(ctx context.Context, logger *slog.Logger) *slog.Logger {
-	spanCtx := trace.SpanContextFromContext(ctx)
-	if !spanCtx.IsValid() {
-		return logger
-	}
-	return logger.With(
-		slog.String("trace_id", spanCtx.TraceID().String()),
-		slog.String("span_id", spanCtx.SpanID().String()),
-	)
 }
 
 func parseLevel(raw string) slog.Level {

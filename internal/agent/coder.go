@@ -325,7 +325,7 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 		if err != nil {
 			continue
 		}
-		fmt.Fprintf(&sb, "**%s**\n```\n%s\n```\n\n", path, string(content))
+		_, _ = fmt.Fprintf(&sb, "**%s**\n```\n%s\n```\n\n", path, string(content))
 	}
 	return sb.String()
 }
