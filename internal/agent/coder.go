@@ -13,6 +13,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // CoderPayload is the request for initial code generation.
@@ -321,7 +322,7 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 	}
 	var sb strings.Builder
 	for _, path := range files {
-		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // #nosec G304 -- path from git-tracked files in project
+		content, err := safefile.ReadFile(a.root, path)
 		if err != nil {
 			continue
 		}

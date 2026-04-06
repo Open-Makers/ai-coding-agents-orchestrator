@@ -56,7 +56,7 @@ func (r *Runner) Run(command string) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // G204: command validated by Sanitize above
+	cmd := CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = r.root
 
 	var stdoutBuf, stderrBuf bytes.Buffer
@@ -94,7 +94,7 @@ func (r *Runner) RunUnchecked(command string) Result {
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "sh", "-c", command) //nolint:gosec // #nosec G204 -- intentionally runs known-safe internal commands
+	cmd := CommandContext(ctx, "sh", "-c", command)
 	cmd.Dir = r.root
 
 	var stdoutBuf, stderrBuf bytes.Buffer

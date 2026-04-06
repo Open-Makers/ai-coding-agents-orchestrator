@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 const (
@@ -68,8 +70,7 @@ func (w Workspace) WriteFile(name string, data []byte) error {
 }
 
 func (w Workspace) ReadFile(name string) ([]byte, error) {
-	path := w.Path(name)
-	data, err := os.ReadFile(path) //nolint:gosec // G304: path scoped to workspace dir
+	data, err := safefile.ReadFile(w.Dir, name)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
@@ -78,7 +79,7 @@ func (w Workspace) ReadFile(name string) ([]byte, error) {
 
 // FileExists returns true if the artifact file exists and is non-empty.
 func (w Workspace) FileExists(name string) bool {
-	info, err := os.Stat(w.Path(name))
+	info, err := safefile.Stat(w.Dir, name)
 	return err == nil && info.Size() > 0
 }
 
@@ -137,8 +138,7 @@ func (w Workspace) CleanGeneratedArtifacts() {
 
 // AppendRunLog appends a single line with RFC3339 timestamp.
 func (w Workspace) AppendRunLog(message string) error {
-	path := w.Path(RunLogFile)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600) //nolint:gosec // #nosec G304 -- path scoped to workspace dir
+	f, err := safefile.OpenFile(w.Dir, RunLogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open runlog: %w", err)
 	}

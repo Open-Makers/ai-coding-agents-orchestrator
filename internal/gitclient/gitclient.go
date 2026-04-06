@@ -3,8 +3,9 @@ package gitclient
 import (
 	"bytes"
 	"fmt"
-	"os/exec"
 	"strings"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 )
 
 // FileStatus represents the git status of a single file.
@@ -118,7 +119,7 @@ func (g *GitClient) RemoteURL(name string) (string, error) {
 }
 
 func (g *GitClient) run(args ...string) (string, error) {
-	cmd := exec.Command("git", args...) //nolint:gosec // #nosec G204 -- args built internally for git operations
+	cmd := executil.Command("git", args...)
 	cmd.Dir = g.Root
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

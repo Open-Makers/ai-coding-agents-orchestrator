@@ -6,8 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 )
 
 // OpenCodeRunner executes the OpenCode CLI in non-interactive mode as an LLM backend.
@@ -73,7 +74,7 @@ func (r OpenCodeRunner) run(ctx context.Context, prompt, model string) (string, 
 	// Pass prompt as positional argument.
 	args = append(args, prompt)
 
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // #nosec G204 -- bin resolved from config, args built internally
+	cmd := executil.CommandContext(ctx, bin, args...)
 	cmd.Env = env
 
 	var out, stderr bytes.Buffer
@@ -130,7 +131,7 @@ var OpenCodeAvailableModels = []string{
 func OpenCodeListModels() ([]string, error) {
 	var models []string
 
-	cmd := exec.Command("opencode", "models")
+	cmd := executil.Command("opencode", "models")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &bytes.Buffer{}

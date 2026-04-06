@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 )
 
 const ollamaDefaultModel = "qwen2.5-coder:latest"
@@ -74,7 +75,7 @@ func (r *OllamaRunner) run(prompt, model string) ([]byte, error) {
 		"-p", prompt,
 	}
 
-	cmd := exec.Command("ollama", args...) //nolint:gosec // #nosec G204 -- args built internally for ollama CLI
+	cmd := executil.Command("ollama", args...)
 	cmd.Env = os.Environ()
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out

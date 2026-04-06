@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -17,9 +16,11 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/skills"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tui"
 )
@@ -486,14 +487,14 @@ func writeApproval(ws artifacts.Workspace, marker string) error {
 }
 
 func checkoutBranch(root, branch string) error {
-	cmd := exec.Command("git", "checkout", "-b", branch) //nolint:gosec // G204: branch name from config
+	cmd := executil.Command("git", "checkout", "-b", branch)
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err == nil {
 		return nil
 	}
-	cmd = exec.Command("git", "checkout", branch) //nolint:gosec // G204: branch name from config
+	cmd = executil.Command("git", "checkout", branch)
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -507,7 +508,7 @@ func fatal(err error) {
 
 // detectGoModulePath reads the module path from an existing go.mod file.
 func detectGoModulePath(root string) string {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod")) //nolint:gosec // #nosec G304 -- path scoped to project root
+	data, err := safefile.ReadFile(root, "go.mod")
 	if err != nil {
 		return ""
 	}

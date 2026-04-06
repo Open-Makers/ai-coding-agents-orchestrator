@@ -14,6 +14,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // TesterPayload carries the list of source files written by the coder.
@@ -123,7 +124,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 	var sourceContext strings.Builder
 
 	// Include go.mod so LLM knows the module path and available dependencies.
-	if gomod, err := os.ReadFile(filepath.Join(a.root, "go.mod")); err == nil {
+	if gomod, err := safefile.ReadFile(a.root, "go.mod"); err == nil {
 		sourceContext.WriteString("**go.mod**\n```\n")
 		sourceContext.Write(gomod)
 		sourceContext.WriteString("\n```\n\n")
@@ -133,7 +134,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
-		content, err := os.ReadFile(filepath.Join(a.root, path)) //nolint:gosec // #nosec G304 -- path from git-tracked files in project
+		content, err := safefile.ReadFile(a.root, path)
 		if err != nil {
 			continue
 		}

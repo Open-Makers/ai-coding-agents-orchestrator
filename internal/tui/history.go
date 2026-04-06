@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 const historyFile = "history.json"
@@ -11,7 +13,7 @@ const historyMax = 10
 
 // LoadHistory reads the list of recently used requirements paths.
 func LoadHistory(wsPath string) []string {
-	data, err := os.ReadFile(filepath.Join(wsPath, historyFile)) //nolint:gosec // #nosec G304 -- path scoped to workspace dir
+	data, err := safefile.ReadFile(wsPath, historyFile)
 	if err != nil {
 		return nil
 	}

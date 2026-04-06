@@ -1,14 +1,15 @@
 package runner
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
 // CodexRunner executes the OpenAI Codex CLI as an LLM backend.
@@ -54,15 +55,14 @@ func readCodexConfigModel() string {
 	if err != nil {
 		return ""
 	}
-	f, err := os.Open(filepath.Join(home, ".codex", "config.toml")) //nolint:gosec // #nosec G304 -- path scoped to user home config
+	codexDir := filepath.Join(home, ".codex")
+	data, err := safefile.ReadFile(codexDir, "config.toml")
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
 
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
 		// Match top-level: model = "value" (stop at first section header).
 		if strings.HasPrefix(line, "[") {
 			break
@@ -126,7 +126,7 @@ func (r CodexRunner) run(ctx context.Context, prompt, systemPrompt, model string
 		args = append(args, "--", prompt)
 	}
 
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // G204: bin resolved from config, args built internally
+	cmd := executil.CommandContext(ctx, bin, args...)
 	cmd.Env = os.Environ()
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
