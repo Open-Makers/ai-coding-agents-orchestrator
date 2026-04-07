@@ -73,9 +73,10 @@ type ContextConfig struct {
 }
 
 type AgentConfig struct {
-	Runner string   `yaml:"runner,omitempty"`
-	Model  string   `yaml:"model,omitempty"`
-	Skills []string `yaml:"-"` // always from defaults, never persisted
+	Runner           string   `yaml:"runner,omitempty"`
+	Model            string   `yaml:"model,omitempty"`
+	MaxContextTokens int      `yaml:"max_context_tokens,omitempty"` // 0 = no limit (for local models)
+	Skills           []string `yaml:"-"`                            // always from defaults, never persisted
 }
 
 // globalConfigDir returns the directory for the global config (~/.orchestrator).
@@ -238,6 +239,9 @@ func merge(dst *Config, src Config) {
 			}
 			if ac.Model != "" {
 				existing.Model = ac.Model
+			}
+			if ac.MaxContextTokens > 0 {
+				existing.MaxContextTokens = ac.MaxContextTokens
 			}
 			dst.Agents[role] = existing
 		}

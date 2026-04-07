@@ -313,7 +313,11 @@ func (a *CoderAgent) buildPrompt(msg bus.Message) (string, string, error) {
 	}
 }
 
+// maxCoderSourceContext caps total source context size sent to the coder during fixes.
+const maxCoderSourceContext = 60000
+
 // buildSourceContext reads files from disk and formats them for the LLM prompt.
+// Applies size limits to prevent unbounded context growth in large projects.
 func (a *CoderAgent) buildSourceContext(files []string) string {
 	if len(files) == 0 {
 		// Fallback to raw coder output if no file list available.
@@ -321,15 +325,24 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 		return string(raw)
 	}
 	var sb strings.Builder
+	totalSize := 0
 	for _, path := range files {
+		if totalSize >= maxCoderSourceContext {
+			sb.WriteString("... (remaining files omitted to fit context budget)\n")
+			break
+		}
 		content, err := safefile.ReadFile(a.root, path)
 		if err != nil {
 			continue
 		}
-		_, err = fmt.Fprintf(&sb, "**%s**\n```\n%s\n```\n\n", path, string(content))
-		if err != nil {
-			return ""
+		fileContent := string(content)
+		// Truncate very large individual files.
+		if len(fileContent) > 8000 {
+			fileContent = fileContent[:8000] + "\n... (truncated)"
 		}
+		entry := fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, fileContent)
+		sb.WriteString(entry)
+		totalSize += len(entry)
 	}
 	return sb.String()
 }

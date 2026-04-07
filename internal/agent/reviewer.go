@@ -3,18 +3,17 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
 type ReviewerPayload struct {
-	PatchPath  string
-	TestReport string
-	PlanPath   string
+	Files []string // source files to review (read from disk, not raw output)
+	Root  string   // project root for reading files
 }
 
 // ReviewResult is the structured outcome of a review.
@@ -22,14 +21,20 @@ type ReviewResult struct {
 	Approved   bool
 	MustFix    []string
 	NiceToHave []string
+	// Unparsed is true when the LLM response did not match any expected format.
+	// The orchestrator should escalate this to PM for arbitration.
+	Unparsed bool
+	// RawOutput holds the original LLM text for PM arbitration when Unparsed is true.
+	RawOutput string
 }
 
 type ReviewerAgent struct {
 	BaseAgent
-	runner runner.LLMRunner
-	ws     artifacts.Workspace
-	skills []string
-	model  string
+	runner           runner.LLMRunner
+	ws               artifacts.Workspace
+	skills           []string
+	model            string
+	maxContextTokens int
 }
 
 func NewReviewerAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills []string, model string) *ReviewerAgent {
@@ -42,6 +47,9 @@ func NewReviewerAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, sk
 	}
 }
 
+// SetMaxContextTokens configures the token budget for this agent.
+func (a *ReviewerAgent) SetMaxContextTokens(n int) { a.maxContextTokens = n }
+
 func (a *ReviewerAgent) Role() bus.AgentRole { return bus.RoleReviewer }
 
 func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
@@ -51,15 +59,25 @@ func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 	}
 
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
-	coderOutput, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
-	_ = payload
+	// Build source context from actual files on disk instead of raw coder output.
+	// This avoids sending markdown decoration, LLM commentary, and duplicate content.
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	if sourceContext == "" {
+		// Fallback to raw output if no files available.
+		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+		sourceContext = string(raw)
+	}
 
 	systemPrompt := prompts.MustLoad("reviewer-system")
 
 	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s\n\nTest results:\n%s",
-		string(plan), string(coderOutput), string(report))
+		string(plan), sourceContext, string(report))
+
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,
@@ -85,36 +103,12 @@ func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 }
 
 func parseReview(text string) ReviewResult {
-	lines := strings.Split(text, "\n")
-	var mustFix, niceToHave []string
-	section := ""
-	approved := false
-
-	for _, line := range lines {
-		trim := strings.TrimSpace(line)
-		upper := strings.ToUpper(trim)
-
-		switch {
-		case strings.HasPrefix(upper, "MUST FIX"):
-			section = "mustfix"
-		case strings.HasPrefix(upper, "NICE TO HAVE"):
-			section = "nicetohave"
-		case strings.HasPrefix(upper, "APPROVE"):
-			approved = strings.Contains(upper, "YES")
-			section = ""
-		default:
-			item := strings.TrimSpace(strings.TrimPrefix(trim, "-"))
-			if item == "" || strings.ToLower(item) == "none" {
-				continue
-			}
-			switch section {
-			case "mustfix":
-				mustFix = append(mustFix, item)
-			case "nicetohave":
-				niceToHave = append(niceToHave, item)
-			}
-		}
+	s := parseReviewSections(text, "NICE TO HAVE", "RECOMMENDATION")
+	return ReviewResult{
+		Approved:   s.Approved,
+		MustFix:    s.MustFix,
+		NiceToHave: s.NiceToHave,
+		Unparsed:   !s.Parsed,
+		RawOutput:  text,
 	}
-
-	return ReviewResult{Approved: approved, MustFix: mustFix, NiceToHave: niceToHave}
 }

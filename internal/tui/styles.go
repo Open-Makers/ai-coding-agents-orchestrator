@@ -73,7 +73,6 @@ var pipelineColors = map[string]lipgloss.Color{
 	"SEC":          roleColors["security"],
 	"SECURITY":     roleColors["security"],
 	"QA":           roleColors["qa"],
-	"PR":           roleColors["pr"],
 	"FIXING":       lipgloss.Color("#ff9e64"), // orange — fix cycle
 	"DONE":         lipgloss.Color("#73daca"),
 }

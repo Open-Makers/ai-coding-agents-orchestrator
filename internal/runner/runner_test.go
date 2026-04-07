@@ -67,5 +67,8 @@ var _ LLMRunner = CodexRunner{}
 // Compile-time check: SkillRunner implements LLMRunner.
 var _ LLMRunner = &SkillRunner{}
 
+// Compile-time check: BudgetRunner implements LLMRunner.
+var _ LLMRunner = &BudgetRunner{}
+
 // Compile-time check: MockRunner implements LLMRunner.
 var _ LLMRunner = &MockRunner{}

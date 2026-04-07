@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/agent"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
@@ -36,7 +37,7 @@ func TestGenerateCode_Success(t *testing.T) {
 		},
 	}
 
-	p := &Pipeline{b: b, agents: agents, niceToHave: make(map[string][]string)}
+	p := &Pipeline{b: b, agents: agents, niceToHave: make(map[string][]string), agentDurations: make(map[bus.AgentRole]time.Duration)}
 	files, err := p.generateCode(context.Background(), "plan", "ctx", "", 0, 0, nil)
 	if err != nil {
 		t.Fatalf("expected success, got: %v", err)
@@ -71,7 +72,7 @@ func TestQualityGate_PassOnFirstTry(t *testing.T) {
 		},
 	}
 
-	p := &Pipeline{b: b, agents: agents, niceToHave: make(map[string][]string)}
+	p := &Pipeline{b: b, agents: agents, niceToHave: make(map[string][]string), agentDurations: make(map[bus.AgentRole]time.Duration)}
 	files := []string{"main.go"}
 	if err := p.qualityGate(context.Background(), "ctx", &files); err != nil {
 		t.Fatalf("expected success, got: %v", err)
@@ -117,7 +118,7 @@ func TestQualityGate_FixAndRestart(t *testing.T) {
 	}
 
 	cfg := config.Config{}
-	p := &Pipeline{b: b, agents: agents, cfg: cfg, niceToHave: make(map[string][]string)}
+	p := &Pipeline{b: b, agents: agents, cfg: cfg, niceToHave: make(map[string][]string), agentDurations: make(map[bus.AgentRole]time.Duration)}
 	files := []string{"main.go"}
 	if err := p.qualityGate(context.Background(), "ctx", &files); err != nil {
 		t.Fatalf("expected success after fix, got: %v", err)

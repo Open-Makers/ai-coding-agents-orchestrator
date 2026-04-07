@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/agent"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
@@ -50,6 +51,12 @@ type Pipeline struct {
 	// niceToHave collects non-blocking suggestions from all review phases.
 	niceToHave map[string][]string
 
+	// codingStarted is the timestamp of the first coder handoff (for elapsed timer).
+	codingStarted time.Time
+
+	// agentDurations accumulates wall-clock time spent in each agent role.
+	agentDurations map[bus.AgentRole]time.Duration
+
 	// gateCh receives a signal when a human gate is programmatically approved.
 	gateCh chan struct{}
 
@@ -73,16 +80,17 @@ func NewPipeline(
 	root string,
 ) *Pipeline {
 	return &Pipeline{
-		b:            b,
-		agents:       agents,
-		cfg:          cfg,
-		ws:           ws,
-		root:         root,
-		state:        PipelineIdle,
-		log:          logging.ForComponent("pipeline"),
-		niceToHave:   make(map[string][]string),
-		gateCh:       make(chan struct{}, 1),
-		regenerateCh: make(chan struct{}, 1),
+		b:              b,
+		agents:         agents,
+		cfg:            cfg,
+		ws:             ws,
+		root:           root,
+		state:          PipelineIdle,
+		log:            logging.ForComponent("pipeline"),
+		niceToHave:     make(map[string][]string),
+		agentDurations: make(map[bus.AgentRole]time.Duration),
+		gateCh:         make(chan struct{}, 1),
+		regenerateCh:   make(chan struct{}, 1),
 	}
 }
 
@@ -107,6 +115,19 @@ func (p *Pipeline) Regenerate() {
 // CurrentState returns the current pipeline state.
 func (p *Pipeline) CurrentState() PipelineState { return p.state }
 
+// CodingStarted returns the timestamp when the coder was first invoked.
+// Returns zero time if coding hasn't started yet.
+func (p *Pipeline) CodingStarted() time.Time { return p.codingStarted }
+
+// AgentDurations returns cumulative wall-clock time each agent has spent running.
+func (p *Pipeline) AgentDurations() map[bus.AgentRole]time.Duration {
+	result := make(map[bus.AgentRole]time.Duration, len(p.agentDurations))
+	for k, v := range p.agentDurations {
+		result[k] = v
+	}
+	return result
+}
+
 // maxFix returns 0 (unlimited) — the quality gate iterates until all checks pass.
 // Users can still set max_fix_attempts in config to impose a hard cap if desired.
 func (p *Pipeline) maxFix() int {
@@ -116,7 +137,7 @@ func (p *Pipeline) maxFix() int {
 	return 0
 }
 
-// Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate: TEST → REVIEW → UX → SECURITY → QA) → PR.
+// Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate: TEST → REVIEW → UX → SECURITY → QA).
 func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	// Configure project-level prompt overrides before agents run.
 	promptsDir := filepath.Join(p.root, artifacts.DirName, appprompts.PromptsDirName)
@@ -135,7 +156,7 @@ func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	if err != nil {
 		p.event(fmt.Sprintf("context collect warning: %v", err))
 	}
-	ctxFragment := projCtx.SystemPromptFragment()
+	ctxFragment := projCtx.SystemPromptFragment(appctx.ProfileFull)
 
 	// ── PM (Product Vision & MoSCoW) ──
 	var moscowData, visionData []byte
@@ -382,7 +403,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 2. Code review
-		mustFix, err := p.runReview(ctx)
+		mustFix, err := p.runReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -394,7 +415,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 3. UX review
-		mustFix, err = p.runUXReview(ctx)
+		mustFix, err = p.runUXReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -406,7 +427,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 4. Security review
-		mustFix, err = p.runSecurityReview(ctx)
+		mustFix, err = p.runSecurityReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -418,7 +439,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 5. QA review
-		mustFix, err = p.runQAReview(ctx)
+		mustFix, err = p.runQAReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -459,9 +480,12 @@ func (p *Pipeline) runTests(ctx context.Context, files []string) (string, error)
 }
 
 // runReview runs the code reviewer agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runReview(ctx context.Context, files []string) (string, error) {
 	p.setState(PipelineReviewing)
-	reviewResp, err := p.runAgent(ctx, bus.RoleReviewer, agent.ReviewerPayload{})
+	reviewResp, err := p.runAgent(ctx, bus.RoleReviewer, agent.ReviewerPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("review: %w", err)
 	}
@@ -469,6 +493,11 @@ func (p *Pipeline) runReview(ctx context.Context) (string, error) {
 	result, ok := reviewResp.Payload.(agent.ReviewResult)
 	if !ok {
 		return "", fmt.Errorf("reviewer returned unexpected payload type %T", reviewResp.Payload)
+	}
+
+	if result.Unparsed {
+		p.event("review output could not be parsed — escalating to PM for arbitration")
+		return p.pmArbitrate(ctx, "code review", result.RawOutput)
 	}
 
 	p.collectNiceToHave("Code Review", result.NiceToHave)
@@ -482,14 +511,17 @@ func (p *Pipeline) runReview(ctx context.Context) (string, error) {
 }
 
 // runUXReview runs the UX reviewer agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runUXReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runUXReview(ctx context.Context, files []string) (string, error) {
 	if _, ok := p.agents[bus.RoleUXReviewer]; !ok {
 		p.event("no UX reviewer agent configured — skipping")
 		return "", nil
 	}
 
 	p.setState(PipelineUXReviewing)
-	uxResp, err := p.runAgent(ctx, bus.RoleUXReviewer, agent.UXReviewerPayload{})
+	uxResp, err := p.runAgent(ctx, bus.RoleUXReviewer, agent.UXReviewerPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("ux review: %w", err)
 	}
@@ -497,6 +529,11 @@ func (p *Pipeline) runUXReview(ctx context.Context) (string, error) {
 	result, ok := uxResp.Payload.(agent.UXReviewResult)
 	if !ok {
 		return "", fmt.Errorf("ux reviewer returned unexpected payload type %T", uxResp.Payload)
+	}
+
+	if result.Unparsed {
+		p.event("UX review output could not be parsed — escalating to PM for arbitration")
+		return p.pmArbitrate(ctx, "UX/UI review", result.RawOutput)
 	}
 
 	p.collectNiceToHave("UX/UI", result.NiceToHave)
@@ -510,14 +547,17 @@ func (p *Pipeline) runUXReview(ctx context.Context) (string, error) {
 }
 
 // runSecurityReview runs the security agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runSecurityReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runSecurityReview(ctx context.Context, files []string) (string, error) {
 	if _, ok := p.agents[bus.RoleSecurity]; !ok {
 		p.event("no security agent configured — skipping")
 		return "", nil
 	}
 
 	p.setState(PipelineSecurity)
-	secResp, err := p.runAgent(ctx, bus.RoleSecurity, agent.SecurityPayload{})
+	secResp, err := p.runAgent(ctx, bus.RoleSecurity, agent.SecurityPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("security: %w", err)
 	}
@@ -525,6 +565,11 @@ func (p *Pipeline) runSecurityReview(ctx context.Context) (string, error) {
 	result, ok := secResp.Payload.(agent.SecurityResult)
 	if !ok {
 		return "", fmt.Errorf("security agent returned unexpected payload type %T", secResp.Payload)
+	}
+
+	if result.Unparsed {
+		p.event("security review output could not be parsed — escalating to PM for arbitration")
+		return p.pmArbitrate(ctx, "security review", result.RawOutput)
 	}
 
 	p.collectNiceToHave("Security", result.NiceToHave)
@@ -538,14 +583,17 @@ func (p *Pipeline) runSecurityReview(ctx context.Context) (string, error) {
 }
 
 // runQAReview runs the QA agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runQAReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runQAReview(ctx context.Context, files []string) (string, error) {
 	if _, ok := p.agents[bus.RoleQA]; !ok {
 		p.event("no QA agent configured — skipping")
 		return "", nil
 	}
 
 	p.setState(PipelineQA)
-	qaResp, err := p.runAgent(ctx, bus.RoleQA, agent.QAPayload{})
+	qaResp, err := p.runAgent(ctx, bus.RoleQA, agent.QAPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("qa: %w", err)
 	}
@@ -553,6 +601,11 @@ func (p *Pipeline) runQAReview(ctx context.Context) (string, error) {
 	result, ok := qaResp.Payload.(agent.QAResult)
 	if !ok {
 		return "", fmt.Errorf("qa agent returned unexpected payload type %T", qaResp.Payload)
+	}
+
+	if result.Unparsed {
+		p.event("QA review output could not be parsed — escalating to PM for arbitration")
+		return p.pmArbitrate(ctx, "QA review", result.RawOutput)
 	}
 
 	p.collectNiceToHave("QA", result.NiceToHave)
@@ -563,6 +616,37 @@ func (p *Pipeline) runQAReview(ctx context.Context) (string, error) {
 	}
 
 	return strings.Join(result.MustFix, "\n"), nil
+}
+
+// pmArbitrate escalates an unparseable review response to the PM agent.
+// PM decides whether the coder needs to fix something (returns must-fix string)
+// or the review should pass (returns empty string).
+// If no PM agent is configured, logs a warning and passes the review.
+func (p *Pipeline) pmArbitrate(ctx context.Context, phase, rawOutput string) (string, error) {
+	pm, ok := p.agents[bus.RolePM].(*agent.PMAgent)
+	if !ok {
+		p.event(fmt.Sprintf("no PM agent for arbitration — treating unparsed %s as pass", phase))
+		p.logger().Warn("unparsed review with no PM agent, defaulting to pass",
+			slog.String("phase", phase))
+		return "", nil
+	}
+
+	p.setState(PipelinePM)
+	p.event(fmt.Sprintf("PM arbitrating unparsed %s output…", phase))
+
+	result, err := pm.Arbitrate(ctx, phase, rawOutput)
+	if err != nil {
+		return "", fmt.Errorf("pm arbitrate (%s): %w", phase, err)
+	}
+
+	if result.Pass {
+		p.event(fmt.Sprintf("PM verdict: %s review passes", phase))
+		return "", nil
+	}
+
+	mustFix := strings.Join(result.MustFix, "\n")
+	p.event(fmt.Sprintf("PM verdict: %s has %d must-fix issues", phase, len(result.MustFix)))
+	return mustFix, nil
 }
 
 // fixAndRebuild sends failure to coder, rebuilds, and returns.
@@ -612,17 +696,28 @@ func (p *Pipeline) runAgent(ctx context.Context, role bus.AgentRole, payload any
 	if !ok {
 		return bus.Message{}, fmt.Errorf("no agent for role %q", role)
 	}
+
+	// Record the first coder handoff for the elapsed timer.
+	if role == bus.RoleCoder && p.codingStarted.IsZero() {
+		p.codingStarted = time.Now()
+	}
+
 	p.logger().Info("starting agent", slog.String("role", string(role)))
 	msg := bus.NewMessage(bus.RoleSystem, role, bus.MsgRequest, payload)
 	p.b.Publish(msg)
 	p.b.Publish(bus.NewMessage(bus.RoleSystem, role, bus.MsgEvent,
 		fmt.Sprintf("starting %s", role)))
 
+	started := time.Now()
 	resp, err := a.Run(ctx, msg)
+	elapsed := time.Since(started)
+	p.agentDurations[role] += elapsed
+
 	if err != nil {
 		p.logger().Error("agent failed",
 			slog.String("role", string(role)),
 			slog.String("error", err.Error()),
+			slog.Duration("elapsed", elapsed),
 		)
 		p.b.Publish(bus.NewMessage(role, "", bus.MsgEvent,
 			fmt.Sprintf("error: %v", err)))
@@ -829,7 +924,7 @@ func (p *Pipeline) totalNiceToHave() int {
 	return total
 }
 
-// emitSummary builds and emits a final summary visible in the PR agent panel.
+// emitSummary builds and emits a final pipeline summary.
 func (p *Pipeline) emitSummary() {
 	var sb strings.Builder
 	sb.WriteString("\n════════════════════════════════════════\n")
@@ -896,6 +991,30 @@ func (p *Pipeline) emitSummary() {
 			if err != nil {
 				return
 			}
+		}
+	}
+
+	// Agent timing.
+	if len(p.agentDurations) > 0 {
+		sb.WriteString("\n  Agent Durations:\n")
+		totalDuration := time.Duration(0)
+		for _, role := range []bus.AgentRole{
+			bus.RolePM, bus.RolePlanner, bus.RoleCoder, bus.RoleTester,
+			bus.RoleReviewer, bus.RoleUXReviewer, bus.RoleSecurity, bus.RoleQA,
+		} {
+			d, ok := p.agentDurations[role]
+			if !ok || d == 0 {
+				continue
+			}
+			totalDuration += d
+			_, _ = fmt.Fprintf(&sb, "    %-12s %s\n", string(role), formatDuration(d))
+		}
+		if totalDuration > 0 {
+			_, _ = fmt.Fprintf(&sb, "    %-12s %s\n", "TOTAL", formatDuration(totalDuration))
+		}
+		if !p.codingStarted.IsZero() {
+			wallClock := time.Since(p.codingStarted)
+			_, _ = fmt.Fprintf(&sb, "    %-12s %s (since first coder handoff)\n", "WALL CLOCK", formatDuration(wallClock))
 		}
 	}
 
@@ -1027,4 +1146,20 @@ func appendTestFiles(files []string, root string) []string {
 		}
 	}
 	return result
+}
+
+// formatDuration formats a duration as human-readable "Xh Ym Zs" or "Xm Zs" or "Zs".
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh %dm %ds", h, m, s)
+	case m > 0:
+		return fmt.Sprintf("%dm %ds", m, s)
+	default:
+		return fmt.Sprintf("%ds", s)
+	}
 }

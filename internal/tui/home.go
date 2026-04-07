@@ -514,7 +514,7 @@ func (m HomeModel) renderLogo(maxW int) string {
 // ── Pipeline visualisation ───────────────────────────────────────────────────
 
 func (m HomeModel) renderPipeline(maxW int) string {
-	agents := []string{"PM", "PLAN", "CODE", "TEST", "REVIEW", "UX", "SEC", "QA", "PR"}
+	agents := []string{"PM", "PLAN", "CODE", "TEST", "REVIEW", "UX", "SEC", "QA"}
 
 	arrow := lipgloss.NewStyle().Foreground(crt.dim).Render(" → ")
 
@@ -843,7 +843,7 @@ func resolveLanguageFromRoot(root string, cfg config.Config) string {
 // resolveOverrides returns all agents with their effective runner/model.
 func resolveOverrides(agents map[string]config.AgentConfig, defaultRunner, defaultModel string) []agentOverride {
 	var overrides []agentOverride
-	roles := []string{"pm", "planner", "coder", "tester", "reviewer", "ux_reviewer", "security", "qa", "pr"}
+	roles := []string{"pm", "planner", "coder", "tester", "reviewer", "ux_reviewer", "security", "qa"}
 	for _, role := range roles {
 		if ac, ok := agents[role]; ok {
 			r := ac.Runner

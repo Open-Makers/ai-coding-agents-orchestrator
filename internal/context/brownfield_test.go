@@ -149,3 +149,68 @@ func searchIn(s, sub string) bool {
 	}
 	return false
 }
+
+func TestSystemPromptFragment_ProfileCompact(t *testing.T) {
+	pc := ProjectContext{
+		Files:         []string{"main.go", "internal/pkg/pkg.go"},
+		RecentCommits: []string{"abc1234 initial commit"},
+		UnstagedDiff:  "some diff",
+		IsBrownfield:  true,
+		ProjectType:   "go",
+		TreeStructure: "cmd/\ninternal/\n  pkg/",
+		SourceFiles:   map[string]string{"main.go": "package main"},
+	}
+
+	compact := pc.SystemPromptFragment(ProfileCompact)
+	full := pc.SystemPromptFragment(ProfileFull)
+
+	// Compact should be significantly shorter.
+	if len(compact) >= len(full) {
+		t.Errorf("compact (%d) should be shorter than full (%d)", len(compact), len(full))
+	}
+
+	// Compact should include project type and tree.
+	if !contains(compact, "go") {
+		t.Error("compact should include project type")
+	}
+	if !contains(compact, "cmd/") {
+		t.Error("compact should include tree structure")
+	}
+
+	// Compact should NOT include commits, diffs, source code, or file listings.
+	if contains(compact, "Recent Commits") {
+		t.Error("compact should not include commits")
+	}
+	if contains(compact, "Uncommitted Changes") {
+		t.Error("compact should not include diffs")
+	}
+	if contains(compact, "Existing Source Code") {
+		t.Error("compact should not include source files")
+	}
+	if contains(compact, "Files (") {
+		t.Error("compact should not include file listing")
+	}
+
+	// Full should include everything.
+	if !contains(full, "Recent Commits") {
+		t.Error("full should include commits")
+	}
+	if !contains(full, "Existing Source Code") {
+		t.Error("full should include source files")
+	}
+}
+
+func TestSystemPromptFragment_DefaultIsFull(t *testing.T) {
+	pc := ProjectContext{
+		Files:       []string{"main.go"},
+		ProjectType: "go",
+	}
+
+	// No profile argument should default to full.
+	defaultResult := pc.SystemPromptFragment()
+	fullResult := pc.SystemPromptFragment(ProfileFull)
+
+	if defaultResult != fullResult {
+		t.Error("default profile should match ProfileFull")
+	}
+}
