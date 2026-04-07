@@ -421,6 +421,15 @@ func (m SetupModel) handleProviderKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	case "tab", "down", "enter":
 		m.section = sectionModel
 		m.ensureSectionVisible()
+	case "shift+tab":
+		if !m.globalOnly {
+			m.section = sectionAgentSetup
+			m.agentCursor = len(m.agentRoles) - 1
+		} else {
+			m.section = sectionLanguage
+			m.languageIdx = len(m.languages) - 1
+		}
+		m.ensureSectionVisible()
 	}
 	if m.provider != prev {
 		m.modelIdx = 0
@@ -445,6 +454,9 @@ func (m SetupModel) handleModelKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		}
 	case "tab":
 		m.section = sectionLanguage
+		m.ensureSectionVisible()
+	case "shift+tab":
+		m.section = sectionProvider
 		m.ensureSectionVisible()
 	case "enter":
 		return m, m.saveDone()
@@ -478,6 +490,13 @@ func (m SetupModel) handleLanguageKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 			m.section = sectionProvider
 			m.ensureSectionVisible()
 		}
+	case "shift+tab":
+		m.section = sectionModel
+		models := m.activeModels()
+		if m.modelIdx >= len(models) {
+			m.modelIdx = max(0, len(models)-1)
+		}
+		m.ensureSectionVisible()
 	case "enter":
 		return m, m.saveDone()
 	}
@@ -521,6 +540,10 @@ func (m SetupModel) handleAgentSetupKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		m.deleteAgentPrompts()
 	case "tab":
 		m.section = sectionProvider
+		m.ensureSectionVisible()
+	case "shift+tab":
+		m.section = sectionLanguage
+		m.languageIdx = len(m.languages) - 1
 		m.ensureSectionVisible()
 	}
 	return m, nil
@@ -1200,7 +1223,9 @@ func (m *SetupModel) ensureSectionVisible() {
 	var targetLine int
 	switch m.section {
 	case sectionProvider:
-		targetLine = 0
+		// Scroll to the very top.
+		m.viewport.SetYOffset(0)
+		return
 	case sectionModel:
 		targetLine = findLineContaining(lines, "Default Model")
 	case sectionLanguage:
@@ -1214,7 +1239,7 @@ func (m *SetupModel) ensureSectionVisible() {
 		}
 	}
 
-	if targetLine <= 0 {
+	if targetLine < 0 {
 		return
 	}
 

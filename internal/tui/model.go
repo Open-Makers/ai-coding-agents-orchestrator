@@ -335,9 +335,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			}
 		case "ctrl+x":
-			if !m.pipelineDone {
-				m.cancelConfirm = true
+			if m.pipelineDone {
+				// Pipeline already finished (error or success) — return to menu.
+				m.returnToMenu = true
+				return m, tea.Quit
 			}
+			m.cancelConfirm = true
 		case "ctrl+a":
 			if m.pipeline != nil && m.gateArtifact != "" {
 				m.approvedGates[m.gateArtifact] = true
@@ -400,10 +403,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.pipelineErr = msg.Err.Error()
 			m.log.Error("pipeline finished with error", slog.String("error", m.pipelineErr))
-			m.statusbar = m.statusbar.WithState("error — m menu  q quit")
+			m.statusbar = m.statusbar.WithState("✗ error — m/ctrl+x menu  q quit")
 		} else {
 			m.log.Info("pipeline completed successfully")
-			m.statusbar = m.statusbar.WithState("✓ done — m menu  q quit")
+			m.statusbar = m.statusbar.WithState("✓ done — m/ctrl+x menu  q quit")
 		}
 
 	case statusBarTickMsg:
