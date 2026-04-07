@@ -8,10 +8,14 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
-// UXReviewerPayload is the input for UX/UI review (reads artifacts from workspace).
-type UXReviewerPayload struct{}
+// UXReviewerPayload is the input for UX/UI review.
+type UXReviewerPayload struct {
+	Files []string // source files to review
+	Root  string   // project root for reading files
+}
 
 // UXReviewResult is the structured outcome of a UX/UI review.
 type UXReviewResult struct {
@@ -25,10 +29,11 @@ type UXReviewResult struct {
 // UXReviewerAgent audits code for UX/UI quality, accessibility, and usability.
 type UXReviewerAgent struct {
 	BaseAgent
-	runner runner.LLMRunner
-	ws     artifacts.Workspace
-	skills []string
-	model  string
+	runner           runner.LLMRunner
+	ws               artifacts.Workspace
+	skills           []string
+	model            string
+	maxContextTokens int
 }
 
 func NewUXReviewerAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills []string, model string) *UXReviewerAgent {
@@ -41,15 +46,28 @@ func NewUXReviewerAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, 
 	}
 }
 
+// SetMaxContextTokens configures the token budget for this agent.
+func (a *UXReviewerAgent) SetMaxContextTokens(n int) { a.maxContextTokens = n }
+
 func (a *UXReviewerAgent) Role() bus.AgentRole { return bus.RoleUXReviewer }
 
-func (a *UXReviewerAgent) Run(ctx context.Context, _ bus.Message) (bus.Message, error) {
+func (a *UXReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
+	payload, _ := msg.Payload.(UXReviewerPayload)
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
-	coderOutput, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	if sourceContext == "" {
+		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+		sourceContext = string(raw)
+	}
 
 	systemPrompt := prompts.MustLoad("ux-reviewer-system")
 
-	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s", string(plan), string(coderOutput))
+	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s", string(plan), sourceContext)
+
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,

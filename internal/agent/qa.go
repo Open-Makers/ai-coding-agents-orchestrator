@@ -8,10 +8,14 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
-// QAPayload is the input for QA review (reads artifacts from workspace).
-type QAPayload struct{}
+// QAPayload is the input for QA review.
+type QAPayload struct {
+	Files []string // source files to review
+	Root  string   // project root for reading files
+}
 
 // QAResult is the structured outcome of a QA review.
 type QAResult struct {
@@ -25,10 +29,11 @@ type QAResult struct {
 // QAAgent audits code for edge cases, error handling, and overall quality assurance.
 type QAAgent struct {
 	BaseAgent
-	runner runner.LLMRunner
-	ws     artifacts.Workspace
-	skills []string
-	model  string
+	runner           runner.LLMRunner
+	ws               artifacts.Workspace
+	skills           []string
+	model            string
+	maxContextTokens int
 }
 
 func NewQAAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills []string, model string) *QAAgent {
@@ -41,17 +46,30 @@ func NewQAAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills [
 	}
 }
 
+// SetMaxContextTokens configures the token budget for this agent.
+func (a *QAAgent) SetMaxContextTokens(n int) { a.maxContextTokens = n }
+
 func (a *QAAgent) Role() bus.AgentRole { return bus.RoleQA }
 
-func (a *QAAgent) Run(ctx context.Context, _ bus.Message) (bus.Message, error) {
+func (a *QAAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
+	payload, _ := msg.Payload.(QAPayload)
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
-	coderOutput, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
+
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	if sourceContext == "" {
+		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+		sourceContext = string(raw)
+	}
 
 	systemPrompt := prompts.MustLoad("qa-system")
 
 	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s\n\nTest results:\n%s",
-		string(plan), string(coderOutput), string(report))
+		string(plan), sourceContext, string(report))
+
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,

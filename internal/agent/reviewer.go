@@ -8,12 +8,12 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
 type ReviewerPayload struct {
-	PatchPath  string
-	TestReport string
-	PlanPath   string
+	Files []string // source files to review (read from disk, not raw output)
+	Root  string   // project root for reading files
 }
 
 // ReviewResult is the structured outcome of a review.
@@ -30,10 +30,11 @@ type ReviewResult struct {
 
 type ReviewerAgent struct {
 	BaseAgent
-	runner runner.LLMRunner
-	ws     artifacts.Workspace
-	skills []string
-	model  string
+	runner           runner.LLMRunner
+	ws               artifacts.Workspace
+	skills           []string
+	model            string
+	maxContextTokens int
 }
 
 func NewReviewerAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills []string, model string) *ReviewerAgent {
@@ -46,6 +47,9 @@ func NewReviewerAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, sk
 	}
 }
 
+// SetMaxContextTokens configures the token budget for this agent.
+func (a *ReviewerAgent) SetMaxContextTokens(n int) { a.maxContextTokens = n }
+
 func (a *ReviewerAgent) Role() bus.AgentRole { return bus.RoleReviewer }
 
 func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
@@ -55,15 +59,25 @@ func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 	}
 
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
-	coderOutput, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
-	_ = payload
+	// Build source context from actual files on disk instead of raw coder output.
+	// This avoids sending markdown decoration, LLM commentary, and duplicate content.
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	if sourceContext == "" {
+		// Fallback to raw output if no files available.
+		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+		sourceContext = string(raw)
+	}
 
 	systemPrompt := prompts.MustLoad("reviewer-system")
 
 	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s\n\nTest results:\n%s",
-		string(plan), string(coderOutput), string(report))
+		string(plan), sourceContext, string(report))
+
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,

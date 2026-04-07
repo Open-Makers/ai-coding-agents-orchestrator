@@ -8,10 +8,14 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
-// SecurityPayload is the input for security review (reads artifacts from workspace).
-type SecurityPayload struct{}
+// SecurityPayload is the input for security review.
+type SecurityPayload struct {
+	Files []string // source files to review
+	Root  string   // project root for reading files
+}
 
 // SecurityResult is the structured outcome of a security review.
 type SecurityResult struct {
@@ -25,10 +29,11 @@ type SecurityResult struct {
 // SecurityAgent performs a dedicated security audit of the generated code.
 type SecurityAgent struct {
 	BaseAgent
-	runner runner.LLMRunner
-	ws     artifacts.Workspace
-	skills []string
-	model  string
+	runner           runner.LLMRunner
+	ws               artifacts.Workspace
+	skills           []string
+	model            string
+	maxContextTokens int
 }
 
 func NewSecurityAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills []string, model string) *SecurityAgent {
@@ -41,16 +46,29 @@ func NewSecurityAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, sk
 	}
 }
 
+// SetMaxContextTokens configures the token budget for this agent.
+func (a *SecurityAgent) SetMaxContextTokens(n int) { a.maxContextTokens = n }
+
 func (a *SecurityAgent) Role() bus.AgentRole { return bus.RoleSecurity }
 
-func (a *SecurityAgent) Run(ctx context.Context, _ bus.Message) (bus.Message, error) {
-	coderOutput, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+func (a *SecurityAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
+	payload, _ := msg.Payload.(SecurityPayload)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
+
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	if sourceContext == "" {
+		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+		sourceContext = string(raw)
+	}
 
 	systemPrompt := prompts.MustLoad("security-system")
 
 	userContent := fmt.Sprintf("Code:\n%s\n\nTest results:\n%s",
-		string(coderOutput), string(report))
+		sourceContext, string(report))
+
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,

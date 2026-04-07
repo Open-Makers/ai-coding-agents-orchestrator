@@ -31,8 +31,14 @@ func New(cfg config.AgentConfig, skillLoader *skills.Loader, promptLanguage stri
 	}
 
 	if skillLoader != nil || (promptLanguage != "" && promptLanguage != "English") {
-		return &SkillRunner{inner: base, loader: skillLoader, promptLanguage: promptLanguage}, nil
+		base = &SkillRunner{inner: base, loader: skillLoader, promptLanguage: promptLanguage}
 	}
+
+	// Wrap cloud runners with token budget enforcement when configured.
+	if cfg.MaxContextTokens > 0 && !IsLocalRunner(cfg) {
+		base = &BudgetRunner{inner: base, maxTokens: cfg.MaxContextTokens}
+	}
+
 	return base, nil
 }
 

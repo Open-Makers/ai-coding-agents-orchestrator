@@ -84,8 +84,29 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	return pc, nil
 }
 
+// ContextProfile controls how much detail is included in the system prompt fragment.
+type ContextProfile int
+
+const (
+	// ProfileFull includes everything: files, commits, diffs, source code.
+	// Used by PM, Planner, and Coder where full context is needed.
+	ProfileFull ContextProfile = iota
+
+	// ProfileCompact includes only project type and tree structure.
+	// Used by review agents (reviewer, security, QA, UX) that receive
+	// source code separately through their payload, saving tokens on cloud models.
+	ProfileCompact
+)
+
 // SystemPromptFragment formats the project context as a block to inject into system prompts.
-func (p ProjectContext) SystemPromptFragment() string {
+// Use ProfileFull for agents that need complete context (PM, planner, coder).
+// Use ProfileCompact for review agents that receive source code separately.
+func (p ProjectContext) SystemPromptFragment(profile ...ContextProfile) string {
+	prof := ProfileFull
+	if len(profile) > 0 {
+		prof = profile[0]
+	}
+
 	var sb strings.Builder
 
 	sb.WriteString("## Repository Context\n\n")
@@ -101,10 +122,7 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	if p.ProjectType != "" {
-		_, err := fmt.Fprintf(&sb, "### Project Type: %s\n\n", p.ProjectType)
-		if err != nil {
-			return ""
-		}
+		_, _ = fmt.Fprintf(&sb, "### Project Type: %s\n\n", p.ProjectType)
 	}
 
 	if p.TreeStructure != "" {
@@ -113,15 +131,18 @@ func (p ProjectContext) SystemPromptFragment() string {
 		sb.WriteString("\n```\n\n")
 	}
 
+	// Compact profile stops here — review agents don't need file lists,
+	// commits, diffs, or source code (they get source via payload).
+	if prof == ProfileCompact {
+		return sb.String()
+	}
+
 	if len(p.Files) > 0 {
 		limit := 80
 		if len(p.Files) < limit {
 			limit = len(p.Files)
 		}
-		_, err := fmt.Fprintf(&sb, "### Files (%d total, showing first %d)\n```\n", len(p.Files), limit)
-		if err != nil {
-			return ""
-		}
+		_, _ = fmt.Fprintf(&sb, "### Files (%d total, showing first %d)\n```\n", len(p.Files), limit)
 		sb.WriteString(strings.Join(p.Files[:limit], "\n"))
 		sb.WriteString("\n```\n\n")
 	}
@@ -148,10 +169,7 @@ func (p ProjectContext) SystemPromptFragment() string {
 		sb.WriteString("### Existing Source Code\n")
 		sb.WriteString("Below are the key source files in the project. Study them carefully before making changes.\n\n")
 		for name, content := range p.SourceFiles {
-			_, err := fmt.Fprintf(&sb, "**%s**\n```\n", name)
-			if err != nil {
-				return ""
-			}
+			_, _ = fmt.Fprintf(&sb, "**%s**\n```\n", name)
 			if len(content) > maxSourceFileSize {
 				sb.WriteString(content[:maxSourceFileSize])
 				sb.WriteString("\n... (truncated)")
@@ -163,10 +181,7 @@ func (p ProjectContext) SystemPromptFragment() string {
 	}
 
 	for name, content := range p.AlwaysInclude {
-		_, err := fmt.Fprintf(&sb, "### %s\n```\n", name)
-		if err != nil {
-			return ""
-		}
+		_, _ = fmt.Fprintf(&sb, "### %s\n```\n", name)
 		if len(content) > 3000 {
 			sb.WriteString(content[:3000])
 			sb.WriteString("\n... (truncated)")

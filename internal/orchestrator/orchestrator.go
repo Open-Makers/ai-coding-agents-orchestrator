@@ -156,7 +156,7 @@ func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	if err != nil {
 		p.event(fmt.Sprintf("context collect warning: %v", err))
 	}
-	ctxFragment := projCtx.SystemPromptFragment()
+	ctxFragment := projCtx.SystemPromptFragment(appctx.ProfileFull)
 
 	// ── PM (Product Vision & MoSCoW) ──
 	var moscowData, visionData []byte
@@ -403,7 +403,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 2. Code review
-		mustFix, err := p.runReview(ctx)
+		mustFix, err := p.runReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -415,7 +415,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 3. UX review
-		mustFix, err = p.runUXReview(ctx)
+		mustFix, err = p.runUXReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -427,7 +427,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 4. Security review
-		mustFix, err = p.runSecurityReview(ctx)
+		mustFix, err = p.runSecurityReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -439,7 +439,7 @@ func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[
 		}
 
 		// 5. QA review
-		mustFix, err = p.runQAReview(ctx)
+		mustFix, err = p.runQAReview(ctx, *files)
 		if err != nil {
 			return err
 		}
@@ -480,9 +480,12 @@ func (p *Pipeline) runTests(ctx context.Context, files []string) (string, error)
 }
 
 // runReview runs the code reviewer agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runReview(ctx context.Context, files []string) (string, error) {
 	p.setState(PipelineReviewing)
-	reviewResp, err := p.runAgent(ctx, bus.RoleReviewer, agent.ReviewerPayload{})
+	reviewResp, err := p.runAgent(ctx, bus.RoleReviewer, agent.ReviewerPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("review: %w", err)
 	}
@@ -508,14 +511,17 @@ func (p *Pipeline) runReview(ctx context.Context) (string, error) {
 }
 
 // runUXReview runs the UX reviewer agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runUXReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runUXReview(ctx context.Context, files []string) (string, error) {
 	if _, ok := p.agents[bus.RoleUXReviewer]; !ok {
 		p.event("no UX reviewer agent configured — skipping")
 		return "", nil
 	}
 
 	p.setState(PipelineUXReviewing)
-	uxResp, err := p.runAgent(ctx, bus.RoleUXReviewer, agent.UXReviewerPayload{})
+	uxResp, err := p.runAgent(ctx, bus.RoleUXReviewer, agent.UXReviewerPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("ux review: %w", err)
 	}
@@ -541,14 +547,17 @@ func (p *Pipeline) runUXReview(ctx context.Context) (string, error) {
 }
 
 // runSecurityReview runs the security agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runSecurityReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runSecurityReview(ctx context.Context, files []string) (string, error) {
 	if _, ok := p.agents[bus.RoleSecurity]; !ok {
 		p.event("no security agent configured — skipping")
 		return "", nil
 	}
 
 	p.setState(PipelineSecurity)
-	secResp, err := p.runAgent(ctx, bus.RoleSecurity, agent.SecurityPayload{})
+	secResp, err := p.runAgent(ctx, bus.RoleSecurity, agent.SecurityPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("security: %w", err)
 	}
@@ -574,14 +583,17 @@ func (p *Pipeline) runSecurityReview(ctx context.Context) (string, error) {
 }
 
 // runQAReview runs the QA agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runQAReview(ctx context.Context) (string, error) {
+func (p *Pipeline) runQAReview(ctx context.Context, files []string) (string, error) {
 	if _, ok := p.agents[bus.RoleQA]; !ok {
 		p.event("no QA agent configured — skipping")
 		return "", nil
 	}
 
 	p.setState(PipelineQA)
-	qaResp, err := p.runAgent(ctx, bus.RoleQA, agent.QAPayload{})
+	qaResp, err := p.runAgent(ctx, bus.RoleQA, agent.QAPayload{
+		Files: files,
+		Root:  p.root,
+	})
 	if err != nil {
 		return "", fmt.Errorf("qa: %w", err)
 	}
@@ -995,14 +1007,14 @@ func (p *Pipeline) emitSummary() {
 				continue
 			}
 			totalDuration += d
-			fmt.Fprintf(&sb, "    %-12s %s\n", string(role), formatDuration(d))
+			_, _ = fmt.Fprintf(&sb, "    %-12s %s\n", string(role), formatDuration(d))
 		}
 		if totalDuration > 0 {
-			fmt.Fprintf(&sb, "    %-12s %s\n", "TOTAL", formatDuration(totalDuration))
+			_, _ = fmt.Fprintf(&sb, "    %-12s %s\n", "TOTAL", formatDuration(totalDuration))
 		}
 		if !p.codingStarted.IsZero() {
 			wallClock := time.Since(p.codingStarted)
-			fmt.Fprintf(&sb, "    %-12s %s (since first coder handoff)\n", "WALL CLOCK", formatDuration(wallClock))
+			_, _ = fmt.Fprintf(&sb, "    %-12s %s (since first coder handoff)\n", "WALL CLOCK", formatDuration(wallClock))
 		}
 	}
 

@@ -48,7 +48,7 @@ func main() {
 	case "report":
 		reportCmd(os.Args[2:])
 	case "monitor":
-		fmt.Fprintln(os.Stderr, "monitor not implemented yet")
+		_, _ = fmt.Fprintln(os.Stderr, "monitor not implemented yet")
 		os.Exit(2)
 	case "approve":
 		approveCmd(os.Args[2:])
@@ -329,20 +329,28 @@ func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root str
 		testerCfg.Skills, testerCfg.Model)
 
 	reviewerCfg := cfg.Agents["reviewer"]
-	agents[bus.RoleReviewer] = agent.NewReviewerAgent(b, makeRunner("reviewer"), ws,
+	reviewerAgent := agent.NewReviewerAgent(b, makeRunner("reviewer"), ws,
 		reviewerCfg.Skills, reviewerCfg.Model)
+	reviewerAgent.SetMaxContextTokens(reviewerCfg.MaxContextTokens)
+	agents[bus.RoleReviewer] = reviewerAgent
 
 	uxCfg := cfg.Agents["ux_reviewer"]
-	agents[bus.RoleUXReviewer] = agent.NewUXReviewerAgent(b, makeRunner("ux_reviewer"), ws,
+	uxAgent := agent.NewUXReviewerAgent(b, makeRunner("ux_reviewer"), ws,
 		uxCfg.Skills, uxCfg.Model)
+	uxAgent.SetMaxContextTokens(uxCfg.MaxContextTokens)
+	agents[bus.RoleUXReviewer] = uxAgent
 
 	secCfg := cfg.Agents["security"]
-	agents[bus.RoleSecurity] = agent.NewSecurityAgent(b, makeRunner("security"), ws,
+	secAgent := agent.NewSecurityAgent(b, makeRunner("security"), ws,
 		secCfg.Skills, secCfg.Model)
+	secAgent.SetMaxContextTokens(secCfg.MaxContextTokens)
+	agents[bus.RoleSecurity] = secAgent
 
 	qaCfg := cfg.Agents["qa"]
-	agents[bus.RoleQA] = agent.NewQAAgent(b, makeRunner("qa"), ws,
+	qaAgent := agent.NewQAAgent(b, makeRunner("qa"), ws,
 		qaCfg.Skills, qaCfg.Model)
+	qaAgent.SetMaxContextTokens(qaCfg.MaxContextTokens)
+	agents[bus.RoleQA] = qaAgent
 
 	return agents
 }
