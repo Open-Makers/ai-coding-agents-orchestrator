@@ -26,7 +26,6 @@ func newTestConfig() config.Config {
 			"ux_reviewer": {Runner: "codex", Model: "gpt-5.4"},
 			"security":    {Runner: "claude", Model: "opus"},
 			"qa":          {Runner: "claude", Model: "sonnet"},
-			"pr":          {Runner: "codex", Model: "gpt-5.3-codex"},
 		},
 		PromptLanguage: "Polish",
 	}
@@ -162,7 +161,7 @@ func TestResolveOverrides_AllAgents(t *testing.T) {
 
 	overrides := resolveOverrides(cfg.Agents, "codex", "gpt-5.3-codex")
 
-	expectedRoles := []string{"pm", "planner", "coder", "tester", "reviewer", "ux_reviewer", "security", "qa", "pr"}
+	expectedRoles := []string{"pm", "planner", "coder", "tester", "reviewer", "ux_reviewer", "security", "qa"}
 	if len(overrides) != len(expectedRoles) {
 		t.Fatalf("expected %d overrides, got %d", len(expectedRoles), len(overrides))
 	}
@@ -448,7 +447,6 @@ func TestHomeModel_RenderInfoCard_ShowsAllOverrides(t *testing.T) {
 		{"ux_reviewer", "codex", "gpt-5.4"},
 		{"security", "claude", "opus"},
 		{"qa", "claude", "sonnet"},
-		{"pr", "codex", "gpt-5.3-codex"},
 	}
 
 	for _, entry := range expectedEntries {

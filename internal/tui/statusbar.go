@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/charmbracelet/lipgloss"
@@ -10,14 +11,15 @@ import (
 
 // StatusBarModel renders a single-line status bar at the bottom.
 type StatusBarModel struct {
-	branch       string
-	state        string
-	stageInfo    string // e.g. "Stage 2/5: Must Have — Auth"
-	runner       string
-	model        string
-	tokenChars   int // cumulative output characters (used to estimate tokens)
-	width        int
-	scrollOffset int // marquee scroll position for stageInfo
+	branch        string
+	state         string
+	stageInfo     string // e.g. "Stage 2/5: Must Have — Auth"
+	runner        string
+	model         string
+	tokenChars    int // cumulative output characters (used to estimate tokens)
+	width         int
+	scrollOffset  int       // marquee scroll position for stageInfo
+	codingStarted time.Time // timestamp of first coder handoff for elapsed timer
 }
 
 func NewStatusBar(width int) StatusBarModel {
@@ -32,6 +34,10 @@ func (m StatusBarModel) WithStageInfo(s string) StatusBarModel {
 	return m
 }
 func (m StatusBarModel) WithWidth(w int) StatusBarModel { m.width = w; return m }
+func (m StatusBarModel) WithCodingStarted(t time.Time) StatusBarModel {
+	m.codingStarted = t
+	return m
+}
 func (m StatusBarModel) WithRunnerModel(r, mdl string) StatusBarModel {
 	m.runner = r
 	m.model = mdl
@@ -61,6 +67,21 @@ func formatTokens(chars int) string {
 		return fmt.Sprintf("%.1fk tok", float64(tokens)/1_000)
 	default:
 		return fmt.Sprintf("%d tok", tokens)
+	}
+}
+
+// formatElapsed formats a duration for the status bar as compact "Xh Ym" or "Xm Xs" or "Xs".
+func formatElapsed(d time.Duration) string {
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh %dm", h, m)
+	case m > 0:
+		return fmt.Sprintf("%dm %ds", m, s)
+	default:
+		return fmt.Sprintf("%ds", s)
 	}
 }
 
@@ -123,6 +144,10 @@ func (m StatusBarModel) View() string {
 	}
 	if m.tokenChars > 0 {
 		suffix += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.tokenChars))
+	}
+	if !m.codingStarted.IsZero() {
+		elapsed := time.Since(m.codingStarted).Round(time.Second)
+		suffix += "  " + styleStatusKey.Render("⏱ "+formatElapsed(elapsed))
 	}
 
 	prefixWidth := lipglossLen(prefix)

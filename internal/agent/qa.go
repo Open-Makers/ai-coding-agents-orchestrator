@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
@@ -19,6 +18,8 @@ type QAResult struct {
 	Approved   bool
 	MustFix    []string
 	NiceToHave []string
+	Unparsed   bool
+	RawOutput  string
 }
 
 // QAAgent audits code for edge cases, error handling, and overall quality assurance.
@@ -76,36 +77,12 @@ func (a *QAAgent) Run(ctx context.Context, _ bus.Message) (bus.Message, error) {
 }
 
 func parseQAReview(text string) QAResult {
-	lines := strings.Split(text, "\n")
-	var mustFix, niceToHave []string
-	section := ""
-	approved := false
-
-	for _, line := range lines {
-		trim := strings.TrimSpace(line)
-		upper := strings.ToUpper(trim)
-
-		switch {
-		case strings.HasPrefix(upper, "MUST FIX"):
-			section = "mustfix"
-		case strings.HasPrefix(upper, "RECOMMENDATION"):
-			section = "nicetohave"
-		case strings.HasPrefix(upper, "APPROVE"):
-			approved = strings.Contains(upper, "YES")
-			section = ""
-		default:
-			item := strings.TrimSpace(strings.TrimPrefix(trim, "-"))
-			if item == "" || strings.ToLower(item) == "none" {
-				continue
-			}
-			switch section {
-			case "mustfix":
-				mustFix = append(mustFix, item)
-			case "nicetohave":
-				niceToHave = append(niceToHave, item)
-			}
-		}
+	s := parseReviewSections(text, "RECOMMENDATION", "NICE TO HAVE")
+	return QAResult{
+		Approved:   s.Approved,
+		MustFix:    s.MustFix,
+		NiceToHave: s.NiceToHave,
+		Unparsed:   !s.Parsed,
+		RawOutput:  text,
 	}
-
-	return QAResult{Approved: approved, MustFix: mustFix, NiceToHave: niceToHave}
 }

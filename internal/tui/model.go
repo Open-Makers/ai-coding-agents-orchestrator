@@ -246,6 +246,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if s == ps {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
+						// Start elapsed timer on first coding handoff.
+						if s == "coding" && m.pipeline != nil && m.statusbar.codingStarted.IsZero() {
+							codingStart := m.pipeline.CodingStarted()
+							if !codingStart.IsZero() {
+								m.statusbar = m.statusbar.WithCodingStarted(codingStart)
+							}
+						}
 					}
 				}
 			}
