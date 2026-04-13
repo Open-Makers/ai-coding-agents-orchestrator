@@ -309,8 +309,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	}
 
-	// Ctrl+M toggles sysmon from any context (including overlays).
-	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "ctrl+m" {
+	// Ctrl+T toggles sysmon from any context (including overlays).
+	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "ctrl+t" {
 		m.showSysmon = !m.showSysmon
 		m.layout()
 		// Resize the active overlay to fit new content width.

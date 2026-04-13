@@ -34,12 +34,11 @@ func Ping(provider, model string) error {
 
 // pingBinary checks that a CLI binary is installed and runnable.
 func pingBinary(ctx context.Context, name string) error {
-	path, err := exec.LookPath(name)
-	if err != nil {
+	if _, err := exec.LookPath(name); err != nil {
 		return fmt.Errorf("%s not found in PATH — is it installed?", name)
 	}
 
-	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd := exec.CommandContext(ctx, name, "--version") // #nosec G204 — name is a compile-time constant from Ping()
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s found but failed to run: %s", name, truncate(string(out), 120))
 	}
