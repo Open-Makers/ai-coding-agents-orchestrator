@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
@@ -67,10 +66,10 @@ func (r ClaudeRunner) run(prompt, systemPrompt string) ([]byte, error) {
 	if systemPrompt != "" {
 		args = append(args, "--system-prompt", systemPrompt)
 	}
-	args = append(args, "-p", prompt)
+	// Prompt is piped via stdin to avoid macOS ARG_MAX limits on large prompts.
 
 	cmd := executil.Command(bin, args...)
-	cmd.Env = os.Environ()
+	cmd.Stdin = strings.NewReader(prompt)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr

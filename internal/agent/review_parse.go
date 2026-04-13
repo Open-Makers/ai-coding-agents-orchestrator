@@ -31,13 +31,13 @@ func parseReviewSections(text string, niceToHaveHeaders ...string) reviewSection
 		norm := normalizeHeading(line)
 
 		switch {
-		case headingContains(norm, "MUST FIX", "MUST-FIX", "MUSTFIX"):
+		case isMustFixHeading(norm):
 			section = "mustfix"
 			foundAnySection = true
-		case headingContainsAny(norm, niceToHaveHeaders):
+		case isNiceToHaveHeading(norm, niceToHaveHeaders):
 			section = "nicetohave"
 			foundAnySection = true
-		case headingContains(norm, "APPROVE"):
+		case isApproveHeading(norm):
 			approved = strings.Contains(strings.ToUpper(norm), "YES")
 			section = ""
 			foundAnySection = true
@@ -55,12 +55,118 @@ func parseReviewSections(text string, niceToHaveHeaders ...string) reviewSection
 		}
 	}
 
+	// Fallback: if no structured sections found, attempt keyword-based extraction.
+	if !foundAnySection {
+		fallback := fallbackParseReview(text)
+		if fallback.Parsed {
+			return fallback
+		}
+	}
+
 	return reviewSections{
 		MustFix:    mustFix,
 		NiceToHave: niceToHave,
 		Approved:   approved,
 		Parsed:     foundAnySection,
 	}
+}
+
+// isMustFixHeading returns true if the normalized heading indicates a must-fix section.
+func isMustFixHeading(norm string) bool {
+	return headingContains(norm,
+		"MUST FIX", "MUST-FIX", "MUSTFIX",
+		"CRITICAL", "ISSUES", "BUGS", "PROBLEMS",
+		"FINDINGS", "ERRORS", "DEFECTS", "BLOCKERS",
+	)
+}
+
+// isNiceToHaveHeading returns true if the normalized heading indicates a nice-to-have section.
+func isNiceToHaveHeading(norm string, extraHeaders []string) bool {
+	base := []string{
+		"NICE TO HAVE", "NICE-TO-HAVE", "NICETOHA",
+		"SUGGESTION", "IMPROVEMENT", "MINOR",
+		"NON-CRITICAL", "OPTIONAL", "ENHANCEMENT",
+	}
+	all := append(base, extraHeaders...)
+	return headingContains(norm, all...)
+}
+
+// isApproveHeading returns true if the normalized heading is an approval line.
+func isApproveHeading(norm string) bool {
+	return headingContains(norm,
+		"APPROVE", "VERDICT", "DECISION", "RESULT",
+		"OVERALL", "SUMMARY",
+	)
+}
+
+// fallbackParseReview attempts to parse a review from freeform text by looking
+// for approval/rejection signals and extracting potential issues from bullet points.
+// This prevents escalation to PM for output that is clearly positive or negative.
+func fallbackParseReview(text string) reviewSections {
+	upper := strings.ToUpper(text)
+	lines := strings.Split(text, "\n")
+
+	// Collect any bullet-point items as potential issues.
+	var items []string
+	for _, line := range lines {
+		item := extractListItem(line)
+		if item != "" && !isNoneValue(item) && len(item) > 10 {
+			items = append(items, item)
+		}
+	}
+
+	// Check for clear approval signals.
+	approvalSignals := []string{
+		"LOOKS GOOD", "SHIP IT", "LGTM", "APPROVED",
+		"NO ISSUES", "NO CRITICAL", "NO BUGS", "NO PROBLEMS",
+		"ALL GOOD", "WELL DONE", "GREAT JOB", "CLEAN CODE",
+		"NO MUST-FIX", "NO MUST FIX", "NOTHING CRITICAL",
+		"APPROVE: YES", "APPROVED: YES", "VERDICT: PASS",
+	}
+
+	hasApprovalSignal := false
+	for _, sig := range approvalSignals {
+		if strings.Contains(upper, sig) {
+			hasApprovalSignal = true
+			break
+		}
+	}
+
+	// Check for clear rejection signals.
+	rejectionSignals := []string{
+		"MUST FIX", "MUST-FIX", "CRITICAL ISSUE", "CRITICAL BUG",
+		"SECURITY VULNERABILITY", "SQL INJECTION", "XSS",
+		"RACE CONDITION", "MEMORY LEAK", "NIL POINTER",
+		"APPROVE: NO", "APPROVED: NO", "VERDICT: FIX",
+		"NOT APPROVED", "REJECTED",
+	}
+
+	hasRejectionSignal := false
+	for _, sig := range rejectionSignals {
+		if strings.Contains(upper, sig) {
+			hasRejectionSignal = true
+			break
+		}
+	}
+
+	// Clear approval with no rejection signals → pass.
+	if hasApprovalSignal && !hasRejectionSignal {
+		return reviewSections{
+			Approved: true,
+			Parsed:   true,
+		}
+	}
+
+	// Clear rejection with bullet items → extract as must-fix.
+	if hasRejectionSignal && len(items) > 0 {
+		return reviewSections{
+			MustFix: items,
+			Parsed:  true,
+		}
+	}
+
+	// Ambiguous — let PM handle it.
+	return reviewSections{Parsed: false}
 }
 
 // normalizeHeading strips markdown heading markers (#), bold markers (**/__)
@@ -92,11 +198,6 @@ func headingContains(normalised string, prefixes ...string) bool {
 		}
 	}
 	return false
-}
-
-// headingContainsAny is like headingContains but takes a slice.
-func headingContainsAny(normalised string, prefixes []string) bool {
-	return headingContains(normalised, prefixes...)
 }
 
 // extractListItem strips common list markers (-, *, numbered) and surrounding whitespace.

@@ -52,6 +52,24 @@ var SupportedLanguages = []string{
 	"Russian",
 }
 
+// SupportedProgrammingLanguages lists selectable project programming languages.
+var SupportedProgrammingLanguages = []string{
+	"go",
+	"rust",
+	"python",
+	"javascript",
+	"typescript",
+	"java",
+	"ruby",
+	"elixir",
+	"c",
+	"cpp",
+	"csharp",
+	"swift",
+	"kotlin",
+	"scala",
+}
+
 type ProjectConfig struct {
 	Name           string        `yaml:"name,omitempty"`
 	Language       string        `yaml:"language,omitempty"`
@@ -59,6 +77,7 @@ type ProjectConfig struct {
 	TestCmd        string        `yaml:"test_cmd,omitempty"`
 	LintCmd        string        `yaml:"lint_cmd,omitempty"`
 	MaxFixAttempts int           `yaml:"max_fix_attempts,omitempty"`
+	ReservedCores  int           `yaml:"reserved_cores,omitempty"` // CPU cores to keep free for other processes (default: 2)
 	Scope          ScopeConfig   `yaml:"scope,omitempty"`
 	Context        ContextConfig `yaml:"context,omitempty"`
 }
@@ -210,6 +229,9 @@ func merge(dst *Config, src Config) {
 	}
 	if src.Project.MaxFixAttempts > 0 {
 		dst.Project.MaxFixAttempts = src.Project.MaxFixAttempts
+	}
+	if src.Project.ReservedCores > 0 {
+		dst.Project.ReservedCores = src.Project.ReservedCores
 	}
 	if len(src.Project.Scope.Allow) > 0 {
 		dst.Project.Scope.Allow = src.Project.Scope.Allow

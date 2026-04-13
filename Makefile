@@ -6,7 +6,7 @@ INSTALL_DIR := $(shell go env GOPATH)/bin
 VERSION     := $(shell cat .Version 2>/dev/null || git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS     := -ldflags "-X main.version=$(VERSION)"
 
-.PHONY: all build test test-race lint vet clean install uninstall help
+.PHONY: all build test test-race lint vet clean install uninstall help bump-patch bump-minor bump-major release
 
 all: vet lint test-race build install
 
@@ -41,7 +41,44 @@ lint:
 
 ## clean: remove build artefacts
 clean:
-	rm -rf bin/
+	rm -rf bin/ dist/
+
+## bump-patch: increment patch version (0.2.0 → 0.2.1)
+bump-patch:
+	@V=$$(cat .Version); \
+	MAJOR=$$(echo $$V | cut -d. -f1); \
+	MINOR=$$(echo $$V | cut -d. -f2); \
+	PATCH=$$(echo $$V | cut -d. -f3); \
+	NEW="$$MAJOR.$$MINOR.$$((PATCH+1))"; \
+	echo "$$NEW" > .Version; \
+	echo "bumped: $$V → $$NEW"
+
+## bump-minor: increment minor version (0.2.1 → 0.3.0)
+bump-minor:
+	@V=$$(cat .Version); \
+	MAJOR=$$(echo $$V | cut -d. -f1); \
+	MINOR=$$(echo $$V | cut -d. -f2); \
+	NEW="$$MAJOR.$$((MINOR+1)).0"; \
+	echo "$$NEW" > .Version; \
+	echo "bumped: $$V → $$NEW"
+
+## bump-major: increment major version (0.2.0 → 1.0.0)
+bump-major:
+	@V=$$(cat .Version); \
+	MAJOR=$$(echo $$V | cut -d. -f1); \
+	NEW="$$((MAJOR+1)).0.0"; \
+	echo "$$NEW" > .Version; \
+	echo "bumped: $$V → $$NEW"
+
+## release: bump, tag, and push (usage: make release bump=patch|minor|major)
+release:
+	@if [ -z "$(bump)" ]; then echo "usage: make release bump=patch|minor|major"; exit 1; fi
+	$(MAKE) bump-$(bump)
+	@V=$$(cat .Version); \
+	git add .Version; \
+	git commit -m "release: v$$V"; \
+	git tag "v$$V"; \
+	echo "tagged v$$V — push with: git push origin main v$$V"
 
 ## help: list available targets
 help:

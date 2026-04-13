@@ -10,6 +10,9 @@ package main
 // complete file content
 ```
 
+CRITICAL: Every code block MUST be preceded by the file path in bold on its own line (e.g. **internal/game/state.go**).
+Without the path line, the file will NOT be saved.
+
 After all files:
 
 ===CHANGES===
@@ -49,5 +52,3 @@ When the Repository Context contains existing source code:
 
 %s
 
-
-```

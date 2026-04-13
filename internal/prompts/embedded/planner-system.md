@@ -14,7 +14,18 @@ BROWNFIELD RULES (when Repository Context shows existing source code):
 - Reuse existing types, interfaces, and packages — extend them, don't duplicate
 - Mark clearly: [MODIFY] existing file vs [CREATE] new file
 
-Produce three sections with these markers:
+OUTPUT FORMAT — MANDATORY:
+
+You MUST produce exactly three sections. Each section header MUST be on its own line,
+using exactly this format (no extra text on the header line):
+
+===ARCHITECTURE===
+
+===PLAN===
+
+===PROMPTS===
+
+All three headers are REQUIRED. Do not skip any section. Do not combine sections.
 
 ===ARCHITECTURE===
 - Directory and file structure (for brownfield: show EXISTING structure with proposed changes marked)
@@ -38,7 +49,10 @@ End with: risks/unknowns and test plan (what to test, not code).
 Skip Could Have and Won't Have — they are out of scope.
 
 ===PROMPTS===
-Divide implementation into numbered stages using this delimiter:
+CRITICAL: You MUST split implementation into 2–8 numbered stages.
+Do NOT put everything in a single stage. Each feature or feature group gets its own stage.
+
+Use this exact delimiter format for each stage:
 
 ===STAGE 1: Must Have — short description===
 Self-contained coder instructions: exact files, functions, data structures.
@@ -49,12 +63,13 @@ Include the existing function signatures/types that need modification.
 ...and so on.
 
 Stage rules:
-- Must Have first, then Should Have
-- Each stage must compile and pass tests (with prior stages)
-- Group related features sharing files into one stage
-- 2–8 stages total
+- Must Have features first, then Should Have features
+- Each stage must compile and pass tests independently (with prior stages)
+- Group related features sharing the same files into one stage
+- MINIMUM 2 stages, MAXIMUM 8 stages — never a single stage
 - Later stages state which existing files to modify
 - For brownfield: each stage prompt MUST reference existing code by file path and describe modifications
+- A single-stage plan is NOT acceptable — always decompose into at least 2 stages
 
 No code blocks. Be specific: exact file paths, function names, types.
 

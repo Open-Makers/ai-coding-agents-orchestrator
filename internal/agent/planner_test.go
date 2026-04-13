@@ -171,3 +171,156 @@ Write tests.
 		t.Errorf("stage 1 name: got %q", stages[0].Name)
 	}
 }
+
+func TestParseSections_ExactHeaders(t *testing.T) {
+	input := `===ARCHITECTURE===
+Directory layout goes here.
+
+===PLAN===
+Step-by-step plan.
+
+===PROMPTS===
+===STAGE 1: Core===
+Implement core logic.
+`
+	sections := parseSections(input, "ARCHITECTURE", "PLAN", "PROMPTS")
+	for _, key := range []string{"ARCHITECTURE", "PLAN", "PROMPTS"} {
+		if sections[key] == "" {
+			t.Errorf("section %q should not be empty", key)
+		}
+	}
+}
+
+func TestParseSections_MarkdownHeaders(t *testing.T) {
+	input := `### ARCHITECTURE ###
+Directory layout.
+
+### PLAN ###
+Implementation steps.
+
+### PROMPTS ###
+===STAGE 1: Setup===
+Set up files.
+`
+	sections := parseSections(input, "ARCHITECTURE", "PLAN", "PROMPTS")
+	for _, key := range []string{"ARCHITECTURE", "PLAN", "PROMPTS"} {
+		if sections[key] == "" {
+			t.Errorf("section %q should not be empty with ### delimiters", key)
+		}
+	}
+}
+
+func TestParseSections_TrailingTextOnHeader(t *testing.T) {
+	input := `===ARCHITECTURE===
+Dirs and files.
+
+===PLAN===
+The plan.
+
+===PROMPTS (Stage-by-Stage)===
+===STAGE 1: Core===
+Build core.
+`
+	sections := parseSections(input, "ARCHITECTURE", "PLAN", "PROMPTS")
+	if sections["PROMPTS"] == "" {
+		t.Error("PROMPTS section should be found even with trailing '(Stage-by-Stage)' text")
+	}
+}
+
+func TestParseSections_DoubleHashMarkdown(t *testing.T) {
+	input := `## ARCHITECTURE
+
+Overview.
+
+## PLAN
+
+Steps.
+
+## PROMPTS
+
+===STAGE 1: Init===
+Initialize.
+`
+	sections := parseSections(input, "ARCHITECTURE", "PLAN", "PROMPTS")
+	for _, key := range []string{"ARCHITECTURE", "PLAN", "PROMPTS"} {
+		if sections[key] == "" {
+			t.Errorf("section %q should not be empty with ## headers", key)
+		}
+	}
+}
+
+func TestParseSections_BoldMarkdown(t *testing.T) {
+	input := `**ARCHITECTURE**
+Layout.
+
+**PLAN**
+Steps.
+
+**PROMPTS**
+===STAGE 1: Setup===
+Setup.
+`
+	sections := parseSections(input, "ARCHITECTURE", "PLAN", "PROMPTS")
+	for _, key := range []string{"ARCHITECTURE", "PLAN", "PROMPTS"} {
+		if sections[key] == "" {
+			t.Errorf("section %q should not be empty with ** bold headers", key)
+		}
+	}
+}
+
+func TestExtractSectionName_NoFalsePositiveOnProse(t *testing.T) {
+	keySet := map[string]bool{"ARCHITECTURE": true, "PLAN": true, "PROMPTS": true}
+
+	// Prose lines mentioning a key should NOT be detected as section headers.
+	proseLines := []string{
+		"The architecture should follow clean patterns.",
+		"Update the plan to include testing.",
+		"Generate prompts for each stage.",
+	}
+	for _, line := range proseLines {
+		if name := extractSectionName(line, keySet); name != "" {
+			t.Errorf("prose line %q should not match section key, but got %q", line, name)
+		}
+	}
+}
+
+func TestExtractSectionName_MoscowWithTrailingText(t *testing.T) {
+	keySet := map[string]bool{"VISION": true, "MOSCOW": true}
+
+	cases := []struct {
+		line string
+		want string
+	}{
+		{"### MoSCoW Prioritization", "MOSCOW"},
+		{"## MOSCOW Priorities", "MOSCOW"},
+		{"### Vision", "VISION"},
+		{"===MOSCOW===", "MOSCOW"},
+		{"### MOSCOW (Feature List)", "MOSCOW"},
+		{"**MOSCOW**", "MOSCOW"},
+	}
+	for _, tc := range cases {
+		got := extractSectionName(tc.line, keySet)
+		if got != tc.want {
+			t.Errorf("extractSectionName(%q) = %q, want %q", tc.line, got, tc.want)
+		}
+	}
+}
+
+func TestParseSections_VisionAndMoscow(t *testing.T) {
+	input := `### Vision
+
+Problem statement here.
+
+### MoSCoW Prioritization
+
+## Must Have
+1. Feature A
+`
+	sections := parseSections(input, "VISION", "MOSCOW")
+	if sections["VISION"] == "" {
+		t.Error("VISION section should not be empty")
+	}
+	if sections["MOSCOW"] == "" {
+		t.Error("MOSCOW section should not be empty when using '### MoSCoW Prioritization' header")
+	}
+}

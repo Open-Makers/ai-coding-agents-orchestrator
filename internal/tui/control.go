@@ -10,7 +10,6 @@ import (
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
@@ -46,31 +45,6 @@ type ControlModel struct {
 	overlayGit      GitPanelModel
 	overlayChat     ChatModel
 	overlayArtifact ArtifactViewerModel
-}
-
-func NewControl(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPath string, llm runner.LLMRunner, cfg config.Config) ControlModel {
-	runnerName, modelName := runnerModelFromConfig(cfg)
-	return ControlModel{
-		conv:          NewConversation(80, 20),
-		statusbar:     NewStatusBar(80).WithBranch(GitBranch(root)).WithState("idle").WithRunnerModel(runnerName, modelName),
-		agentConfigs:  cfg.Agents,
-		events:        events,
-		pipeline:      pipeline,
-		llm:           llm,
-		root:          root,
-		wsPath:        wsPath,
-		width:         80,
-		height:        24,
-		phase:         "idle",
-		log:           logging.ForComponent("tui_control"),
-		approvedGates: make(map[string]bool),
-		agentStates: map[bus.AgentRole]AgentState{
-			bus.RolePlanner:  AgentWaiting,
-			bus.RoleCoder:    AgentWaiting,
-			bus.RoleTester:   AgentWaiting,
-			bus.RoleReviewer: AgentWaiting,
-		},
-	}
 }
 
 func (m ControlModel) Init() tea.Cmd {
@@ -414,6 +388,8 @@ func renderAgentPill(role bus.AgentRole, state AgentState) string {
 	switch state {
 	case AgentRunning:
 		stateText = styleRunning.Render("RUNNING")
+	case AgentFixing:
+		stateText = styleFixing.Render("FIXING")
 	case AgentDone:
 		stateText = styleDone.Render("DONE")
 	case AgentError:

@@ -1,0 +1,845 @@
+package tui
+
+import (
+	"fmt"
+	"math"
+	"runtime"
+	"sort"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
+	"github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
+)
+
+const (
+	sysmonTickInterval = 2 * time.Second
+	sparklineLength    = 20
+	sysmonMinWidth     = 28
+	maxTopProcesses    = 5
+	brailleGraphRows   = 2
+	coreHistoryLength  = 40 // data points per core for dot history
+)
+
+// sparkBlocks maps a 0–7 intensity level to a Unicode block character.
+var sparkBlocks = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
+
+// braille dot bit positions: each character is a 2×4 grid.
+// Left column (dots 1,2,3,7): rows 0-3 top to bottom.
+// Right column (dots 4,5,6,8): rows 0-3 top to bottom.
+var brailleLeftBits = [4]rune{0x01, 0x02, 0x04, 0x40}
+var brailleRightBits = [4]rune{0x08, 0x10, 0x20, 0x80}
+
+const brailleBase = '\u2800'
+
+// topProcess holds a snapshot of one process for display.
+type topProcess struct {
+	pid  int32
+	name string
+	cpu  float64
+	mem  float32
+}
+
+// sysmonTickMsg carries a periodic snapshot of system metrics.
+type sysmonTickMsg struct {
+	cpuPercent  float64
+	perCore     []float64
+	memPercent  float64
+	memUsed     uint64
+	memTotal    uint64
+	memAvail    uint64
+	memCached   uint64
+	swapPercent float64
+	swapUsed    uint64
+	swapTotal   uint64
+	diskPercent float64
+	diskUsed    uint64
+	diskTotal   uint64
+	netRecv     uint64
+	netSent     uint64
+	goroutines  int
+	hostUptime  uint64
+	loadAvg     [3]float64
+	topProcs    []topProcess
+}
+
+// SysmonModel displays a compact system monitor panel.
+type SysmonModel struct {
+	cpuHistory    []float64
+	coreHistories [][]float64 // per-core history for dot graphs
+	netRecvHist   []float64
+	netSentHist   []float64
+
+	cpuPercent  float64
+	perCore     []float64
+	memPercent  float64
+	memUsed     uint64
+	memTotal    uint64
+	memAvail    uint64
+	memCached   uint64
+	swapPercent float64
+	swapUsed    uint64
+	swapTotal   uint64
+	diskPercent float64
+	diskUsed    uint64
+	diskTotal   uint64
+	goroutines  int
+	hostUptime  uint64
+	loadAvg     [3]float64
+	topProcs    []topProcess
+
+	recvRate    float64
+	sentRate    float64
+	prevNetRecv uint64
+	prevNetSent uint64
+	startTime   time.Time
+
+	width  int
+	height int
+}
+
+// NewSysmon creates a new system monitor model.
+func NewSysmon() SysmonModel {
+	return SysmonModel{
+		cpuHistory:  make([]float64, sparklineLength),
+		netRecvHist: make([]float64, sparklineLength),
+		netSentHist: make([]float64, sparklineLength),
+		startTime:   time.Now(),
+		width:       sysmonMinWidth,
+		height:      20,
+	}
+}
+
+// Init starts the first tick.
+func (m SysmonModel) Init() tea.Cmd {
+	return sysmonTick()
+}
+
+// sysmonTick returns a command that collects system metrics after a delay.
+func sysmonTick() tea.Cmd {
+	return tea.Tick(sysmonTickInterval, func(time.Time) tea.Msg {
+		// CPU — total + per-core.
+		cpuTotal, _ := cpu.Percent(0, false)
+		cpuPct := 0.0
+		if len(cpuTotal) > 0 {
+			cpuPct = cpuTotal[0]
+		}
+		perCore, _ := cpu.Percent(0, true)
+
+		// Memory.
+		vmStat, _ := mem.VirtualMemory()
+		swapStat, _ := mem.SwapMemory()
+
+		var memPct float64
+		var memUsed, memTotal, memAvail, memCached uint64
+		if vmStat != nil {
+			memPct = vmStat.UsedPercent
+			memUsed = vmStat.Used
+			memTotal = vmStat.Total
+			memAvail = vmStat.Available
+			memCached = vmStat.Cached
+		}
+		var swapPct float64
+		var swapUsed, swapTotal uint64
+		if swapStat != nil {
+			swapPct = swapStat.UsedPercent
+			swapUsed = swapStat.Used
+			swapTotal = swapStat.Total
+		}
+
+		// Disk.
+		diskStat, _ := disk.Usage("/")
+		var diskPct float64
+		var diskUsed, diskTotal uint64
+		if diskStat != nil {
+			diskPct = diskStat.UsedPercent
+			diskUsed = diskStat.Used
+			diskTotal = diskStat.Total
+		}
+
+		// Network.
+		counters, _ := net.IOCounters(false)
+		var recv, sent uint64
+		if len(counters) > 0 {
+			recv = counters[0].BytesRecv
+			sent = counters[0].BytesSent
+		}
+
+		// Host uptime.
+		uptime, _ := host.Uptime()
+
+		// Load average (unix).
+		var loadAvg [3]float64
+		if avg, err := load.Avg(); err == nil && avg != nil {
+			loadAvg = [3]float64{avg.Load1, avg.Load5, avg.Load15}
+		}
+
+		// Top processes by CPU.
+		procs := collectTopProcesses()
+
+		return sysmonTickMsg{
+			cpuPercent:  cpuPct,
+			perCore:     perCore,
+			memPercent:  memPct,
+			memUsed:     memUsed,
+			memTotal:    memTotal,
+			memAvail:    memAvail,
+			memCached:   memCached,
+			swapPercent: swapPct,
+			swapUsed:    swapUsed,
+			swapTotal:   swapTotal,
+			diskPercent: diskPct,
+			diskUsed:    diskUsed,
+			diskTotal:   diskTotal,
+			netRecv:     recv,
+			netSent:     sent,
+			goroutines:  runtime.NumGoroutine(),
+			hostUptime:  uptime,
+			loadAvg:     loadAvg,
+			topProcs:    procs,
+		}
+	})
+}
+
+// collectTopProcesses returns the top N processes sorted by CPU usage.
+func collectTopProcesses() []topProcess {
+	procs, err := process.Processes()
+	if err != nil || len(procs) == 0 {
+		return nil
+	}
+
+	var results []topProcess
+	for _, p := range procs {
+		cpuPct, err := p.CPUPercent()
+		if err != nil {
+			continue
+		}
+		memPct, _ := p.MemoryPercent()
+		name, _ := p.Name()
+		if name == "" {
+			continue
+		}
+		results = append(results, topProcess{
+			pid:  p.Pid,
+			name: name,
+			cpu:  cpuPct,
+			mem:  memPct,
+		})
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].cpu > results[j].cpu
+	})
+
+	if len(results) > maxTopProcesses {
+		results = results[:maxTopProcesses]
+	}
+	return results
+}
+
+// Update handles sysmon tick messages.
+func (m SysmonModel) Update(msg tea.Msg) (SysmonModel, tea.Cmd) {
+	tick, ok := msg.(sysmonTickMsg)
+	if !ok {
+		return m, nil
+	}
+
+	m.cpuPercent = tick.cpuPercent
+	m.perCore = tick.perCore
+	m.memPercent = tick.memPercent
+	m.memUsed = tick.memUsed
+	m.memTotal = tick.memTotal
+	m.memAvail = tick.memAvail
+	m.memCached = tick.memCached
+	m.swapPercent = tick.swapPercent
+	m.swapUsed = tick.swapUsed
+	m.swapTotal = tick.swapTotal
+	m.diskPercent = tick.diskPercent
+	m.diskUsed = tick.diskUsed
+	m.diskTotal = tick.diskTotal
+	m.goroutines = tick.goroutines
+	m.hostUptime = tick.hostUptime
+	m.loadAvg = tick.loadAvg
+	m.topProcs = tick.topProcs
+
+	// Calculate network rates (bytes/s).
+	if m.prevNetRecv > 0 {
+		m.recvRate = float64(tick.netRecv-m.prevNetRecv) / sysmonTickInterval.Seconds()
+		m.sentRate = float64(tick.netSent-m.prevNetSent) / sysmonTickInterval.Seconds()
+	}
+	m.prevNetRecv = tick.netRecv
+	m.prevNetSent = tick.netSent
+
+	// Shift history and append new values.
+	m.cpuHistory = append(m.cpuHistory[1:], m.cpuPercent)
+	m.netRecvHist = append(m.netRecvHist[1:], m.recvRate)
+	m.netSentHist = append(m.netSentHist[1:], m.sentRate)
+
+	// Update per-core histories.
+	coreCount := len(tick.perCore)
+	if len(m.coreHistories) < coreCount {
+		expanded := make([][]float64, coreCount)
+		copy(expanded, m.coreHistories)
+		for i := len(m.coreHistories); i < coreCount; i++ {
+			expanded[i] = make([]float64, coreHistoryLength)
+		}
+		m.coreHistories = expanded
+	}
+	for i := 0; i < coreCount && i < len(m.coreHistories); i++ {
+		m.coreHistories[i] = append(m.coreHistories[i][1:], tick.perCore[i])
+	}
+
+	return m, sysmonTick()
+}
+
+// SetSize updates the panel dimensions.
+func (m *SysmonModel) SetSize(w, h int) {
+	if w < sysmonMinWidth {
+		w = sysmonMinWidth
+	}
+	m.width = w
+	m.height = h
+}
+
+// View renders the system monitor panel.
+func (m SysmonModel) View() string {
+	contentW := m.width - 4
+	if contentW < 20 {
+		contentW = 20
+	}
+
+	borderColor := lipgloss.Color("#3b4261")
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2ac3de")).Bold(true)
+	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Bold(true)
+	labelStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	valueStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
+	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	bSt := lipgloss.NewStyle().Foreground(borderColor)
+
+	hRule := strings.Repeat("─", contentW+2)
+	thinSep := bSt.Render("│") + dimStyle.Render(strings.Repeat("┄", contentW+2)) + bSt.Render("│")
+
+	var lines []string
+	lines = append(lines, bSt.Render("╭"+hRule+"╮"))
+
+	addLine := func(content string) {
+		vis := lipgloss.Width(content)
+		pad := contentW + 2 - vis
+		if pad < 0 {
+			pad = 0
+		}
+		lines = append(lines, bSt.Render("│")+" "+content+strings.Repeat(" ", pad)+" "+bSt.Render("│"))
+	}
+
+	addEmpty := func() {
+		addLine("")
+	}
+
+	addSection := func(title string) {
+		lines = append(lines, bSt.Render("├"+strings.Repeat("─", contentW+2)+"┤"))
+		addLine(headerStyle.Render("  " + title))
+	}
+
+	addGraphLines := func(graphStr string) {
+		for _, gl := range strings.Split(graphStr, "\n") {
+			addLine(" " + gl)
+		}
+	}
+
+	_ = addEmpty
+
+	// ── Title ──
+	addLine(titleStyle.Render("⚡ SYSTEM MONITOR"))
+	addLine(dimStyle.Render(fmt.Sprintf("  %s • %d cores",
+		formatHostUptime(m.hostUptime), runtime.NumCPU())))
+
+	// ── CPU ──
+	addSection("CPU")
+	cpuColor := percentColor(m.cpuPercent)
+	cpuStyle := lipgloss.NewStyle().Foreground(cpuColor).Bold(true)
+	loadStr := dimStyle.Render(fmt.Sprintf("  load: %.1f %.1f %.1f",
+		m.loadAvg[0], m.loadAvg[1], m.loadAvg[2]))
+	addLine(cpuStyle.Render(fmt.Sprintf(" %5.1f%%", m.cpuPercent)) + loadStr)
+	addGraphLines(renderBrailleGraph(m.cpuHistory, contentW, brailleGraphRows, cpuColor, 100.0))
+	addLine(" " + renderSegmentedBar(m.cpuPercent, contentW))
+
+	// Per-core compact view with dot history: two cores per line.
+	if len(m.perCore) > 0 {
+		lines = append(lines, thinSep)
+		coreCount := len(m.perCore)
+		colW := contentW / 2
+		for i := 0; i < coreCount; i += 2 {
+			var leftHist []float64
+			if i < len(m.coreHistories) {
+				leftHist = m.coreHistories[i]
+			}
+			left := renderCoreDotted(i, m.perCore[i], leftHist, colW)
+			right := ""
+			if i+1 < coreCount {
+				var rightHist []float64
+				if i+1 < len(m.coreHistories) {
+					rightHist = m.coreHistories[i+1]
+				}
+				right = renderCoreDotted(i+1, m.perCore[i+1], rightHist, colW)
+			}
+			addLine(left + right)
+		}
+		addLine(dimStyle.Render(fmt.Sprintf(" Load avg: %.2f %.2f %.2f",
+			m.loadAvg[0], m.loadAvg[1], m.loadAvg[2])))
+	}
+
+	// ── MEM ──
+	addSection("MEM")
+	memColor := percentColor(m.memPercent)
+	memStyle := lipgloss.NewStyle().Foreground(memColor).Bold(true)
+	addLine(memStyle.Render(fmt.Sprintf(" %5.1f%%", m.memPercent)) +
+		dimStyle.Render(fmt.Sprintf("  %s / %s", formatBytes(m.memUsed), formatBytes(m.memTotal))))
+	addLine(" " + renderGradientBar(m.memPercent, contentW))
+
+	availStr := labelStyle.Render(" Avail: ") + valueStyle.Render(formatBytes(m.memAvail))
+	cachedStr := labelStyle.Render("  Cache: ") + valueStyle.Render(formatBytes(m.memCached))
+	addLine(availStr + cachedStr)
+
+	if m.swapTotal > 0 {
+		swapColor := percentColor(m.swapPercent)
+		swapStyle := lipgloss.NewStyle().Foreground(swapColor)
+		swapLine := labelStyle.Render(" Swap:  ") +
+			swapStyle.Render(fmt.Sprintf("%4.0f%%", m.swapPercent)) +
+			dimStyle.Render(fmt.Sprintf("  %s / %s", formatBytes(m.swapUsed), formatBytes(m.swapTotal)))
+		addLine(swapLine)
+		addLine(" " + renderGradientBar(m.swapPercent, contentW))
+	}
+
+	// ── DSK ──
+	addSection("DSK")
+	diskColor := percentColor(m.diskPercent)
+	diskStyle := lipgloss.NewStyle().Foreground(diskColor).Bold(true)
+	addLine(diskStyle.Render(fmt.Sprintf(" %5.1f%%", m.diskPercent)) +
+		dimStyle.Render(fmt.Sprintf("  %s / %s", formatBytes(m.diskUsed), formatBytes(m.diskTotal))))
+	addLine(" " + renderGradientBar(m.diskPercent, contentW))
+	freeBytes := uint64(0)
+	if m.diskTotal > m.diskUsed {
+		freeBytes = m.diskTotal - m.diskUsed
+	}
+	addLine(labelStyle.Render(" Free: ") + valueStyle.Render(formatBytes(freeBytes)))
+
+	// ── NET ──
+	addSection("NET")
+	netDnColor := lipgloss.Color("#73daca")
+	netUpColor := lipgloss.Color("#7aa2f7")
+	dnStyle := lipgloss.NewStyle().Foreground(netDnColor).Bold(true)
+	upStyle := lipgloss.NewStyle().Foreground(netUpColor).Bold(true)
+
+	addLine(dnStyle.Render(" ▼ "+formatRate(m.recvRate)) + "  " +
+		upStyle.Render("▲ "+formatRate(m.sentRate)))
+	addGraphLines(renderBrailleGraph(m.netRecvHist, contentW, brailleGraphRows, netDnColor, 0))
+	addGraphLines(renderBrailleGraph(m.netSentHist, contentW, brailleGraphRows, netUpColor, 0))
+
+	// ── PROC ──
+	if len(m.topProcs) > 0 {
+		addSection("PROC")
+		procNameW := contentW - 18
+		if procNameW < 6 {
+			procNameW = 6
+		}
+		hdrLine := dimStyle.Render(fmt.Sprintf(" %-*s %5s %5s", procNameW, "NAME", "CPU%", "MEM%"))
+		addLine(hdrLine)
+		for _, p := range m.topProcs {
+			name := p.name
+			if len(name) > procNameW {
+				name = name[:procNameW-1] + "…"
+			}
+			cpuVal := fmt.Sprintf("%5.1f", p.cpu)
+			memVal := fmt.Sprintf("%5.1f", p.mem)
+			cpuC := percentColor(p.cpu)
+			memC := percentColor(float64(p.mem))
+			line := dimStyle.Render(fmt.Sprintf(" %-*s", procNameW, name)) + " " +
+				lipgloss.NewStyle().Foreground(cpuC).Render(cpuVal) + " " +
+				lipgloss.NewStyle().Foreground(memC).Render(memVal)
+			addLine(line)
+		}
+	}
+
+	// ── Info footer ──
+	lines = append(lines, bSt.Render("├"+strings.Repeat("─", contentW+2)+"┤"))
+	goLine := labelStyle.Render(" Goroutines: ") + valueStyle.Render(fmt.Sprintf("%d", m.goroutines))
+	addLine(goLine)
+	sessionLine := labelStyle.Render(" Session:    ") + valueStyle.Render(formatElapsed(time.Since(m.startTime).Round(time.Second)))
+	addLine(sessionLine)
+
+	// Bottom border.
+	lines = append(lines, bSt.Render("╰"+hRule+"╯"))
+
+	result := strings.Join(lines, "\n")
+
+	// Vertically center if panel is taller than content.
+	totalLines := len(lines)
+	if m.height > totalLines {
+		topPad := (m.height - totalLines) / 2
+		result = strings.Repeat("\n", topPad) + result
+	}
+
+	return result
+}
+
+// renderCoreDotted renders a single CPU core as a braille-dot history bar.
+// Format: "C0 ⣀⣤⣶⣿⣶⣤⣀ 45%"
+func renderCoreDotted(idx int, pct float64, history []float64, colW int) string {
+	color := percentColor(pct)
+	label := fmt.Sprintf("C%d", idx)
+	pctStr := fmt.Sprintf("%3.0f%%", pct)
+
+	barW := colW - len(label) - len(pctStr) - 3
+	if barW < 3 {
+		barW = 3
+	}
+
+	coreStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	pctStyle := lipgloss.NewStyle().Foreground(color)
+
+	dotBar := renderBrailleDotBar(history, barW, color)
+
+	return " " + coreStyle.Render(label) + " " + dotBar + " " + pctStyle.Render(pctStr)
+}
+
+// renderBrailleDotBar renders a 1-row braille dot history bar.
+// Each character encodes 2 data points (left/right columns) × 4 dot rows.
+func renderBrailleDotBar(history []float64, width int, color lipgloss.Color) string {
+	dataPoints := width * 2
+	data := make([]float64, dataPoints)
+	if len(history) >= dataPoints {
+		copy(data, history[len(history)-dataPoints:])
+	} else if len(history) > 0 {
+		offset := dataPoints - len(history)
+		copy(data[offset:], history)
+	}
+
+	chars := make([]rune, width)
+	for i := range chars {
+		chars[i] = brailleBase
+	}
+
+	for i, val := range data {
+		// Map percentage (0-100) to dot rows (0-4).
+		level := int(math.Round(val / 100.0 * 4))
+		if level > 4 {
+			level = 4
+		}
+
+		charCol := i / 2
+		if charCol >= width {
+			continue
+		}
+		isRight := i%2 == 1
+
+		for dotRow := 0; dotRow < level; dotRow++ {
+			localRow := 3 - dotRow
+			if isRight {
+				chars[charCol] |= brailleRightBits[localRow]
+			} else {
+				chars[charCol] |= brailleLeftBits[localRow]
+			}
+		}
+	}
+
+	var sb strings.Builder
+	for _, ch := range chars {
+		sb.WriteRune(ch)
+	}
+	return lipgloss.NewStyle().Foreground(color).Render(sb.String())
+}
+
+// renderSegmentedBar renders a horizontal bar with colored segments and thin gaps.
+func renderSegmentedBar(percent float64, maxWidth int) string {
+	barWidth := maxWidth
+	if barWidth < 4 {
+		barWidth = 4
+	}
+
+	filled := int(math.Round(percent / 100.0 * float64(barWidth)))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > barWidth {
+		filled = barWidth
+	}
+	empty := barWidth - filled
+
+	segmentSize := 4 // gap every N characters
+	emptyStyle := lipgloss.NewStyle().Foreground(crt.muted)
+
+	var sb strings.Builder
+	for i := 0; i < filled; i++ {
+		bucketIdx := i * len(gradientColors) / barWidth
+		if bucketIdx >= len(gradientColors) {
+			bucketIdx = len(gradientColors) - 1
+		}
+		// Insert thin gap at segment boundaries.
+		if i > 0 && i%segmentSize == 0 {
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("#1a1b26")).Render("▏"))
+		} else {
+			sb.WriteString(lipgloss.NewStyle().Foreground(gradientColors[bucketIdx]).Render("█"))
+		}
+	}
+	for i := 0; i < empty; i++ {
+		pos := filled + i
+		if pos > 0 && pos%segmentSize == 0 {
+			sb.WriteString(emptyStyle.Render("▏"))
+		} else {
+			sb.WriteString(emptyStyle.Render("░"))
+		}
+	}
+	return sb.String()
+}
+
+// renderBrailleGraph renders a braille-dot area chart (btop-style).
+// Each character cell is 2 columns × 4 rows of dots, so `graphRows` character
+// rows give 4*graphRows vertical resolution. When fixedMax is > 0 it is used
+// as the ceiling (e.g. 100 for CPU%); otherwise the max is auto-detected.
+func renderBrailleGraph(history []float64, width, graphRows int, color lipgloss.Color, fixedMax float64) string {
+	totalDotRows := graphRows * 4
+	dataPoints := width * 2
+
+	data := make([]float64, dataPoints)
+	if len(history) >= dataPoints {
+		copy(data, history[len(history)-dataPoints:])
+	} else {
+		offset := dataPoints - len(history)
+		copy(data[offset:], history)
+	}
+
+	maxVal := fixedMax
+	if maxVal <= 0 {
+		for _, v := range data {
+			if v > maxVal {
+				maxVal = v
+			}
+		}
+	}
+	if maxVal == 0 {
+		maxVal = 1
+	}
+
+	grid := make([][]rune, graphRows)
+	for r := range grid {
+		grid[r] = make([]rune, width)
+		for c := range grid[r] {
+			grid[r][c] = brailleBase
+		}
+	}
+
+	for i, val := range data {
+		level := int(math.Round(val / maxVal * float64(totalDotRows)))
+		if level > totalDotRows {
+			level = totalDotRows
+		}
+
+		charCol := i / 2
+		if charCol >= width {
+			continue
+		}
+		isRight := i%2 == 1
+
+		for dotRow := 0; dotRow < level; dotRow++ {
+			charRow := graphRows - 1 - dotRow/4
+			localRow := 3 - dotRow%4
+			if charRow < 0 {
+				continue
+			}
+			if isRight {
+				grid[charRow][charCol] |= brailleRightBits[localRow]
+			} else {
+				grid[charRow][charCol] |= brailleLeftBits[localRow]
+			}
+		}
+	}
+
+	style := lipgloss.NewStyle().Foreground(color)
+	var rowStrings []string
+	for _, row := range grid {
+		var sb strings.Builder
+		for _, ch := range row {
+			sb.WriteRune(ch)
+		}
+		rowStrings = append(rowStrings, style.Render(sb.String()))
+	}
+	return strings.Join(rowStrings, "\n")
+}
+
+// gradientColors defines the bar gradient from green (low) through yellow to red (high).
+var gradientColors = []lipgloss.Color{
+	"#9ece6a", "#9ece6a", // 0-19%  green
+	"#b5c96a", "#c8c46a", // 20-39% green-yellow
+	"#e0af68", "#e0af68", // 40-59% yellow
+	"#ff9e64", "#ff9e64", // 60-79% orange
+	"#f7768e", "#f7768e", // 80-100% red
+}
+
+// renderGradientBar renders a horizontal bar with a btop-style color gradient.
+func renderGradientBar(percent float64, maxWidth int) string {
+	barWidth := maxWidth
+	if barWidth < 4 {
+		barWidth = 4
+	}
+
+	filled := int(math.Round(percent / 100.0 * float64(barWidth)))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > barWidth {
+		filled = barWidth
+	}
+	empty := barWidth - filled
+
+	emptyStyle := lipgloss.NewStyle().Foreground(crt.muted)
+
+	var sb strings.Builder
+	for i := 0; i < filled; i++ {
+		bucketIdx := i * len(gradientColors) / barWidth
+		if bucketIdx >= len(gradientColors) {
+			bucketIdx = len(gradientColors) - 1
+		}
+		sb.WriteString(lipgloss.NewStyle().Foreground(gradientColors[bucketIdx]).Render("█"))
+	}
+	sb.WriteString(emptyStyle.Render(strings.Repeat("░", empty)))
+	return sb.String()
+}
+
+// renderSparkline renders a Unicode sparkline from a history of values.
+func renderSparkline(history []float64, maxWidth int) string {
+	return renderSparklineColored(history, maxWidth, lipgloss.Color("#7aa2f7"))
+}
+
+// renderSparklineColored renders a sparkline with a custom color.
+func renderSparklineColored(history []float64, maxWidth int, color lipgloss.Color) string {
+	maxVal := 0.0
+	for _, v := range history {
+		if v > maxVal {
+			maxVal = v
+		}
+	}
+	if maxVal == 0 {
+		maxVal = 1
+	}
+
+	visLen := len(history)
+	if visLen > maxWidth {
+		visLen = maxWidth
+	}
+
+	sparkStyle := lipgloss.NewStyle().Foreground(color)
+	var sb strings.Builder
+	start := len(history) - visLen
+	for i := start; i < len(history); i++ {
+		normalized := history[i] / maxVal
+		idx := int(normalized * 7)
+		if idx < 0 {
+			idx = 0
+		}
+		if idx > 7 {
+			idx = 7
+		}
+		sb.WriteRune(sparkBlocks[idx])
+	}
+	return sparkStyle.Render(sb.String())
+}
+
+// renderBar renders a horizontal progress bar with the given percentage.
+func renderBar(percent float64, maxWidth int, color lipgloss.Color) string {
+	barWidth := maxWidth
+	if barWidth < 4 {
+		barWidth = 4
+	}
+
+	filled := int(math.Round(percent / 100.0 * float64(barWidth)))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > barWidth {
+		filled = barWidth
+	}
+	empty := barWidth - filled
+
+	filledStyle := lipgloss.NewStyle().Foreground(color)
+	emptyStyle := lipgloss.NewStyle().Foreground(crt.muted)
+
+	return filledStyle.Render(strings.Repeat("█", filled)) +
+		emptyStyle.Render(strings.Repeat("░", empty))
+}
+
+// percentColor returns a color based on usage percentage (green → yellow → red).
+func percentColor(pct float64) lipgloss.Color {
+	switch {
+	case pct >= 90:
+		return lipgloss.Color("#f7768e") // red/coral
+	case pct >= 70:
+		return lipgloss.Color("#e0af68") // gold/yellow
+	case pct >= 50:
+		return lipgloss.Color("#ff9e64") // orange
+	default:
+		return lipgloss.Color("#9ece6a") // green
+	}
+}
+
+// formatBytes formats bytes into human-readable form.
+func formatBytes(b uint64) string {
+	const (
+		kb = 1024
+		mb = kb * 1024
+		gb = mb * 1024
+		tb = gb * 1024
+	)
+	switch {
+	case b >= tb:
+		return fmt.Sprintf("%.1fT", float64(b)/float64(tb))
+	case b >= gb:
+		return fmt.Sprintf("%.1fG", float64(b)/float64(gb))
+	case b >= mb:
+		return fmt.Sprintf("%.0fM", float64(b)/float64(mb))
+	case b >= kb:
+		return fmt.Sprintf("%.0fK", float64(b)/float64(kb))
+	default:
+		return fmt.Sprintf("%dB", b)
+	}
+}
+
+// formatRate formats bytes/s into a human-readable rate.
+func formatRate(bytesPerSec float64) string {
+	const (
+		kb = 1024.0
+		mb = kb * 1024
+		gb = mb * 1024
+	)
+	switch {
+	case bytesPerSec >= gb:
+		return fmt.Sprintf("%.1fGB/s", bytesPerSec/gb)
+	case bytesPerSec >= mb:
+		return fmt.Sprintf("%.1fMB/s", bytesPerSec/mb)
+	case bytesPerSec >= kb:
+		return fmt.Sprintf("%.0fKB/s", bytesPerSec/kb)
+	default:
+		return fmt.Sprintf("%.0fB/s", bytesPerSec)
+	}
+}
+
+// formatHostUptime formats system uptime in days/hours/minutes.
+func formatHostUptime(secs uint64) string {
+	days := secs / 86400
+	hours := (secs % 86400) / 3600
+	mins := (secs % 3600) / 60
+	switch {
+	case days > 0:
+		return fmt.Sprintf("up %dd %dh", days, hours)
+	case hours > 0:
+		return fmt.Sprintf("up %dh %dm", hours, mins)
+	default:
+		return fmt.Sprintf("up %dm", mins)
+	}
+}

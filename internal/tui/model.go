@@ -70,6 +70,8 @@ type Model struct {
 	activeRole    bus.AgentRole // agent currently shown in the main area
 	phase         string        // current pipeline phase for the phase bar
 	statusbar     StatusBarModel
+	sysmon        SysmonModel                   // system monitor panel (right side)
+	showSysmon    bool                          // toggle for sysmon visibility
 	agentConfigs  map[string]config.AgentConfig // per-agent runner/model config
 	events        <-chan bus.Message
 	pipeline      *orchestrator.Pipeline
@@ -118,8 +120,13 @@ func (m Model) ReturnToMenu() bool {
 // llm is used for the chat overlay (may be nil).
 func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPath string, llm runner.LLMRunner, cfg config.Config) Model {
 	panels := make(map[bus.AgentRole]AgentPanelModel)
+	projectLang := resolveLanguageFromRoot(root, cfg)
 	for _, role := range agentOrder {
-		panels[role] = NewAgentPanel(role)
+		p := NewAgentPanel(role)
+		if projectLang != "" {
+			p.SetLanguage(projectLang)
+		}
+		panels[role] = p
 	}
 
 	runnerName, modelName := runnerModelFromConfig(cfg)
@@ -129,6 +136,8 @@ func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPat
 		activeRole:    bus.RolePM,
 		phase:         "idle",
 		statusbar:     NewStatusBar(80).WithBranch(GitBranch(root)).WithState("idle").WithRunnerModel(runnerName, modelName),
+		sysmon:        NewSysmon(),
+		showSysmon:    true,
 		agentConfigs:  cfg.Agents,
 		events:        events,
 		pipeline:      pipeline,
@@ -176,7 +185,7 @@ func runnerModelForRole(agents map[string]config.AgentConfig, role bus.AgentRole
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{waitForBusEvent(m.events)}
+	cmds := []tea.Cmd{waitForBusEvent(m.events), m.sysmon.Init()}
 	for _, p := range m.panels {
 		cmds = append(cmds, p.Init())
 	}
@@ -218,7 +227,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return pipeline.ReviseArtifact(context.Background(), artifact, feedback)
 					}
 				}
-				m.overlayArtifact = newArtifactViewer(m.wsPath, s, m.width, m.height-2, reviseFn)
+				m.overlayArtifact = newArtifactViewer(m.wsPath, s, m.contentWidth(), m.height-2, reviseFn)
 				m.overlay = overlayArtifact
 				m.statusbar = m.statusbar.WithState("⏸ " + gateLabel(s) + " — waiting for approval")
 			}
@@ -242,7 +251,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					r, mdl := runnerModelForRole(m.agentConfigs, role)
 					m.statusbar = m.statusbar.WithRunnerModel(r, mdl)
 				}
-				for _, ps := range []string{"pm", "planning", "coding", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"} {
+				for _, ps := range []string{"pm", "planning", "coding", "fixing", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"} {
 					if s == ps {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
@@ -280,6 +289,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, waitForBusEvent(m.events))
 		return m, tea.Batch(cmds...)
+	}
+
+	// Sysmon ticks are processed independently — always, regardless of overlay.
+	if tickMsg, ok := msg.(sysmonTickMsg); ok {
+		var cmd tea.Cmd
+		m.sysmon, cmd = m.sysmon.Update(tickMsg)
+		cmds = append(cmds, cmd)
+		return m, tea.Batch(cmds...)
+	}
+
+	// Spinner ticks are also processed globally for agent panels.
+	if _, ok := msg.(spinner.TickMsg); ok {
+		for role, p := range m.panels {
+			updated, cmd := p.Update(msg)
+			m.panels[role] = updated
+			cmds = append(cmds, cmd)
+		}
+		return m, tea.Batch(cmds...)
+	}
+
+	// Ctrl+M toggles sysmon from any context (including overlays).
+	if km, ok := msg.(tea.KeyMsg); ok && km.String() == "ctrl+m" {
+		m.showSysmon = !m.showSysmon
+		m.layout()
+		// Resize the active overlay to fit new content width.
+		return m, m.resizeActiveOverlay()
 	}
 
 	// Non-bus messages: route to overlay or normal handling.
@@ -355,13 +390,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "ctrl+r":
 			picker := NewPicker(m.root, m.wsPath)
-			picker.SetSize(m.width, m.height)
+			picker.SetSize(m.contentWidth(), m.height)
 			m.overlayPicker = picker
 			m.overlay = overlayPicker
 		case "ctrl+g":
 			gp, err := NewGitPanel(m.root)
 			if err == nil {
-				gp.SetSize(m.width, m.height)
+				gp.SetSize(m.contentWidth(), m.height)
 				m.overlayGit = gp
 				m.overlay = overlayGit
 			}
@@ -375,7 +410,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return pipeline.ReviseArtifact(context.Background(), artifact, feedback)
 					})
 				}
-				chat.SetSize(m.width, m.height)
+				chat.SetSize(m.contentWidth(), m.height)
 				m.overlayChat = chat
 				m.overlay = overlayChat
 			}
@@ -413,13 +448,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.statusbar.stageInfo != "" {
 			m.statusbar = m.statusbar.AdvanceScroll()
 			cmds = append(cmds, statusBarTick())
-		}
-
-	case spinner.TickMsg:
-		for role, p := range m.panels {
-			updated, cmd := p.Update(msg)
-			m.panels[role] = updated
-			cmds = append(cmds, cmd)
 		}
 	}
 
@@ -511,7 +539,9 @@ func (m Model) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case tea.WindowSizeMsg:
 			// Shrink height for phase bar + status bar below the overlay.
+			// Shrink width for sysmon panel on the right.
 			msg.Height -= 2
+			msg.Width = m.contentWidth()
 			var cmd tea.Cmd
 			m.overlayArtifact, cmd = m.overlayArtifact.Update(msg)
 			return m, cmd
@@ -538,19 +568,20 @@ func (m Model) View() string {
 	case overlayNone:
 		// Fall through to main view below.
 	case overlayPicker:
-		return m.overlayPicker.View()
+		return m.withSysmon(m.overlayPicker.View())
 	case overlayEditor:
-		return m.overlayEditor.View()
+		return m.withSysmon(m.overlayEditor.View())
 	case overlayGit:
-		return m.overlayGit.View()
+		return m.withSysmon(m.overlayGit.View())
 	case overlayChat:
-		return m.overlayChat.View()
+		return m.withSysmon(m.overlayChat.View())
 	case overlayArtifact:
-		return strings.Join([]string{
+		artifactView := strings.Join([]string{
 			strings.TrimRight(m.overlayArtifact.View(), "\n"),
 			m.renderPhaseBar(),
 			m.statusbar.View(),
 		}, "\n")
+		return m.withSysmon(artifactView)
 	}
 
 	// Main area: single active agent panel (or congratulations on completion).
@@ -559,14 +590,50 @@ func (m Model) View() string {
 		panelH = 4
 	}
 
+	// Determine sysmon width and agent panel width.
+	sysmonW := 0
+	agentW := m.width
+	if m.showSysmon && m.width >= 100 {
+		sysmonW = 38
+		if m.width >= 140 {
+			sysmonW = 44
+		}
+		if m.width >= 180 {
+			sysmonW = 50
+		}
+		agentW = m.width - sysmonW - 1 // 1 for gap
+	}
+
 	var parts []string
 
 	if m.pipelineDone && m.pipelineErr == "" {
-		parts = append(parts, m.renderCongratulations(panelH))
+		agentView := m.renderCongratulations(panelH)
+		if sysmonW > 0 {
+			m.sysmon.SetSize(sysmonW, panelH)
+			sysmonView := m.sysmon.View()
+			// Place congratulations in left, sysmon in right.
+			joined := lipgloss.JoinHorizontal(lipgloss.Top,
+				lipgloss.NewStyle().Width(agentW).Render(agentView),
+				" ",
+				sysmonView,
+			)
+			parts = append(parts, joined)
+		} else {
+			parts = append(parts, agentView)
+		}
 	} else {
 		p := m.panels[m.activeRole]
-		p.SetSize(m.width, panelH)
-		parts = append(parts, p.View())
+		p.SetSize(agentW, panelH)
+		agentView := p.View()
+
+		if sysmonW > 0 {
+			m.sysmon.SetSize(sysmonW, panelH)
+			sysmonView := m.sysmon.View()
+			joined := lipgloss.JoinHorizontal(lipgloss.Top, agentView, " ", sysmonView)
+			parts = append(parts, joined)
+		} else {
+			parts = append(parts, agentView)
+		}
 	}
 
 	if m.pipelineErr != "" {
@@ -674,6 +741,9 @@ func (m Model) renderPhaseBar() string {
 		label := strings.ToUpper(ph)
 		if strings.Contains(m.phase, ph) {
 			parts = append(parts, phaseStyle(label).Render("◉ "+label))
+		} else if ph == "coding" && m.phase == "fixing" {
+			// Show FIXING indicator instead of coding dot.
+			parts = append(parts, phaseStyle("FIXING").Render("⟳ FIXING"))
 		} else {
 			parts = append(parts, dimStyle.Render("○ "+label))
 		}
@@ -724,13 +794,94 @@ func (m Model) renderCongratulations(height int) string {
 	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
+// withSysmon composites the sysmon panel to the right of the given view
+// when sysmon is enabled and the terminal is wide enough. The view is
+// expected to already be rendered at contentWidth().
+func (m Model) withSysmon(view string) string {
+	sysmonW := m.sysmonWidth()
+	if sysmonW == 0 {
+		return view
+	}
+	cw := m.contentWidth()
+	if cw < 20 {
+		return view
+	}
+	m.sysmon.SetSize(sysmonW, m.height)
+	sysmonView := m.sysmon.View()
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		lipgloss.NewStyle().Width(cw).Render(view),
+		" ",
+		sysmonView,
+	)
+}
+
+// sysmonWidth returns the current sysmon panel width, or 0 if hidden.
+func (m Model) sysmonWidth() int {
+	if !m.showSysmon || m.width < 100 {
+		return 0
+	}
+	if m.width >= 180 {
+		return 50
+	}
+	if m.width >= 140 {
+		return 44
+	}
+	return 38
+}
+
+// contentWidth returns the available width for main content, subtracting
+// sysmon panel width when visible. Overlays and editors should use this
+// instead of m.width so they coexist with the monitor.
+func (m Model) contentWidth() int {
+	sw := m.sysmonWidth()
+	if sw == 0 {
+		return m.width
+	}
+	return m.width - sw - 1
+}
+
+// resizeActiveOverlay sends a synthetic WindowSizeMsg to the current overlay
+// so it adapts to the new content width (e.g. after sysmon toggle).
+func (m *Model) resizeActiveOverlay() tea.Cmd {
+	cw := m.contentWidth()
+	switch m.overlay {
+	case overlayNone:
+		// Nothing to resize.
+	case overlayPicker:
+		m.overlayPicker.SetSize(cw, m.height)
+	case overlayEditor:
+		m.overlayEditor, _ = m.overlayEditor.Update(tea.WindowSizeMsg{Width: cw, Height: m.height})
+	case overlayGit:
+		m.overlayGit.SetSize(cw, m.height)
+	case overlayChat:
+		m.overlayChat.SetSize(cw, m.height)
+	case overlayArtifact:
+		m.overlayArtifact, _ = m.overlayArtifact.Update(tea.WindowSizeMsg{Width: cw, Height: m.height - 2})
+	}
+	return nil
+}
+
 func (m *Model) layout() {
 	panelH := m.height - 3
 	if panelH < 4 {
 		panelH = 4
 	}
+
+	agentW := m.width
+	if m.showSysmon && m.width >= 100 {
+		sysmonW := 38
+		if m.width >= 140 {
+			sysmonW = 44
+		}
+		if m.width >= 180 {
+			sysmonW = 50
+		}
+		agentW = m.width - sysmonW - 1
+		m.sysmon.SetSize(sysmonW, panelH)
+	}
+
 	for role, p := range m.panels {
-		p.SetSize(m.width, panelH)
+		p.SetSize(agentW, panelH)
 		m.panels[role] = p
 	}
 	m.statusbar = m.statusbar.WithWidth(m.width)
@@ -785,7 +936,7 @@ func stateToRole(state string) bus.AgentRole {
 		return bus.RolePM
 	case "planning":
 		return bus.RolePlanner
-	case "coding":
+	case "coding", "fixing":
 		return bus.RoleCoder
 	case "testing":
 		return bus.RoleTester
@@ -827,7 +978,11 @@ func busToAgentEvent(msg bus.Message) AgentEventMsg {
 				text = p.Text
 			}
 		case string:
-			if strings.Contains(p, "error") {
+			if p == "fixing" {
+				state = AgentFixing
+			} else if p == "done" {
+				state = AgentDone
+			} else if strings.Contains(p, "error") {
 				state = AgentError
 			}
 		}

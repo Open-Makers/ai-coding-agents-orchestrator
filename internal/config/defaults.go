@@ -9,9 +9,13 @@ func DefaultConfig() Config {
 			TestCmd:        "go test ./...",
 			LintCmd:        "golangci-lint run",
 			MaxFixAttempts: 0,
+			ReservedCores:  2,
 		},
 		Agents: map[string]AgentConfig{
 			"pm": {
+				Skills: []string{"agentic-engineering"},
+			},
+			"pm_fixer": {
 				Skills: []string{"agentic-engineering"},
 			},
 			"planner": {

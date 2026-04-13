@@ -29,6 +29,7 @@ const (
 	PipelinePM          PipelineState = "pm"
 	PipelinePlanning    PipelineState = "planning"
 	PipelineCoding      PipelineState = "coding"
+	PipelineFixing      PipelineState = "fixing"
 	PipelineTesting     PipelineState = "testing"
 	PipelineReviewing   PipelineState = "reviewing"
 	PipelineUXReviewing PipelineState = "ux_reviewing"
@@ -299,7 +300,8 @@ func (p *Pipeline) stagedPipeline(ctx context.Context, architecture, ctxFragment
 }
 
 // collectProjectFiles merges existing cumulative files with any new source files
-// found in the project directory.
+// found in the project directory. Only includes files with recognized source
+// extensions to prevent binaries from polluting the context.
 func (p *Pipeline) collectProjectFiles(existing []string) []string {
 	seen := make(map[string]bool, len(existing))
 	for _, f := range existing {
@@ -323,6 +325,11 @@ func (p *Pipeline) collectProjectFiles(existing []string) []string {
 		if rel == "" || strings.HasPrefix(rel, ".") {
 			return nil
 		}
+		// Only include files with recognized source code extensions.
+		ext := strings.ToLower(filepath.Ext(rel))
+		if ext == "" {
+			return nil
+		}
 		if !seen[rel] {
 			result = append(result, rel)
 			seen[rel] = true
@@ -330,7 +337,7 @@ func (p *Pipeline) collectProjectFiles(existing []string) []string {
 		return nil
 	})
 
-	return result
+	return agent.FilterSourceFiles(result)
 }
 
 // generateCode runs the Coder for initial code generation, generates tests,
@@ -366,7 +373,7 @@ func (p *Pipeline) generateCode(ctx context.Context, plan, ctxFragment, stageNam
 	// Initial build-and-fix so source compiles before quality gate.
 	coder, ok := p.agents[bus.RoleCoder].(*agent.CoderAgent)
 	if ok {
-		p.setState(PipelineCoding)
+		p.setState(PipelineFixing)
 		p.event("building project…")
 		allFiles := appendTestFiles(coderResult.Files, p.root)
 		fixed, buildErr := coder.BuildAndFix(ctx, allFiles)
@@ -634,7 +641,17 @@ func (p *Pipeline) pmArbitrate(ctx context.Context, phase, rawOutput string) (st
 	p.setState(PipelinePM)
 	p.event(fmt.Sprintf("PM arbitrating unparsed %s output…", phase))
 
+	// Publish request so TUI updates PM panel to running state with spinner.
+	p.b.Publish(bus.NewMessage(bus.RoleSystem, bus.RolePM, bus.MsgRequest, "arbitrate"))
+
+	started := time.Now()
 	result, err := pm.Arbitrate(ctx, phase, rawOutput)
+	elapsed := time.Since(started)
+	p.agentDurations[bus.RolePM] += elapsed
+
+	// Publish response so TUI updates PM panel to done state.
+	p.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgResponse, "arbitration complete"))
+
 	if err != nil {
 		return "", fmt.Errorf("pm arbitrate (%s): %w", phase, err)
 	}
@@ -662,7 +679,7 @@ func (p *Pipeline) fixAndRebuild(ctx context.Context, ctxFragment, failure strin
 	}
 
 	allFiles := appendTestFiles(*files, p.root)
-	p.setState(PipelineCoding)
+	p.setState(PipelineFixing)
 	fixResp, err := p.runAgent(ctx, bus.RoleCoder, agent.CoderFixPayload{
 		Failure:        failure,
 		ProjectContext: ctxFragment,
@@ -679,7 +696,7 @@ func (p *Pipeline) fixAndRebuild(ctx context.Context, ctxFragment, failure strin
 	// Rebuild after fix.
 	coder, ok := p.agents[bus.RoleCoder].(*agent.CoderAgent)
 	if ok {
-		p.setState(PipelineCoding)
+		p.setState(PipelineFixing)
 		p.event("rebuilding after fix…")
 		fixed, buildErr := coder.BuildAndFix(ctx, *files)
 		if buildErr != nil {

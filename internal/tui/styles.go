@@ -38,6 +38,7 @@ var crt = themeAmber
 // Role colors — each agent gets a distinct accent while keeping CRT aesthetics.
 var roleColors = map[string]lipgloss.Color{
 	"pm":          lipgloss.Color("#e0af68"), // warm gold
+	"pm_fixer":    lipgloss.Color("#d4a056"), // darker gold — fixer variant
 	"planner":     lipgloss.Color("#7aa2f7"), // soft blue
 	"coder":       lipgloss.Color("#9ece6a"), // green
 	"tester":      lipgloss.Color("#bb9af7"), // lavender
@@ -81,6 +82,7 @@ var pipelineColors = map[string]lipgloss.Color{
 var (
 	styleWaiting = lipgloss.NewStyle().Foreground(crt.dim)
 	styleRunning = lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+	styleFixing  = lipgloss.NewStyle().Foreground(lipgloss.Color("#ff9e64")).Bold(true)
 	styleDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("#73daca")).Bold(true)
 	styleError   = lipgloss.NewStyle().Foreground(crt.warn).Bold(true)
 	styleGate    = lipgloss.NewStyle().Foreground(lipgloss.Color("#bb9af7")).Bold(true)

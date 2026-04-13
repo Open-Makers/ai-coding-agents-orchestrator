@@ -224,6 +224,9 @@ func (a *CoderAgent) writeOneFile(path, content string) error {
 	if path == "" {
 		return fmt.Errorf("empty path after sanitization")
 	}
+	if strings.HasSuffix(path, ".go") {
+		content = fixInvalidGoPackage(content)
+	}
 	target := filepath.Join(a.root, path)
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return fmt.Errorf("mkdir for %s: %w", path, err)
@@ -285,7 +288,7 @@ func (a *CoderAgent) buildPrompt(msg bus.Message) (string, string, error) {
 		}
 
 		if len(payload.PriorFiles) > 0 {
-			sourceCtx := a.buildSourceContext(filterSourceFiles(payload.PriorFiles))
+			sourceCtx := a.buildSourceContext(FilterSourceFiles(payload.PriorFiles))
 			if sourceCtx != "" {
 				userParts = append(userParts, fmt.Sprintf(
 					"Files from previous stages (modify only if needed for this stage):\n%s",
@@ -302,10 +305,17 @@ func (a *CoderAgent) buildPrompt(msg bus.Message) (string, string, error) {
 		// Build source context from actual files on disk.
 		sourceContext := a.buildSourceContext(payload.Files)
 
+		// Extract files mentioned in the failure for targeted fixing.
+		errorFiles := extractFilesFromErrors(payload.Failure)
+		errorFileList := ""
+		if len(errorFiles) > 0 {
+			errorFileList = "\n\nFiles referenced in errors:\n- " + strings.Join(errorFiles, "\n- ")
+		}
+
 		system := fmt.Sprintf(prompts.MustLoad("coder-fix"), payload.ProjectContext)
 
-		user := fmt.Sprintf("Error output:\n%s\n\nPrevious changes summary:\n%s\n\nCurrent source files:\n%s\n\nFix the failing code and output the corrected files.",
-			payload.Failure, string(changes), sourceContext)
+		user := fmt.Sprintf("Error output:\n%s%s\n\nPrevious changes summary:\n%s\n\nCurrent source files:\n%s\n\nFix ONLY the files that have errors. Do NOT re-output unchanged files. Do NOT create new files or restructure the project.",
+			payload.Failure, errorFileList, string(changes), sourceContext)
 		return system, user, nil
 
 	default:
@@ -333,6 +343,10 @@ func (a *CoderAgent) buildSourceContext(files []string) string {
 		}
 		content, err := safefile.ReadFile(a.root, path)
 		if err != nil {
+			continue
+		}
+		// Skip files with binary content to avoid corrupting LLM context.
+		if isBinaryContent(content) {
 			continue
 		}
 		fileContent := string(content)
@@ -371,7 +385,7 @@ func (a *CoderAgent) collectExistingSourceFiles() []string {
 		}
 		return nil
 	})
-	return filterSourceFiles(files)
+	return FilterSourceFiles(files)
 }
 
 // isExistingSourceFile returns true for files that contain application source code.
@@ -384,8 +398,17 @@ func isExistingSourceFile(path string) bool {
 	return sourceExts[ext]
 }
 
+// hardMaxBuildAttempts prevents infinite loops even when MaxFixAttempts is 0 (unlimited).
+const hardMaxBuildAttempts = 50
+
+// maxRepeatedBuildErrors is the number of identical consecutive build errors
+// before the loop bails out — the LLM is stuck and won't self-correct.
+const maxRepeatedBuildErrors = 5
+
 // BuildAndFix compiles the project and iteratively fixes build errors.
-// When MaxFixAttempts is 0 (default), it keeps retrying until the build succeeds.
+// When MaxFixAttempts is 0 (default), it keeps retrying until the build succeeds
+// (capped at hardMaxBuildAttempts). If the same error repeats
+// maxRepeatedBuildErrors times, it stops early to avoid infinite loops.
 // Returns the updated file list after all fixes.
 func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string, error) {
 	// Ensure go.mod exists for Go projects.
@@ -398,8 +421,14 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 
 	maxAttempts := a.cfg.Project.MaxFixAttempts
 	unlimited := maxAttempts <= 0
+	if unlimited {
+		maxAttempts = hardMaxBuildAttempts
+	}
 
-	for attempt := 1; unlimited || attempt <= maxAttempts; attempt++ {
+	prevBuildErr := ""
+	repeatCount := 0
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if unlimited {
 			a.emitToken(fmt.Sprintf("build check (%d): $ %s\n", attempt, buildCommand), false)
 		} else {
@@ -409,20 +438,49 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 		buildErr := a.runBuild(buildCommand)
 		if buildErr == "" {
 			a.emitToken("build: OK\n", false)
+			a.emit(bus.MsgEvent, "done")
 			return files, nil
 		}
 
+		a.emit(bus.MsgEvent, "fixing")
 		a.emitToken(fmt.Sprintf("build failed:\n%s\n", buildErr), false)
 
-		if !unlimited && attempt == maxAttempts {
+		// Detect repeated identical errors — LLM is stuck in a loop.
+		normalizedErr := normalizeBuildError(buildErr)
+		if normalizedErr == prevBuildErr {
+			repeatCount++
+		} else {
+			repeatCount = 1
+			prevBuildErr = normalizedErr
+		}
+		if repeatCount >= maxRepeatedBuildErrors {
+			a.emitToken(fmt.Sprintf("same build error repeated %d times — aborting fix loop\n", repeatCount), false)
+			// Attempt auto-repair for known patterns before giving up.
+			if autoFixed := a.autoFixKnownBuildErrors(buildErr, files); autoFixed {
+				a.emitToken("applied automatic fixes for known error patterns, retrying…\n", false)
+				repeatCount = 0
+				prevBuildErr = ""
+				continue
+			}
+			return files, fmt.Errorf("build fix stuck: same error repeated %d times", repeatCount)
+		}
+
+		if attempt == maxAttempts {
 			break
 		}
 
 		a.emitToken(fmt.Sprintf("fixing build errors (attempt %d)…\n", attempt), false)
 
+		// Extract files mentioned in errors to focus the fix.
+		errorFiles := extractFilesFromErrors(buildErr)
+		errorFileList := ""
+		if len(errorFiles) > 0 {
+			errorFileList = "\n\nFiles with errors:\n- " + strings.Join(errorFiles, "\n- ")
+		}
+
 		sourceContext := a.buildSourceContext(files)
-		fixPrompt := fmt.Sprintf("Build command failed:\n$ %s\n\nBuild errors:\n%s\n\nCurrent source files:\n%s\n\nFix ALL compilation errors and output the corrected files.",
-			buildCommand, buildErr, sourceContext)
+		fixPrompt := fmt.Sprintf("Build command failed:\n$ %s\n\nBuild errors:\n%s%s\n\nCurrent source files:\n%s\n\nFix ONLY the files that have compilation errors. Do NOT re-output files that compile correctly. Do NOT create new files or restructure the project.",
+			buildCommand, buildErr, errorFileList, sourceContext)
 
 		ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 			SystemPrompt: prompts.MustLoad("coder-build-fix"),
@@ -443,6 +501,118 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 	}
 
 	return files, fmt.Errorf("project still does not compile after %d attempts", maxAttempts)
+}
+
+// extractFilesFromErrors parses build/test error output and returns unique
+// file paths mentioned in error lines (e.g. "internal/game/board.go:15:3: ...").
+func extractFilesFromErrors(errOutput string) []string {
+	seen := make(map[string]bool)
+	var files []string
+	for _, line := range strings.Split(errOutput, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Match "file.go:line:col:" or "file.go:line:" patterns.
+		colonIdx := strings.Index(trimmed, ":")
+		if colonIdx <= 0 {
+			continue
+		}
+		candidate := trimmed[:colonIdx]
+		// Must look like a file path with extension.
+		if !strings.Contains(candidate, ".") {
+			continue
+		}
+		// Skip common non-file prefixes.
+		if strings.HasPrefix(candidate, "#") || strings.HasPrefix(candidate, "---") {
+			continue
+		}
+		candidate = strings.TrimPrefix(candidate, "./")
+		if candidate != "" && !seen[candidate] {
+			seen[candidate] = true
+			files = append(files, candidate)
+		}
+	}
+	return files
+}
+
+// normalizeBuildError strips line numbers and file paths to produce a
+// comparable signature for detecting repeated identical errors.
+func normalizeBuildError(errOutput string) string {
+	var lines []string
+	for _, line := range strings.Split(errOutput, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Strip file:line:col prefix to compare only error messages.
+		if idx := strings.Index(trimmed, ": "); idx > 0 {
+			trimmed = trimmed[idx+2:]
+		}
+		lines = append(lines, trimmed)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// autoFixKnownBuildErrors applies automatic repairs for error patterns LLMs
+// commonly produce but fail to self-correct (e.g. invalid Go package names
+// with slashes). Returns true if any files were modified.
+func (a *CoderAgent) autoFixKnownBuildErrors(buildErr string, files []string) bool {
+	if !strings.Contains(buildErr, "expected ';', found '/'") {
+		return false
+	}
+
+	fixed := false
+	for _, rel := range files {
+		if !strings.HasSuffix(rel, ".go") {
+			continue
+		}
+		target := filepath.Join(a.root, rel)
+		data, err := os.ReadFile(target)
+		if err != nil {
+			continue
+		}
+		original := string(data)
+		repaired := fixInvalidGoPackage(original)
+		if repaired != original {
+			if err := os.WriteFile(target, []byte(repaired), 0o600); err == nil {
+				a.emitToken(fmt.Sprintf("auto-fixed invalid package declaration in %s\n", rel), false)
+				fixed = true
+			}
+		}
+	}
+	return fixed
+}
+
+// fixInvalidGoPackage repairs invalid Go package declarations that contain
+// slashes (e.g. "package internal/controller" → "package controller").
+// LLMs — especially local models — frequently confuse the import path with
+// the package name.
+func fixInvalidGoPackage(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "package ") {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "package"))
+		if !strings.Contains(rest, "/") {
+			break // valid package declaration, nothing to fix
+		}
+		// Extract just the last path segment as the package name.
+		parts := strings.Split(rest, "/")
+		pkgName := parts[len(parts)-1]
+		// Strip trailing comments or semicolons.
+		if idx := strings.IndexAny(pkgName, " \t;"); idx >= 0 {
+			pkgName = pkgName[:idx]
+		}
+		if pkgName == "" {
+			break
+		}
+		lines[i] = "package " + pkgName
+		break // only fix the first package declaration
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runBuild executes the build command and returns error output (empty string on success).
@@ -540,30 +710,58 @@ func (a *CoderAgent) detectLanguage() string {
 	return ""
 }
 
-// filterSourceFiles returns only source code files, excluding docs, configs,
-// binaries, and non-essential files that would bloat the LLM context.
-func filterSourceFiles(files []string) []string {
+// sourceExtensions are file extensions recognized as source code.
+// Allowlist approach prevents binary files and other non-text files
+// from being sent to the LLM as context.
+var sourceExtensions = map[string]bool{
+	".go": true, ".rs": true, ".py": true, ".js": true, ".ts": true,
+	".tsx": true, ".jsx": true, ".java": true, ".rb": true, ".c": true,
+	".cpp": true, ".cc": true, ".h": true, ".hpp": true, ".cs": true,
+	".swift": true, ".kt": true, ".scala": true, ".php": true,
+	".html": true, ".css": true, ".scss": true, ".sass": true, ".less": true,
+	".vue": true, ".svelte": true, ".sql": true, ".sh": true, ".bash": true,
+	".zsh": true, ".proto": true, ".graphql": true, ".gql": true,
+	".tf": true, ".hcl": true, ".ex": true, ".exs": true, ".erl": true,
+	".hs": true, ".lua": true, ".r": true, ".pl": true, ".pm": true,
+	".dart": true, ".zig": true, ".nim": true, ".v": true, ".ml": true,
+}
+
+// allowedConfigFiles are specific config filenames that should be included
+// even though they have config extensions.
+var allowedConfigFiles = map[string]bool{
+	"package.json": true, "tsconfig.json": true, "cargo.toml": true,
+	"pyproject.toml": true, "makefile": true, "dockerfile": true,
+	"docker-compose.yml": true, "docker-compose.yaml": true,
+}
+
+// FilterSourceFiles returns only source code files, using an allowlist
+// of recognized extensions. This prevents binaries and non-text files
+// from corrupting LLM context.
+func FilterSourceFiles(files []string) []string {
 	var filtered []string
 	for _, f := range files {
-		lower := strings.ToLower(f)
-		// Skip non-source files.
-		switch {
-		case strings.HasPrefix(f, "docs/"),
-			strings.HasPrefix(f, "doc/"),
-			strings.HasPrefix(f, "."):
-			continue
-		case strings.HasSuffix(lower, ".md"),
-			strings.HasSuffix(lower, ".txt"),
-			strings.HasSuffix(lower, ".yaml"),
-			strings.HasSuffix(lower, ".yml"),
-			strings.HasSuffix(lower, ".json") && !strings.Contains(f, "package.json"),
-			strings.HasSuffix(lower, ".toml") && !strings.Contains(f, "cargo.toml"),
-			strings.HasSuffix(lower, ".lock"),
-			strings.HasSuffix(lower, ".sum"),
-			strings.HasSuffix(lower, ".mod"):
+		// Skip hidden files and common non-source directories.
+		if strings.HasPrefix(f, ".") || strings.HasPrefix(f, "docs/") || strings.HasPrefix(f, "doc/") {
 			continue
 		}
-		filtered = append(filtered, f)
+
+		ext := strings.ToLower(filepath.Ext(f))
+		base := strings.ToLower(filepath.Base(f))
+
+		// Include recognized source files.
+		if sourceExtensions[ext] {
+			filtered = append(filtered, f)
+			continue
+		}
+
+		// Include specific config files that provide build context.
+		if allowedConfigFiles[base] {
+			filtered = append(filtered, f)
+			continue
+		}
+
+		// Skip everything else: binaries, images, archives, lock files,
+		// .md, .txt, .sum, .mod, and files without extensions.
 	}
 	return filtered
 }
@@ -665,6 +863,12 @@ func parseFilePath(line string) string {
 	cleaned := line
 	cleaned = strings.TrimSpace(cleaned)
 
+	// Try extracting a backtick-quoted path from prose text first.
+	// Handles patterns like: Here is `cmd/game/main.go`:
+	if p := extractBacktickPath(cleaned); p != "" {
+		return p
+	}
+
 	// Strip numbered list markers: "1. ", "5. ", "1) "
 	for i, c := range cleaned {
 		if c >= '0' && c <= '9' {
@@ -711,7 +915,17 @@ func parseFilePath(line string) string {
 	cleaned = strings.TrimSuffix(cleaned, " -")
 	cleaned = strings.TrimSpace(cleaned)
 
-	if cleaned == "" || strings.ContainsAny(cleaned, " \t{}()[]<>") {
+	// If there are spaces remaining, try to extract the leading path token.
+	// Handles: "cmd/game/main.go — Main entry point" or "cmd/game/main.go (state management)"
+	if strings.ContainsAny(cleaned, " \t") {
+		candidate := extractLeadingPath(cleaned)
+		if candidate != "" {
+			return candidate
+		}
+		return ""
+	}
+
+	if cleaned == "" || strings.ContainsAny(cleaned, "{}()[]<>") {
 		return ""
 	}
 	if !strings.Contains(cleaned, ".") {
@@ -724,6 +938,55 @@ func parseFilePath(line string) string {
 	}
 
 	return sanitizeFilePath(cleaned, "")
+}
+
+// extractBacktickPath finds a file path inside backticks within prose text.
+// Handles: "Here is `cmd/game/main.go`:", "File `internal/game/state.go`:"
+func extractBacktickPath(line string) string {
+	start := strings.Index(line, "`")
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(line[start+1:], "`")
+	if end < 0 {
+		return ""
+	}
+	candidate := strings.TrimSpace(line[start+1 : start+1+end])
+	candidate = strings.TrimPrefix(candidate, "./")
+	if candidate == "" || strings.ContainsAny(candidate, " \t{}()[]<>") {
+		return ""
+	}
+	// Require both a dot (extension) and a slash (directory) to avoid
+	// matching inline code like `fmt.Println` or `errors.New`.
+	if !strings.Contains(candidate, ".") || !strings.Contains(candidate, "/") || strings.Contains(candidate, "..") {
+		return ""
+	}
+	return sanitizeFilePath(candidate, "")
+}
+
+// extractLeadingPath takes the first whitespace-delimited token from a line
+// and returns it if it looks like a file path.
+// Handles: "cmd/game/main.go — Main entry point", "internal/game.go (state)"
+func extractLeadingPath(line string) string {
+	// Split on common separators: space, tab, em-dash, en-dash.
+	separators := []string{" — ", " – ", " - ", "\t", " ("}
+	candidate := line
+	for _, sep := range separators {
+		if idx := strings.Index(candidate, sep); idx > 0 {
+			candidate = candidate[:idx]
+		}
+	}
+	candidate = strings.TrimSpace(candidate)
+	candidate = strings.Trim(candidate, "`*\"'")
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" || strings.ContainsAny(candidate, " \t{}()[]<>") {
+		return ""
+	}
+	if !strings.Contains(candidate, ".") || strings.Contains(candidate, "..") {
+		return ""
+	}
+	candidate = strings.TrimPrefix(candidate, "./")
+	return sanitizeFilePath(candidate, "")
 }
 
 // sanitizeFilePath cleans a file path produced by an LLM.
@@ -801,7 +1064,7 @@ func stripToProjectRelative(path string) string {
 
 // pathFromFenceTag extracts a file path from a code fence tag.
 // Handles patterns like: ```go src/main.go, ```tsx title="src/App.tsx",
-// ```file=src/main.go, etc.
+// ```file=src/main.go, ```go:cmd/game/main.go, etc.
 func pathFromFenceTag(tag string) string {
 	trimmed := strings.TrimSpace(tag)
 
@@ -814,6 +1077,16 @@ func pathFromFenceTag(tag string) string {
 			if strings.Contains(val, ".") && !strings.ContainsAny(val, " \t{}()[]<>") && !strings.Contains(val, "..") {
 				return val
 			}
+		}
+	}
+
+	// Handle lang:path format (e.g., "go:cmd/game/main.go", "python:src/app.py").
+	if colonIdx := strings.Index(trimmed, ":"); colonIdx > 0 && colonIdx < len(trimmed)-1 {
+		pathPart := strings.TrimSpace(trimmed[colonIdx+1:])
+		pathPart = strings.TrimPrefix(pathPart, "./")
+		if strings.Contains(pathPart, ".") && strings.Contains(pathPart, "/") &&
+			!strings.ContainsAny(pathPart, " \t{}()[]<>") && !strings.Contains(pathPart, "..") {
+			return pathPart
 		}
 	}
 
@@ -888,6 +1161,15 @@ func guessFilePathFromContent(lines []string) string {
 		trim := strings.TrimSpace(line)
 		if strings.HasPrefix(trim, "package ") {
 			pkg := strings.TrimSpace(strings.TrimPrefix(trim, "package"))
+			if pkg == "" {
+				continue
+			}
+			// LLMs sometimes produce "package internal/foo" — use only the
+			// last segment as the actual Go package name.
+			if strings.Contains(pkg, "/") {
+				parts := strings.Split(pkg, "/")
+				pkg = parts[len(parts)-1]
+			}
 			if pkg == "" {
 				continue
 			}
@@ -1014,4 +1296,27 @@ func isValidModulePath(path string) bool {
 		}
 	}
 	return !strings.Contains(path, "..")
+}
+
+// isBinaryContent checks if content appears to be binary (non-text) data
+// by looking for null bytes or a high ratio of non-printable characters
+// in the first 512 bytes.
+func isBinaryContent(data []byte) bool {
+	checkLen := len(data)
+	if checkLen > 512 {
+		checkLen = 512
+	}
+	if checkLen == 0 {
+		return false
+	}
+	nonPrintable := 0
+	for _, b := range data[:checkLen] {
+		if b == 0 {
+			return true
+		}
+		if b < 0x20 && b != '\n' && b != '\r' && b != '\t' {
+			nonPrintable++
+		}
+	}
+	return float64(nonPrintable)/float64(checkLen) > 0.1
 }

@@ -1,90 +1,141 @@
 package runner
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"os"
 	"strings"
-
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 )
 
-const ollamaDefaultModel = "qwen2.5-coder:latest"
+const (
+	ollamaDefaultModel = "qwen2.5-coder:latest"
+	ollamaBaseURL      = "http://localhost:11434"
+)
 
-// OllamaRunner executes Ollama models through the Claude Code CLI.
-// Uses: ollama launch claude --model <model> --yes -- --print --allowedTools ""
+// OllamaRunner calls the Ollama REST API directly (/api/chat)
+// instead of shelling out through the Claude Code CLI.
 type OllamaRunner struct {
-	Model string
+	Model   string
+	BaseURL string
 }
 
 func NewOllamaRunner(model string) *OllamaRunner {
 	if model == "" {
 		model = ollamaDefaultModel
 	}
-	return &OllamaRunner{Model: model}
+	return &OllamaRunner{Model: model, BaseURL: ollamaBaseURL}
 }
 
-func (r *OllamaRunner) Complete(_ context.Context, req CompletionRequest) (<-chan Token, error) {
+func (r *OllamaRunner) Complete(ctx context.Context, req CompletionRequest) (<-chan Token, error) {
 	model := req.Model
 	if model == "" {
 		model = r.Model
 	}
 
-	// Merge system prompt and user messages into a single prompt.
-	// Small Ollama models generate JSON tool-calls when --system-prompt
-	// is passed separately, so everything goes into -p with an explicit
-	// plain-text instruction.
-	var prompt strings.Builder
-	if req.SystemPrompt != "" {
-		prompt.WriteString(req.SystemPrompt)
-		prompt.WriteString("\n\nIMPORTANT: Output plain text only, not JSON.\n\n")
-	}
-	for _, m := range req.Messages {
-		prompt.WriteString(strings.ToUpper(m.Role))
-		prompt.WriteString(":\n")
-		prompt.WriteString(m.Content)
-		prompt.WriteString("\n\n")
+	messages := r.buildMessages(req)
+	body := ollamaChatRequest{
+		Model:    model,
+		Messages: messages,
+		Stream:   true,
 	}
 
-	output, err := r.run(prompt.String(), model)
+	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ollama: marshal request: %w", err)
 	}
 
-	ch := make(chan Token, 2)
-	go func() {
-		ch <- Token{Text: string(output)}
-		ch <- Token{Done: true}
-		close(ch)
-	}()
+	endpoint := r.baseURL() + "/api/chat"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("ollama: create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: not reachable at %s (is ollama running?): %w", r.baseURL(), err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer func() { _ = resp.Body.Close() }()
+		errBody, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("ollama: model %q returned HTTP %d: %s", model, resp.StatusCode, strings.TrimSpace(string(errBody)))
+	}
+
+	ch := make(chan Token, 16)
+	go r.streamResponse(resp.Body, ch)
 	return ch, nil
 }
 
-func (r *OllamaRunner) run(prompt, model string) ([]byte, error) {
-	// ollama launch claude handles env vars (ANTHROPIC_BASE_URL etc.)
-	// --allowedTools with a space disables all tools so the model produces
-	// plain text (empty string "" is silently dropped by ollama launch).
-	args := []string{
-		"launch", "claude",
-		"--model", model, "--yes",
-		"--",
-		"--print", "--allowedTools", " ",
-		"-p", prompt,
+func (r *OllamaRunner) buildMessages(req CompletionRequest) []ollamaChatMessage {
+	var msgs []ollamaChatMessage
+
+	if req.SystemPrompt != "" {
+		msgs = append(msgs, ollamaChatMessage{
+			Role:    "system",
+			Content: req.SystemPrompt + "\n\nIMPORTANT: Output plain text only, not JSON.",
+		})
 	}
 
-	cmd := executil.Command("ollama", args...)
-	cmd.Env = os.Environ()
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ollama (via claude): %w: %s", err, strings.TrimSpace(stderr.String()))
+	for _, m := range req.Messages {
+		msgs = append(msgs, ollamaChatMessage(m))
 	}
-	return out.Bytes(), nil
+
+	return msgs
+}
+
+func (r *OllamaRunner) streamResponse(body io.ReadCloser, ch chan<- Token) {
+	defer func() { _ = body.Close() }()
+	defer close(ch)
+
+	scanner := bufio.NewScanner(body)
+	for scanner.Scan() {
+		var chunk ollamaChatResponse
+		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
+			ch <- Token{Error: fmt.Errorf("ollama: decode stream chunk: %w", err)}
+			ch <- Token{Done: true}
+			return
+		}
+		if chunk.Message.Content != "" {
+			ch <- Token{Text: chunk.Message.Content}
+		}
+		if chunk.Done {
+			ch <- Token{Done: true}
+			return
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		ch <- Token{Error: fmt.Errorf("ollama: read stream: %w", err)}
+	}
+	ch <- Token{Done: true}
+}
+
+func (r *OllamaRunner) baseURL() string {
+	if r.BaseURL != "" {
+		return r.BaseURL
+	}
+	return ollamaBaseURL
+}
+
+// ollamaChatRequest is the payload for POST /api/chat.
+type ollamaChatRequest struct {
+	Model    string              `json:"model"`
+	Messages []ollamaChatMessage `json:"messages"`
+	Stream   bool                `json:"stream"`
+}
+
+type ollamaChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// ollamaChatResponse is a single streamed line from /api/chat.
+type ollamaChatResponse struct {
+	Message ollamaChatMessage `json:"message"`
+	Done    bool              `json:"done"`
 }
 
 // OllamaListInstalled returns model names available in the local Ollama instance.
