@@ -98,6 +98,7 @@ var statusBarShortcuts = []statusBarShortcut{
 	{"Ctrl+R", "req", lipgloss.Color("#9ece6a")},     // green — requirements
 	{"Ctrl+G", "git", lipgloss.Color("#73daca")},     // teal — git
 	{"Ctrl+C", "chat", lipgloss.Color("#2ac3de")},    // cyan — chat
+	{"Ctrl+T", "sysmon", lipgloss.Color("#ff9e64")},  // orange — system monitor
 	{"Ctrl+A", "approve", lipgloss.Color("#9ece6a")}, // green — approve
 	{"Ctrl+X", "cancel", lipgloss.Color("#f7768e")},  // coral — cancel
 	{"q", "quit", lipgloss.Color("#6b553f")},         // dim — quit

@@ -114,16 +114,46 @@ Approve?: NO`
 }
 
 func TestParseReviewSections_Unparsed(t *testing.T) {
+	// Truly ambiguous text with no clear signals should remain unparsed.
+	input := `The code has some interesting patterns. I noticed a few things
+that are worth discussing with the team. Let me elaborate on the design choices.`
+
+	s := parseReviewSections(input)
+	if s.Parsed {
+		t.Error("expected Parsed=false for ambiguous freeform text")
+	}
+	if len(s.MustFix) != 0 {
+		t.Errorf("expected 0 must-fix, got %d", len(s.MustFix))
+	}
+}
+
+func TestParseReviewSections_FallbackApproval(t *testing.T) {
+	// Freeform text with clear positive signals should be auto-approved.
 	input := `The code looks pretty good overall. I noticed a few things that could
 be improved but nothing critical. The error handling is solid and the tests
 cover the main paths. Ship it!`
 
 	s := parseReviewSections(input)
-	if s.Parsed {
-		t.Error("expected Parsed=false for freeform text")
+	if !s.Parsed {
+		t.Error("expected Parsed=true for clearly positive text")
 	}
-	if len(s.MustFix) != 0 {
-		t.Errorf("expected 0 must-fix, got %d", len(s.MustFix))
+	if !s.Approved {
+		t.Error("expected Approved=true for positive text with approval signals")
+	}
+}
+
+func TestParseReviewSections_FallbackRejection(t *testing.T) {
+	input := `There is a critical issue with the code:
+- SQL injection vulnerability in the query builder
+- Race condition in the cache layer
+Not approved.`
+
+	s := parseReviewSections(input)
+	if !s.Parsed {
+		t.Error("expected Parsed=true for text with rejection signals")
+	}
+	if len(s.MustFix) == 0 {
+		t.Error("expected must-fix items from fallback extraction")
 	}
 }
 
@@ -137,6 +167,43 @@ Approve?: NO`
 	s := parseReviewSections(input)
 	assertParsed(t, s)
 	assertMustFix(t, s, 1)
+}
+
+func TestParseReviewSections_AlternativeHeadings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		fix   int
+	}{
+		{
+			name:  "Issues heading",
+			input: "## Issues\n- Missing error handling\nApprove?: NO",
+			fix:   1,
+		},
+		{
+			name:  "Critical heading",
+			input: "**Critical**\n- Race condition\nSuggestions\n- Add logging\nApprove?: NO",
+			fix:   1,
+		},
+		{
+			name:  "Bugs heading",
+			input: "### Bugs\n- Nil pointer in handler\nApprove?: NO",
+			fix:   1,
+		},
+		{
+			name:  "Verdict heading",
+			input: "Verdict: NO\nMUST FIX\n- Missing validation",
+			fix:   1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := parseReviewSections(tt.input)
+			assertParsed(t, s)
+			assertMustFix(t, s, tt.fix)
+		})
+	}
 }
 
 func TestParseReviewSections_NoneVariants(t *testing.T) {
@@ -230,10 +297,22 @@ Approve?: NO`
 }
 
 func TestParseReview_UnparsedOutput(t *testing.T) {
-	input := "Everything looks fine, great job!"
+	// Truly ambiguous text should remain unparsed.
+	input := "The architecture follows standard patterns. Let me describe the design choices."
 	r := parseReview(input)
 	if !r.Unparsed {
-		t.Error("expected Unparsed=true for freeform text")
+		t.Error("expected Unparsed=true for ambiguous freeform text")
+	}
+}
+
+func TestParseReview_FreeformApproval(t *testing.T) {
+	input := "Everything looks fine, great job!"
+	r := parseReview(input)
+	if r.Unparsed {
+		t.Error("expected Unparsed=false for clearly positive text")
+	}
+	if !r.Approved {
+		t.Error("expected Approved=true for positive text")
 	}
 }
 

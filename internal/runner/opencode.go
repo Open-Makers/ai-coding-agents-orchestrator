@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
@@ -62,7 +61,6 @@ func (r OpenCodeRunner) run(ctx context.Context, prompt, model string) (string, 
 	}
 
 	args := []string{"run", "--format", "json"}
-	env := os.Environ()
 
 	// OpenCode requires "provider/model" format.
 	// For local Ollama models (no provider prefix), add the ollama/ prefix.
@@ -71,11 +69,11 @@ func (r OpenCodeRunner) run(ctx context.Context, prompt, model string) (string, 
 	}
 
 	args = append(args, "-m", model)
-	// Pass prompt as positional argument.
-	args = append(args, prompt)
+	// Prompt is piped via stdin to avoid macOS ARG_MAX limits on large prompts.
+	args = append(args, "-")
 
 	cmd := executil.CommandContext(ctx, bin, args...)
-	cmd.Env = env
+	cmd.Stdin = strings.NewReader(prompt)
 
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out

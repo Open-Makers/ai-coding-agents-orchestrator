@@ -77,6 +77,10 @@ Full-featured terminal user interface with agent panels, live token streaming, a
   <img src="doc/images/ux-reviewer.png" width="700" alt="UX Reviewer Agent">
 </p>
 
+<p align="center">
+  <img src="doc/images/summary.png" width="700" alt="Pipeline Summary">
+</p>
+
 ### Configurable LLM Backends
 
 Supports multiple runners out of the box:

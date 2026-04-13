@@ -85,7 +85,7 @@ MoSCoW Prioritization:
 	sections := parseSections(output, "ARCHITECTURE", "PLAN", "PROMPTS")
 	arch := sections["ARCHITECTURE"]
 	plan := sections["PLAN"]
-	prompts := sections["PROMPTS"]
+	promptsContent := sections["PROMPTS"]
 
 	// fallback: write everything if sections missing
 	if arch == "" && plan == "" {
@@ -99,10 +99,10 @@ MoSCoW Prioritization:
 	if err := a.ws.WriteFile(artifacts.ImplementationPlanFile, []byte(plan+"\n")); err != nil {
 		return bus.Message{}, err
 	}
-	if prompts == "" {
-		prompts = "(no prompts section generated — approve to continue)"
+	if promptsContent == "" {
+		promptsContent = "(no prompts section generated — approve to continue)"
 	}
-	if err := a.ws.WriteFile(artifacts.PromptsFile, []byte(prompts+"\n")); err != nil {
+	if err := a.ws.WriteFile(artifacts.PromptsFile, []byte(promptsContent+"\n")); err != nil {
 		return bus.Message{}, err
 	}
 
@@ -306,20 +306,41 @@ func parseIndexAndName(rest string) (int, string) {
 }
 
 // extractSectionName tries to extract a known section key from a delimiter line.
+// Tolerates LLM formatting variations: extra text after the key ("PROMPTS (Stage-by-Stage)"),
+// markdown decorators (===, ###, **, etc.), and mixed-case headers.
 func extractSectionName(line string, keySet map[string]bool) string {
 	trim := strings.TrimSpace(line)
 	if trim == "" {
 		return ""
 	}
 
+	// Must look like a header — require some kind of decorator or standalone keyword.
+	hasDecorator := strings.HasPrefix(trim, "=") || strings.HasPrefix(trim, "#") ||
+		strings.HasPrefix(trim, "*") || strings.HasPrefix(trim, "_")
+
 	// Strip common decorators: ===, ###, ##, **, *
-	cleaned := trim
-	cleaned = strings.Trim(cleaned, "=#*_ \t")
+	cleaned := strings.Trim(trim, "=#*_ \t")
 	cleaned = strings.TrimSpace(cleaned)
 	candidate := strings.ToUpper(cleaned)
 
+	// Exact match.
 	if keySet[candidate] {
 		return candidate
+	}
+
+	// Only try prefix matching on decorator lines to avoid false positives on prose.
+	if !hasDecorator {
+		return ""
+	}
+
+	// Prefix match: "PROMPTS (STAGE-BY-STAGE)" → PROMPTS, "MOSCOW PRIORITIZATION" → MOSCOW.
+	for key := range keySet {
+		if strings.HasPrefix(candidate, key) {
+			tail := candidate[len(key):]
+			if tail == "" || tail[0] == ' ' || tail[0] == '(' || tail[0] == '-' || tail[0] == ':' {
+				return key
+			}
+		}
 	}
 	return ""
 }

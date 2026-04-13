@@ -16,6 +16,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/cpulimit"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
@@ -94,6 +95,8 @@ func runCmd(args []string) {
 	if err != nil {
 		fatal(fmt.Errorf("load config: %w", err))
 	}
+
+	cpulimit.Apply(cfg.Project.ReservedCores)
 
 	ws, err := artifacts.EnsureWorkspace(root)
 	if err != nil {
@@ -313,8 +316,12 @@ func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root str
 	agents := make(map[bus.AgentRole]agent.Agent)
 
 	pmCfg := cfg.Agents["pm"]
-	agents[bus.RolePM] = agent.NewPMAgent(b, makeRunner("pm"), ws,
+	pmAgent := agent.NewPMAgent(b, makeRunner("pm"), ws,
 		pmCfg.Skills, pmCfg.Model)
+	if fixerCfg, ok := cfg.Agents["pm_fixer"]; ok && fixerCfg.Runner != "" {
+		pmAgent.SetFixerRunner(makeRunner("pm_fixer"), fixerCfg.Model)
+	}
+	agents[bus.RolePM] = pmAgent
 
 	plannerCfg := cfg.Agents["planner"]
 	agents[bus.RolePlanner] = agent.NewPlannerAgent(b, makeRunner("planner"), ws,

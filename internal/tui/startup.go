@@ -127,7 +127,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if projectCfg.Agents != nil {
 					projectOverrides = projectCfg.Agents
 				}
-				setup := NewSetupModelWithOverrides(currentRunner, currentModel, m.cfg.PromptLanguage, projectOverrides)
+				setup := NewSetupModelWithOverrides(currentRunner, currentModel, m.cfg.PromptLanguage, m.cfg.Project.Language, projectOverrides)
 				setup.root = m.root
 				setup.width, setup.height = m.width, m.height
 				setup.syncViewport()
@@ -207,6 +207,9 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					projectCfg.Agents = projectAgents
 				} else {
 					projectCfg.Agents = nil
+				}
+				if msg.progLanguage != "" {
+					projectCfg.Project.Language = msg.progLanguage
 				}
 				_ = config.Save(m.root, projectCfg)
 

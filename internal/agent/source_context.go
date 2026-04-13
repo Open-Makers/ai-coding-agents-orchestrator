@@ -42,6 +42,10 @@ func buildCompactSourceContext(root string, files []string, maxTokens int) strin
 		if err != nil || len(content) == 0 {
 			continue
 		}
+		// Skip files with binary content to avoid corrupting LLM context.
+		if isBinaryContent(content) {
+			continue
+		}
 
 		fileContent := string(content)
 		if len(fileContent) > maxReviewFileSize {

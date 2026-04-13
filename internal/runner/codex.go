@@ -116,18 +116,20 @@ func (r CodexRunner) run(ctx context.Context, prompt, systemPrompt, model string
 		bin = "codex"
 	}
 
+	// Merge system prompt and user prompt into one block for stdin piping.
+	fullPrompt := prompt
+	if systemPrompt != "" {
+		fullPrompt = systemPrompt + "\n\n" + prompt
+	}
+
 	args := []string{"exec", "--full-auto"}
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	if systemPrompt != "" {
-		args = append(args, "--", systemPrompt+"\n\n"+prompt)
-	} else {
-		args = append(args, "--", prompt)
-	}
+	// Prompt is piped via stdin to avoid macOS ARG_MAX limits on large prompts.
 
 	cmd := executil.CommandContext(ctx, bin, args...)
-	cmd.Env = os.Environ()
+	cmd.Stdin = strings.NewReader(fullPrompt)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr

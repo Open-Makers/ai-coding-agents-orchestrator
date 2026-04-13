@@ -23,14 +23,15 @@ const maxSourceFiles = 20
 
 // ProjectContext is a snapshot of the repository state passed to every agent.
 type ProjectContext struct {
-	Files         []string          // git ls-files
-	RecentCommits []string          // git log --oneline -20
-	UnstagedDiff  string            // git diff HEAD
-	AlwaysInclude map[string]string // filename → content
-	SourceFiles   map[string]string // key source files → content (for brownfield)
-	IsBrownfield  bool              // true if project has existing source code
-	ProjectType   string            // detected project type (go, node, rust, etc.)
-	TreeStructure string            // directory tree summary
+	Files               []string          // git ls-files
+	RecentCommits       []string          // git log --oneline -20
+	UnstagedDiff        string            // git diff HEAD
+	AlwaysInclude       map[string]string // filename → content
+	SourceFiles         map[string]string // key source files → content (for brownfield)
+	IsBrownfield        bool              // true if project has existing source code
+	ProjectType         string            // detected project type (go, node, rust, etc.)
+	TreeStructure       string            // directory tree summary
+	ProgrammingLanguage string            // explicit language setting from project config
 }
 
 // Collect gathers repository context from root using git commands.
@@ -76,6 +77,7 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	pc.ProjectType = detectProjectType(rootAbs)
 	pc.IsBrownfield = detectBrownfield(files, pc.ProjectType)
 	pc.TreeStructure = buildTreeStructure(files)
+	pc.ProgrammingLanguage = cfg.Project.Language
 
 	if pc.IsBrownfield {
 		pc.SourceFiles = collectSourceFiles(rootAbs, files)
@@ -119,6 +121,13 @@ func (p ProjectContext) SystemPromptFragment(profile ...ContextProfile) string {
 		sb.WriteString("- Preserve existing APIs, interfaces, and patterns unless explicitly asked to change them\n")
 		sb.WriteString("- Reuse existing packages, types, and functions\n")
 		sb.WriteString("- Do NOT create duplicate directories or files that mirror existing ones\n\n")
+	}
+
+	if p.ProgrammingLanguage != "" {
+		_, _ = fmt.Fprintf(&sb, "### ⚡ Programming Language: %s\n", strings.ToUpper(p.ProgrammingLanguage))
+		sb.WriteString("ALL generated code MUST be written in " + p.ProgrammingLanguage + ".\n")
+		sb.WriteString("Use " + p.ProgrammingLanguage + " idioms, conventions, and ecosystem tools.\n")
+		sb.WriteString("Do NOT generate code in any other language unless explicitly required (e.g. Makefile, Dockerfile).\n\n")
 	}
 
 	if p.ProjectType != "" {

@@ -26,10 +26,11 @@ type AgentPanelModel struct {
 	vp       viewport.Model // scrollable viewport for output
 	pinToEnd bool           // auto-scroll to bottom on new content
 
-	spinner spinner.Model
-	width   int
-	height  int
-	log     *slog.Logger
+	spinner   spinner.Model
+	highlight *highlighter // syntax highlighter for code blocks
+	width     int
+	height    int
+	log       *slog.Logger
 }
 
 func NewAgentPanel(role bus.AgentRole) AgentPanelModel {
@@ -78,7 +79,7 @@ func (m AgentPanelModel) Update(msg tea.Msg) (AgentPanelModel, tea.Cmd) {
 			m.addLine(msg.Text)
 			m.syncViewport()
 		}
-		if m.state == AgentRunning {
+		if m.state == AgentRunning || m.state == AgentFixing {
 			cmds = append(cmds, m.spinner.Tick)
 		}
 		return m, tea.Batch(cmds...)
@@ -107,7 +108,7 @@ func (m AgentPanelModel) Update(msg tea.Msg) (AgentPanelModel, tea.Cmd) {
 		return m, nil
 
 	case spinner.TickMsg:
-		if m.state != AgentRunning {
+		if m.state != AgentRunning && m.state != AgentFixing {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -189,6 +190,8 @@ func (m AgentPanelModel) renderHeader(_ int) string {
 		statusIcon = styleWaiting.Render("○ WAITING")
 	case AgentRunning:
 		statusIcon = m.spinner.View() + styleRunning.Render(" RUNNING")
+	case AgentFixing:
+		statusIcon = m.spinner.View() + styleFixing.Render(" FIXING")
 	case AgentDone:
 		statusIcon = styleDone.Render("✓ DONE")
 	case AgentError:
@@ -218,13 +221,22 @@ func (m *AgentPanelModel) syncViewport() {
 	if m.currentLine != "" {
 		src = append(append([]string{}, m.lines...), m.currentLine)
 	}
+	// Apply syntax highlighting to code blocks.
+	if m.highlight != nil {
+		src = m.highlight.highlightLines(src)
+	}
 	m.vp.SetContent(strings.Join(src, "\n"))
 	if m.pinToEnd {
 		m.vp.GotoBottom()
 	}
 }
 
-// innerLines is no longer used — viewport handles rendering.
+// SetLanguage configures syntax highlighting for the given programming language.
+func (m *AgentPanelModel) SetLanguage(lang string) {
+	if lang != "" {
+		m.highlight = newHighlighter(lang)
+	}
+}
 
 // SetSize updates panel dimensions.
 func (m *AgentPanelModel) SetSize(w, h int) {

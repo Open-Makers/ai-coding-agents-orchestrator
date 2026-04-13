@@ -31,6 +31,7 @@ type AgentState string
 const (
 	AgentWaiting AgentState = "waiting"
 	AgentRunning AgentState = "running"
+	AgentFixing  AgentState = "fixing"
 	AgentDone    AgentState = "done"
 	AgentError   AgentState = "error"
 	AgentGate    AgentState = "gate"
