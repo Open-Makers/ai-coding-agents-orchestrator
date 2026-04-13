@@ -45,3 +45,18 @@ func Stat(rootDir, name string) (os.FileInfo, error) {
 
 	return r.Stat(name)
 }
+
+// WriteFile writes data to a file within rootDir using os.Root to prevent
+// directory traversal. The file is created or truncated with the given permissions.
+func WriteFile(rootDir, name string, data []byte, perm os.FileMode) error {
+	f, err := OpenFile(rootDir, name, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, writeErr := f.Write(data)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
+}

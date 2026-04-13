@@ -107,6 +107,11 @@ type claudeModelsListMsg struct {
 	err    error
 }
 
+// pingResultMsg carries the result of an async model reachability test.
+type pingResultMsg struct {
+	err error
+}
+
 // ── SetupModel ────────────────────────────────────────────────────────────────
 
 type SetupModel struct {
@@ -153,6 +158,11 @@ type SetupModel struct {
 	scrollX  int // horizontal scroll offset
 
 	promptStatus string // status message after prompt export
+
+	// Model validation state.
+	pingTesting bool          // true while ping is in progress
+	pingErr     error         // non-nil after a failed ping
+	pendingSave *setupDoneMsg // save payload waiting for ping result
 
 	width  int
 	height int
@@ -283,13 +293,26 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 		m.syncViewport()
 
 	case spinner.TickMsg:
-		if m.isLoadingModels() {
+		if m.isLoadingModels() || m.pingTesting {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			cmds = append(cmds, cmd)
 		}
 		if m.ready {
 			m.viewport.SetContent(m.renderContent())
+		}
+
+	case pingResultMsg:
+		m.pingTesting = false
+		if msg.err != nil {
+			m.pingErr = msg.err
+			if m.ready {
+				m.viewport.SetContent(m.renderContent())
+			}
+		} else if m.pendingSave != nil {
+			saved := *m.pendingSave
+			m.pendingSave = nil
+			return m, func() tea.Msg { return saved }
 		}
 
 	case modelsListMsg:
@@ -386,7 +409,7 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 func (m SetupModel) handleKey(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+s":
-		return m, m.saveDone()
+		return m.startValidation()
 	case "esc":
 		if m.agentEditing {
 			if m.agentEditStep == 1 {
@@ -451,6 +474,7 @@ func (m SetupModel) handleProviderKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	}
 	if m.provider != prev {
 		m.modelIdx = 0
+		m.pingErr = nil
 	}
 	return m, nil
 }
@@ -462,6 +486,7 @@ func (m SetupModel) handleModelKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	case "up", "k":
 		if m.modelIdx > 0 {
 			m.modelIdx--
+			m.pingErr = nil
 		} else {
 			m.section = sectionProvider
 			m.ensureSectionVisible()
@@ -469,6 +494,7 @@ func (m SetupModel) handleModelKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	case "down", "j":
 		if m.modelIdx < len(models)-1 {
 			m.modelIdx++
+			m.pingErr = nil
 		}
 	case "tab":
 		m.section = sectionLanguage
@@ -477,7 +503,7 @@ func (m SetupModel) handleModelKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		m.section = sectionProvider
 		m.ensureSectionVisible()
 	case "enter":
-		return m, m.saveDone()
+		return m.startValidation()
 	}
 	return m, nil
 }
@@ -515,7 +541,7 @@ func (m SetupModel) handleLanguageKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		}
 		m.ensureSectionVisible()
 	case "enter":
-		return m, m.saveDone()
+		return m.startValidation()
 	}
 	return m, nil
 }
@@ -543,7 +569,7 @@ func (m SetupModel) handleProgLangKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		m.languageIdx = len(m.languages) - 1
 		m.ensureSectionVisible()
 	case "enter":
-		return m, m.saveDone()
+		return m.startValidation()
 	}
 	return m, nil
 }
@@ -652,31 +678,15 @@ func (m SetupModel) handleAgentEditKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	return m, nil
 }
 
-func (m SetupModel) saveDone() tea.Cmd {
-	var provider, model string
-	models := m.activeModels()
-	switch m.provider {
-	case providerOpenCode:
-		provider = "opencode"
-		if m.modelIdx < len(models) {
-			model = models[m.modelIdx]
-		}
-	case providerClaude:
-		provider = "claude"
-		if m.modelIdx < len(models) {
-			model = models[m.modelIdx]
-		}
-	case providerOllama:
-		provider = "ollama"
-		if m.modelIdx < len(models) {
-			model = models[m.modelIdx]
-		}
-	case providerCodex:
-		provider = "codex"
-		if m.modelIdx < len(models) {
-			model = models[m.modelIdx]
-		}
+// startValidation initiates a ping test for the selected provider/model.
+// On success the pending save will be emitted automatically via pingResultMsg.
+func (m SetupModel) startValidation() (SetupModel, tea.Cmd) {
+	if m.pingTesting {
+		return m, nil
 	}
+
+	provider, model := m.selectedProviderModel()
+
 	overrides := make(map[string]agentSetupOverride)
 	for k, v := range m.agentOverrides {
 		overrides[k] = v
@@ -689,8 +699,36 @@ func (m SetupModel) saveDone() tea.Cmd {
 	if m.progLangIdx < len(m.progLanguages) {
 		progLang = m.progLanguages[m.progLangIdx]
 	}
+
+	pending := setupDoneMsg{
+		provider:       provider,
+		model:          model,
+		promptLanguage: promptLang,
+		progLanguage:   progLang,
+		agentOverrides: overrides,
+	}
+	m.pingTesting = true
+	m.pingErr = nil
+	m.pendingSave = &pending
+
+	return m, tea.Batch(m.spinner.Tick, pingModel(provider, model))
+}
+
+// selectedProviderModel returns the currently selected provider string and model name.
+func (m SetupModel) selectedProviderModel() (string, string) {
+	models := m.activeModels()
+	provider := providerToString(m.provider)
+	model := ""
+	if m.modelIdx < len(models) {
+		model = models[m.modelIdx]
+	}
+	return provider, model
+}
+
+// pingModel returns a tea.Cmd that tests provider/model reachability.
+func pingModel(provider, model string) tea.Cmd {
 	return func() tea.Msg {
-		return setupDoneMsg{provider: provider, model: model, promptLanguage: promptLang, progLanguage: progLang, agentOverrides: overrides}
+		return pingResultMsg{err: runner.Ping(provider, model)}
 	}
 }
 
@@ -875,6 +913,17 @@ func (m SetupModel) renderModelCard(contentWidth int, label, focusLabel, active,
 	case providerCodex:
 		modelLines = append(modelLines, dim.Render("  Codex CLI (OpenAI)"))
 		modelLines = append(modelLines, m.viewCodexModels(active, inactive, dim)...)
+	}
+
+	// Model validation status.
+	if m.pingTesting {
+		modelLines = append(modelLines, "")
+		modelLines = append(modelLines, dim.Render("  "+m.spinner.View()+" Testing connection…"))
+	} else if m.pingErr != nil {
+		warnStyle := lipgloss.NewStyle().Foreground(crt.warn).Bold(true)
+		modelLines = append(modelLines, "")
+		modelLines = append(modelLines, warnStyle.Render("  ✗ "+m.pingErr.Error()))
+		modelLines = append(modelLines, dim.Render("  Change selection or press Enter to retry"))
 	}
 
 	return lipgloss.NewStyle().

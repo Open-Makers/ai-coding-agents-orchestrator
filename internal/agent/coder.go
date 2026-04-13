@@ -567,15 +567,14 @@ func (a *CoderAgent) autoFixKnownBuildErrors(buildErr string, files []string) bo
 		if !strings.HasSuffix(rel, ".go") {
 			continue
 		}
-		target := filepath.Join(a.root, rel)
-		data, err := os.ReadFile(target)
+		data, err := safefile.ReadFile(a.root, rel)
 		if err != nil {
 			continue
 		}
 		original := string(data)
 		repaired := fixInvalidGoPackage(original)
 		if repaired != original {
-			if err := os.WriteFile(target, []byte(repaired), 0o600); err == nil {
+			if err := safefile.WriteFile(a.root, rel, []byte(repaired), 0o600); err == nil {
 				a.emitToken(fmt.Sprintf("auto-fixed invalid package declaration in %s\n", rel), false)
 				fixed = true
 			}
