@@ -754,11 +754,22 @@ func (m Model) renderPhaseBar() string {
 
 // renderCongratulations renders a centered congratulations banner with pipeline summary.
 func (m Model) renderCongratulations(height int) string {
+	successColor := lipgloss.Color("#73daca")
 	titleStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#73daca")).
+		Foreground(successColor).
 		Bold(true)
 	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
 	accentStyle := lipgloss.NewStyle().Foreground(crt.primary)
+	headerStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
+	passedStyle := lipgloss.NewStyle().Foreground(successColor)
+	skippedStyle := lipgloss.NewStyle().Foreground(crt.dim).Italic(true)
+	warnStyle := lipgloss.NewStyle().Foreground(crt.warn)
+	sectionStyle := lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+	bulletStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	labelStyle := lipgloss.NewStyle().Foreground(crt.dim)
+	valueStyle := lipgloss.NewStyle().Foreground(crt.bright)
+	totalStyle := lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+	separatorStyle := lipgloss.NewStyle().Foreground(crt.border)
 
 	var content strings.Builder
 	content.WriteString(titleStyle.Render("🎉  Congratulations!"))
@@ -773,8 +784,18 @@ func (m Model) renderCongratulations(height int) string {
 		summary := strings.TrimSpace(string(data))
 		if summary != "" {
 			content.WriteString("\n")
-			content.WriteString(dimStyle.Render(summary))
-			content.WriteString("\n")
+			for _, line := range strings.Split(summary, "\n") {
+				trimmed := strings.TrimSpace(line)
+				styled := m.styleSummaryLine(
+					line, trimmed,
+					headerStyle, separatorStyle, passedStyle,
+					skippedStyle, warnStyle, sectionStyle,
+					bulletStyle, labelStyle, valueStyle,
+					totalStyle, dimStyle,
+				)
+				content.WriteString(styled)
+				content.WriteString("\n")
+			}
 		}
 	}
 
@@ -787,11 +808,79 @@ func (m Model) renderCongratulations(height int) string {
 
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#73daca")).
+		BorderForeground(successColor).
 		Padding(1, 4).
 		Render(content.String())
 
 	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// styleSummaryLine applies context-aware styling to a single summary line.
+func (m Model) styleSummaryLine(
+	line, trimmed string,
+	headerStyle, separatorStyle, passedStyle,
+	skippedStyle, warnStyle, sectionStyle,
+	bulletStyle, labelStyle, valueStyle,
+	totalStyle, dimStyle lipgloss.Style,
+) string {
+	switch {
+	case strings.HasPrefix(trimmed, "════"):
+		return separatorStyle.Render(line)
+	case strings.HasPrefix(trimmed, "PIPELINE COMPLETE"):
+		return headerStyle.Render(line)
+	case strings.HasPrefix(trimmed, "✓"):
+		return passedStyle.Render(line)
+	case strings.HasPrefix(trimmed, "○"):
+		return skippedStyle.Render(line)
+	case strings.HasPrefix(trimmed, "?"):
+		return warnStyle.Render(line)
+	case strings.HasPrefix(trimmed, "📋"):
+		return sectionStyle.Render(line)
+	case strings.HasSuffix(trimmed, ":") && !strings.HasPrefix(trimmed, "•"):
+		return sectionStyle.Render(line)
+	case strings.HasPrefix(trimmed, "•"):
+		return bulletStyle.Render(line)
+	case strings.HasPrefix(trimmed, "TOTAL") || strings.HasPrefix(trimmed, "WALL CLOCK"):
+		return m.styleDurationLine(line, totalStyle, totalStyle)
+	case m.isDurationLine(trimmed):
+		return m.styleDurationLine(line, labelStyle, valueStyle)
+	case trimmed == "":
+		return ""
+	default:
+		return dimStyle.Render(line)
+	}
+}
+
+// isDurationLine checks if a line looks like an agent duration entry (e.g. "    pm           27s").
+func (m Model) isDurationLine(trimmed string) bool {
+	fields := strings.Fields(trimmed)
+	if len(fields) < 2 {
+		return false
+	}
+	last := fields[len(fields)-1]
+	return strings.HasSuffix(last, "s") || strings.HasSuffix(last, "m") || strings.Contains(last, "m ")
+}
+
+// styleDurationLine styles a duration line with separate label and value colors.
+func (m Model) styleDurationLine(line string, lStyle, vStyle lipgloss.Style) string {
+	fields := strings.Fields(line)
+	if len(fields) < 2 {
+		return lStyle.Render(line)
+	}
+	// Find where the value starts — last field(s) that look like a duration.
+	label := fields[0]
+	value := strings.Join(fields[1:], " ")
+
+	// Preserve original indentation.
+	indent := ""
+	for _, ch := range line {
+		if ch == ' ' {
+			indent += " "
+		} else {
+			break
+		}
+	}
+	return indent + lStyle.Render(fmt.Sprintf("%-12s", label)) + " " + vStyle.Render(value)
 }
 
 // withSysmon composites the sysmon panel to the right of the given view
