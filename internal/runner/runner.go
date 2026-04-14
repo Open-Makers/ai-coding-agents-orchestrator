@@ -7,6 +7,15 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/skills"
 )
 
+// TokenUsage holds token counts for a single LLM completion.
+// Estimated is true when the count was derived from a heuristic (chars÷4)
+// rather than actual API data.
+type TokenUsage struct {
+	InputTokens  int
+	OutputTokens int
+	Estimated    bool
+}
+
 // ConvMessage is a single turn in a conversation.
 type ConvMessage struct {
 	Role    string // "user" or "assistant"
@@ -18,6 +27,7 @@ type Token struct {
 	Text  string
 	Done  bool
 	Error error
+	Usage *TokenUsage // non-nil only on the Done token
 }
 
 // CompletionRequest describes what to send to the LLM.

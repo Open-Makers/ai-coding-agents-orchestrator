@@ -72,3 +72,29 @@ var _ LLMRunner = &BudgetRunner{}
 
 // Compile-time check: MockRunner implements LLMRunner.
 var _ LLMRunner = &MockRunner{}
+
+func TestMockRunner_EmitsUsageOnDone(t *testing.T) {
+	m := &MockRunner{
+		Responses: []string{"hello"},
+		MockUsage: &TokenUsage{InputTokens: 10, OutputTokens: 5},
+	}
+
+	ch, err := m.Complete(context.Background(), CompletionRequest{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var done Token
+	for tok := range ch {
+		if tok.Done {
+			done = tok
+		}
+	}
+
+	if done.Usage == nil {
+		t.Fatal("expected Usage on Done token, got nil")
+	}
+	if done.Usage.InputTokens != 10 || done.Usage.OutputTokens != 5 {
+		t.Errorf("unexpected usage: %+v", done.Usage)
+	}
+}

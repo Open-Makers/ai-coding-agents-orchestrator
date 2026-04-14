@@ -8,6 +8,7 @@ import (
 // MockRunner returns pre-programmed responses for testing.
 type MockRunner struct {
 	Responses []string
+	MockUsage *TokenUsage // if set, attached to the Done token of each response
 	idx       int
 }
 
@@ -21,7 +22,7 @@ func (m *MockRunner) Complete(_ context.Context, _ CompletionRequest) (<-chan To
 	ch := make(chan Token, 2)
 	go func() {
 		ch <- Token{Text: resp}
-		ch <- Token{Done: true}
+		ch <- Token{Done: true, Usage: m.MockUsage}
 		close(ch)
 	}()
 	return ch, nil
