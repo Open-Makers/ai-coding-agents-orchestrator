@@ -140,6 +140,7 @@ func (a *PlannerAgent) Revise(ctx context.Context, artifactFile, feedback string
 }
 
 // collectStream drains a token channel, emitting tokens to the bus and returning full text.
+// If the Done token carries Usage, a MsgUsage event is emitted automatically.
 func (a *BaseAgent) collectStream(ch <-chan runner.Token) (string, error) {
 	var sb strings.Builder
 	for tok := range ch {
@@ -147,6 +148,9 @@ func (a *BaseAgent) collectStream(ch <-chan runner.Token) (string, error) {
 			return sb.String(), tok.Error
 		}
 		if tok.Done {
+			if tok.Usage != nil {
+				a.emitUsage(*tok.Usage)
+			}
 			break
 		}
 		a.emitToken(tok.Text, false)
