@@ -93,3 +93,29 @@ func TestLogFile(t *testing.T) {
 		t.Error("log file is empty")
 	}
 }
+
+func TestBus_UsageMessageType(t *testing.T) {
+	b := New()
+	ch := b.Subscribe()
+
+	b.Publish(NewMessage(RolePlanner, "", MsgUsage, AgentUsage{
+		InputTokens:  100,
+		OutputTokens: 50,
+	}))
+
+	select {
+	case msg := <-ch:
+		if msg.Type != MsgUsage {
+			t.Errorf("expected MsgUsage, got %q", msg.Type)
+		}
+		u, ok := msg.Payload.(AgentUsage)
+		if !ok {
+			t.Fatalf("expected AgentUsage payload, got %T", msg.Payload)
+		}
+		if u.InputTokens != 100 || u.OutputTokens != 50 {
+			t.Errorf("unexpected usage: %+v", u)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout")
+	}
+}

@@ -26,6 +26,7 @@ const (
 	MsgResponse  MessageType = "response"
 	MsgEvent     MessageType = "event"
 	MsgHumanGate MessageType = "human_gate"
+	MsgUsage     MessageType = "usage"
 )
 
 type Message struct {
@@ -52,4 +53,13 @@ func NewMessage(from, to AgentRole, typ MessageType, payload any) Message {
 type TokenPayload struct {
 	Text string `json:"text"`
 	Done bool   `json:"done"`
+}
+
+// AgentUsage is the payload for MsgUsage events.
+// It carries token counts for one agent's LLM completion(s).
+// Runner and Model are not stored here — the TUI derives them from agentConfigs.
+type AgentUsage struct {
+	InputTokens  int  `json:"input_tokens"`
+	OutputTokens int  `json:"output_tokens"`
+	Estimated    bool `json:"estimated"` // true = heuristic count
 }
