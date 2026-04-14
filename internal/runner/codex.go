@@ -8,8 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	tiktoken "github.com/pkoukk/tiktoken-go"
+
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
 // CodexRunner executes the OpenAI Codex CLI as an LLM backend.
@@ -101,10 +104,13 @@ func (r CodexRunner) Complete(ctx context.Context, req CompletionRequest) (<-cha
 		return nil, err
 	}
 
+	fullInput := req.SystemPrompt + "\n\n" + userContent.String()
+	usage := countCodexTokens(model, fullInput, string(output))
+
 	ch := make(chan Token, 2)
 	go func() {
 		ch <- Token{Text: string(output)}
-		ch <- Token{Done: true}
+		ch <- Token{Done: true, Usage: &usage}
 		close(ch)
 	}()
 	return ch, nil
@@ -142,4 +148,39 @@ func (r CodexRunner) run(ctx context.Context, prompt, systemPrompt, model string
 		return nil, fmt.Errorf("codex: %w: %s", err, errMsg)
 	}
 	return out.Bytes(), nil
+}
+
+// countCodexTokens uses tiktoken to count input and output tokens exactly.
+// Falls back to char-based estimation if the model encoding is unknown.
+func countCodexTokens(model, inputText, outputText string) TokenUsage {
+	enc, err := tiktoken.EncodingForModel(model)
+	if err != nil {
+		// Unknown model — fall back to cl100k_base (GPT-4 encoding).
+		enc, err = tiktoken.GetEncoding("cl100k_base")
+		if err != nil {
+			// tiktoken completely unavailable — use char heuristic.
+			return TokenUsage{
+				InputTokens:  tokenutil.EstimateTokens(inputText),
+				OutputTokens: tokenutil.EstimateTokens(outputText),
+				Estimated:    true,
+			}
+		}
+		// cl100k_base fallback — counts are approximate for this model.
+		inputToks := enc.Encode(inputText, nil, nil)
+		outputToks := enc.Encode(outputText, nil, nil)
+		return TokenUsage{
+			InputTokens:  len(inputToks),
+			OutputTokens: len(outputToks),
+			Estimated:    true,
+		}
+	}
+
+	inputToks := enc.Encode(inputText, nil, nil)
+	outputToks := enc.Encode(outputText, nil, nil)
+
+	return TokenUsage{
+		InputTokens:  len(inputToks),
+		OutputTokens: len(outputToks),
+		Estimated:    false,
+	}
 }
