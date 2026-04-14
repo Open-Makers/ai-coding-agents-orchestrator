@@ -82,10 +82,11 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 		return bus.Message{}, fmt.Errorf("coder: runner: %w", err)
 	}
 
-	written, fullOutput, err := a.streamAndWriteFiles(ch)
+	written, fullOutput, usage, err := a.streamAndWriteFiles(ch)
 	if err != nil {
 		return bus.Message{}, fmt.Errorf("coder: stream: %w", err)
 	}
+	totalUsage := usage
 
 	// Always save raw output for debugging, even if no files were extracted.
 	if err := a.ws.WriteFile(artifacts.RawCoderOutputFile, []byte(fullOutput+"\n")); err != nil {
@@ -110,6 +111,7 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 	// subsequent steps (tester, go mod tidy) can find it.
 	a.ensureGoMod()
 
+	a.emitUsage(totalUsage)
 	a.Bus.Publish(bus.NewMessage(bus.RoleCoder, "", bus.MsgEvent, "EventFilesWritten"))
 
 	return bus.NewMessage(bus.RoleCoder, "", bus.MsgResponse, CoderResult{Files: written}), nil
@@ -117,12 +119,14 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 
 // streamAndWriteFiles consumes the LLM token stream, detects code fence blocks,
 // and writes each file to disk immediately when a fence closes.
-func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, string, error) {
+// It also captures and returns the TokenUsage from the Done token.
+func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, string, runner.TokenUsage, error) {
 	var fullOutput strings.Builder
 	var lineBuf strings.Builder
 	var recentLines []string // sliding window for path detection
 	var contentLines []string
 	var written []string
+	var capturedUsage runner.TokenUsage
 
 	inFence := false
 	currentPath := ""
@@ -187,9 +191,12 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 
 	for tok := range ch {
 		if tok.Error != nil {
-			return written, fullOutput.String(), tok.Error
+			return written, fullOutput.String(), capturedUsage, tok.Error
 		}
 		if tok.Done {
+			if tok.Usage != nil {
+				capturedUsage = *tok.Usage
+			}
 			break
 		}
 		a.emitToken(tok.Text, false)
@@ -215,7 +222,7 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 	}
 
 	a.emitToken("", true)
-	return written, fullOutput.String(), nil
+	return written, fullOutput.String(), capturedUsage, nil
 }
 
 // writeOneFile writes a single file to disk under the project root.
@@ -410,6 +417,7 @@ const maxRepeatedBuildErrors = 5
 // (capped at hardMaxBuildAttempts). If the same error repeats
 // maxRepeatedBuildErrors times, it stops early to avoid infinite loops.
 // Returns the updated file list after all fixes.
+// Token usage across all fix iterations is accumulated and emitted at the end.
 func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string, error) {
 	// Ensure go.mod exists for Go projects.
 	a.ensureGoMod()
@@ -427,6 +435,7 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 
 	prevBuildErr := ""
 	repeatCount := 0
+	var totalUsage runner.TokenUsage
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if unlimited {
@@ -439,6 +448,7 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 		if buildErr == "" {
 			a.emitToken("build: OK\n", false)
 			a.emit(bus.MsgEvent, "done")
+			a.emitUsage(totalUsage)
 			return files, nil
 		}
 
@@ -462,7 +472,8 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 				prevBuildErr = ""
 				continue
 			}
-			return files, fmt.Errorf("build fix stuck: same error repeated %d times", repeatCount)
+			a.emitUsage(totalUsage)
+				return files, fmt.Errorf("build fix stuck: same error repeated %d times", repeatCount)
 		}
 
 		if attempt == maxAttempts {
@@ -492,14 +503,17 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 			return files, fmt.Errorf("build fix runner: %w", err)
 		}
 
-		fixWritten, _, err := a.streamAndWriteFiles(ch)
+		fixWritten, _, fixUsage, err := a.streamAndWriteFiles(ch)
 		if err != nil {
 			return files, fmt.Errorf("build fix stream: %w", err)
 		}
+		totalUsage.InputTokens += fixUsage.InputTokens
+		totalUsage.OutputTokens += fixUsage.OutputTokens
 
 		files = mergeFiles(files, fixWritten)
 	}
 
+	a.emitUsage(totalUsage)
 	return files, fmt.Errorf("project still does not compile after %d attempts", maxAttempts)
 }
 
