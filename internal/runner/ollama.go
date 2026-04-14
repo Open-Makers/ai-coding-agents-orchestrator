@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -89,12 +88,25 @@ func (r *OllamaRunner) buildMessages(req CompletionRequest) []ollamaChatMessage 
 
 func (r *OllamaRunner) streamResponse(body io.ReadCloser, ch chan<- Token) {
 	defer func() { _ = body.Close() }()
-	defer close(ch)
+	data, err := io.ReadAll(body)
+	if err != nil {
+		ch <- Token{Error: fmt.Errorf("ollama: read stream: %w", err)}
+		ch <- Token{Done: true}
+		close(ch)
+		return
+	}
+	r.streamResponseFromBytes(data, ch)
+}
 
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
+func (r *OllamaRunner) streamResponseFromBytes(data []byte, ch chan<- Token) {
+	defer close(ch)
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
 		var chunk ollamaChatResponse
-		if err := json.Unmarshal(scanner.Bytes(), &chunk); err != nil {
+		if err := json.Unmarshal(line, &chunk); err != nil {
 			ch <- Token{Error: fmt.Errorf("ollama: decode stream chunk: %w", err)}
 			ch <- Token{Done: true}
 			return
@@ -103,12 +115,16 @@ func (r *OllamaRunner) streamResponse(body io.ReadCloser, ch chan<- Token) {
 			ch <- Token{Text: chunk.Message.Content}
 		}
 		if chunk.Done {
-			ch <- Token{Done: true}
+			ch <- Token{
+				Done: true,
+				Usage: &TokenUsage{
+					InputTokens:  chunk.PromptEvalCount,
+					OutputTokens: chunk.EvalCount,
+					Estimated:    false,
+				},
+			}
 			return
 		}
-	}
-	if err := scanner.Err(); err != nil {
-		ch <- Token{Error: fmt.Errorf("ollama: read stream: %w", err)}
 	}
 	ch <- Token{Done: true}
 }
@@ -134,8 +150,10 @@ type ollamaChatMessage struct {
 
 // ollamaChatResponse is a single streamed line from /api/chat.
 type ollamaChatResponse struct {
-	Message ollamaChatMessage `json:"message"`
-	Done    bool              `json:"done"`
+	Message         ollamaChatMessage `json:"message"`
+	Done            bool              `json:"done"`
+	PromptEvalCount int               `json:"prompt_eval_count"` // input tokens
+	EvalCount       int               `json:"eval_count"`        // output tokens
 }
 
 // OllamaListInstalled returns model names available in the local Ollama instance.
