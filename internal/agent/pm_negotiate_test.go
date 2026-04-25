@@ -183,3 +183,43 @@ Modify internal/cli/cli.go to refresh the board in place.
 		t.Errorf("expected user content to include 'Brownfield: true', got:\n%s", userContent)
 	}
 }
+
+func TestNegotiateTask_WaitsForUserInputWhenInputEmpty(t *testing.T) {
+	b := bus.New()
+	defer b.Close()
+
+	mock := &runner.MockRunner{Responses: []string{
+		`===TASKSPEC===
+TITLE: Tic-tac-toe in Go
+SCOPE: greenfield
+DESCRIPTION:
+Build a console tic-tac-toe game in Go using bubbletea TUI.
+ACCEPTANCE_CRITERIA:
+- Single-player vs CPU
+===END===`,
+	}}
+
+	pm := NewPMAgent(b, mock, artifacts.Workspace{}, nil, "")
+
+	humanCh := make(chan string, 1)
+	humanCh <- "napisz w go konsolową grę w kółko i krzyżyk z bubbletea"
+
+	spec, err := pm.NegotiateTask(context.Background(), "", "## Repository Context\n", humanCh)
+	if err != nil {
+		t.Fatalf("NegotiateTask: %v", err)
+	}
+
+	if len(mock.Requests) != 1 {
+		t.Fatalf("expected exactly 1 LLM call, got %d (PM should wait for user input, not invoke model with empty prompt)", len(mock.Requests))
+	}
+	firstUserMsg := mock.Requests[0].Messages[0].Content
+	if firstUserMsg == "" {
+		t.Fatal("PM was called with empty user message — must wait for first humanCh reply")
+	}
+	if firstUserMsg != "napisz w go konsolową grę w kółko i krzyżyk z bubbletea" {
+		t.Errorf("expected first user message to be the human reply, got %q", firstUserMsg)
+	}
+	if spec.Title == "" {
+		t.Fatal("expected spec to be parsed")
+	}
+}

@@ -523,8 +523,23 @@ type ExecutionPlan struct {
 func (a *PMAgent) NegotiateTask(ctx context.Context, input, projectCtx string, humanCh <-chan string) (TaskSpec, error) {
 	systemPrompt := fmt.Sprintf(prompts.MustLoad("pm-negotiate"), projectCtx)
 
-	messages := []runner.ConvMessage{
-		{Role: "user", Content: input},
+	messages := []runner.ConvMessage{}
+	if strings.TrimSpace(input) != "" {
+		messages = append(messages, runner.ConvMessage{Role: "user", Content: input})
+	} else {
+		// No initial task description provided (e.g. "New Task" from the
+		// menu). Wait for the user to actually describe what they want
+		// before invoking the model — otherwise PM would invent a task
+		// from project context alone.
+		select {
+		case reply, ok := <-humanCh:
+			if !ok {
+				return TaskSpec{}, fmt.Errorf("pm negotiate: human channel closed before any input")
+			}
+			messages = append(messages, runner.ConvMessage{Role: "user", Content: reply})
+		case <-ctx.Done():
+			return TaskSpec{}, ctx.Err()
+		}
 	}
 
 	for {
