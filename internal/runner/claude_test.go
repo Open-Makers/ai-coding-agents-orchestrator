@@ -39,3 +39,53 @@ func TestClaudeParseJSONResponse_FallbackOnMalformed(t *testing.T) {
 		t.Error("Estimated should be true for fallback")
 	}
 }
+
+func TestComputeDelta(t *testing.T) {
+	cases := []struct {
+		name    string
+		already string
+		next    string
+		want    string
+	}{
+		{"empty next", "abc", "", ""},
+		{"cumulative growth", "Hello", "Hello world", " world"},
+		{"identical", "Hello", "Hello", ""},
+		{"non-prefix treated as full chunk", "Hello", " world", " world"},
+		{"first chunk", "", "Hi", "Hi"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := computeDelta(tc.already, tc.next); got != tc.want {
+				t.Errorf("computeDelta(%q, %q) = %q, want %q", tc.already, tc.next, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseClaudeStreamEvent_AssistantText(t *testing.T) {
+	line := []byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"Hello "},{"type":"text","text":"world"}]}}`)
+	evt, err := parseClaudeStreamEvent(line)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if evt.Type != "assistant" {
+		t.Errorf("type: want %q, got %q", "assistant", evt.Type)
+	}
+	if got := assistantText(evt.Message.Content); got != "Hello world" {
+		t.Errorf("assistantText: want %q, got %q", "Hello world", got)
+	}
+}
+
+func TestParseClaudeStreamEvent_Result(t *testing.T) {
+	line := []byte(`{"type":"result","subtype":"success","result":"final","usage":{"input_tokens":10,"output_tokens":3}}`)
+	evt, err := parseClaudeStreamEvent(line)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if evt.Result != "final" {
+		t.Errorf("result: want %q, got %q", "final", evt.Result)
+	}
+	if evt.Usage.InputTokens != 10 || evt.Usage.OutputTokens != 3 {
+		t.Errorf("usage: want 10/3, got %d/%d", evt.Usage.InputTokens, evt.Usage.OutputTokens)
+	}
+}
