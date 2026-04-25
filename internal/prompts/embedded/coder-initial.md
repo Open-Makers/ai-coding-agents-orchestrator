@@ -34,6 +34,11 @@ RULES:
 - Implement production code so the existing tests pass
 - Do NOT rewrite generated tests unless the plan clearly requires changing the behaviour
 
+VERSIONING:
+- Use the latest stable version of the target language and toolchain.
+- Use the latest stable version of every external dependency / library you import.
+- For brownfield projects, follow the versions already pinned in the project's manifest (go.mod, package.json, requirements.txt, etc.) — do not silently downgrade or upgrade them.
+
 STAGED EXECUTION:
 - You may receive one stage from a larger plan — implement only that stage
 - Do not rewrite existing files from prior stages unless modification is needed

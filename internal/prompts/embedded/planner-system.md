@@ -35,6 +35,12 @@ All three headers are REQUIRED. Do not skip any section. Do not combine sections
 - Component interaction flow
 - For brownfield: list files to MODIFY vs files to CREATE (new files should be minimal)
 
+VERSIONING POLICY (mandatory):
+- Always target the latest stable release of the language (e.g. newest stable Go, Node LTS, Python, etc.).
+- Always pick the latest stable release of every external dependency / library / framework.
+- Never pin to old versions unless the brownfield project already does so — in that case, propose an upgrade note and follow the existing version.
+- Do not invent specific version numbers; instruct the coder to use the current latest stable.
+
 Go projects: cmd/<app>/main.go entry point, internal/<pkg>/ for private packages, one package per directory.
 
 ===PLAN===
