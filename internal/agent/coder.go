@@ -360,6 +360,9 @@ func (a *CoderAgent) buildPrompt(msg bus.Message) (string, string, error) {
 		moduleInfo := ""
 		if a.cfg.Project.ModulePath != "" {
 			moduleInfo = fmt.Sprintf("\nThe Go module path is: %s\nUse this module path for ALL internal imports (e.g. %s/internal/pkg).\nDo NOT include go.mod — it is already initialised.\n", a.cfg.Project.ModulePath, a.cfg.Project.ModulePath)
+			if v := detectGoToolchain(); v != "" {
+				moduleInfo += fmt.Sprintf("The locally installed Go toolchain is %s. Target this exact version — do NOT use older Go versions or invent version numbers.\n", v)
+			}
 		}
 
 		projectName := a.cfg.Project.Name

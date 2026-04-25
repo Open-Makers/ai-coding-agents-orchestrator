@@ -35,8 +35,9 @@ RULES:
 - Do NOT rewrite generated tests unless the plan clearly requires changing the behaviour
 
 VERSIONING:
-- Use the latest stable version of the target language and toolchain.
-- Use the latest stable version of every external dependency / library you import.
+- Do NOT guess language or toolchain versions. If a specific version (e.g. Go toolchain) is provided in the module info above, use exactly that version.
+- If no version is provided, omit the version directive entirely instead of inventing one.
+- Use the latest stable version of every external dependency / library you import (let the package manager resolve "latest" — do not hardcode older versions).
 - For brownfield projects, follow the versions already pinned in the project's manifest (go.mod, package.json, requirements.txt, etc.) — do not silently downgrade or upgrade them.
 
 STAGED EXECUTION:
