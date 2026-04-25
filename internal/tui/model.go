@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -527,7 +528,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pipelineFailed = true
 			m.hidePipelineErr = false
 			m.log.Error("pipeline finished with error", slog.String("error", m.pipelineErr))
-			m.statusbar = m.statusbar.WithState("✗ error — esc/m/ctrl+x menu  q quit")
+			if errors.Is(msg.Err, runner.ErrRateLimited) {
+				m.statusbar = m.statusbar.WithState("⛔ rate limit / quota hit — esc/m/ctrl+x menu  q quit")
+			} else {
+				m.statusbar = m.statusbar.WithState("✗ error — esc/m/ctrl+x menu  q quit")
+			}
 		} else {
 			m.pipelineFailed = false
 			m.hidePipelineErr = false

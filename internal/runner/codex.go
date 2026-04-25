@@ -145,6 +145,9 @@ func (r CodexRunner) run(ctx context.Context, prompt, systemPrompt, model string
 		if errMsg == "" {
 			errMsg = strings.TrimSpace(out.String())
 		}
+		if rl := ClassifyRateLimit("codex", errMsg, out.String()); rl != nil {
+			return nil, rl
+		}
 		return nil, fmt.Errorf("codex: %w: %s", err, errMsg)
 	}
 	return out.Bytes(), nil

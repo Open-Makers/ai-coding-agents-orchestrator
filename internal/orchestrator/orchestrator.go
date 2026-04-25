@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -16,6 +17,7 @@ import (
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
@@ -36,6 +38,7 @@ const (
 	PipelineQA          PipelineState = "qa"
 	PipelineDone        PipelineState = "done"
 	PipelineGate        PipelineState = "human_gate"
+	PipelineRateLimited PipelineState = "rate_limited"
 )
 
 // Pipeline is the event-driven orchestrator for the legacy greenfield workflow.
@@ -151,6 +154,15 @@ func (p *Pipeline) AgentDurations() map[bus.AgentRole]time.Duration {
 // Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate).
 // If requirementsPath is empty, the PM gathers requirements through a chat conversation.
 func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
+	err := p.run(ctx, requirementsPath)
+	if err != nil && errors.Is(err, runner.ErrRateLimited) && p.state != PipelineRateLimited {
+		p.setState(PipelineRateLimited)
+		p.event(fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err))
+	}
+	return err
+}
+
+func (p *Pipeline) run(ctx context.Context, requirementsPath string) error {
 	// Configure project-level prompt overrides before agents run.
 	promptsDir := filepath.Join(p.root, artifacts.DirName, appprompts.PromptsDirName)
 	appprompts.SetOverrideDir(promptsDir)
@@ -450,6 +462,11 @@ func (p *Pipeline) runAgent(ctx context.Context, role bus.AgentRole, payload any
 	p.agentDurations[role] += elapsed
 
 	if err != nil {
+		if errors.Is(err, runner.ErrRateLimited) {
+			p.setState(PipelineRateLimited)
+			p.b.Publish(bus.NewMessage(role, "", bus.MsgEvent,
+				fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err)))
+		}
 		p.logger().Error("agent failed",
 			slog.String("role", string(role)),
 			slog.String("error", err.Error()),

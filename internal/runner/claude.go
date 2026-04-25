@@ -151,7 +151,11 @@ func streamClaudeOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr *bytes.Buffe
 		if errMsg == "" {
 			errMsg = waitErr.Error()
 		}
-		ch <- Token{Error: fmt.Errorf("claude: %s", errMsg)}
+		if rl := ClassifyRateLimit("claude", errMsg); rl != nil {
+			ch <- Token{Error: rl}
+		} else {
+			ch <- Token{Error: fmt.Errorf("claude: %s", errMsg)}
+		}
 	}
 
 	if !gotUsage {

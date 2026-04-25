@@ -83,7 +83,14 @@ func (r OpenCodeRunner) runRaw(ctx context.Context, prompt, model string) ([]byt
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("opencode: %w: %s", err, strings.TrimSpace(stderr.String()))
+		stderrStr := strings.TrimSpace(stderr.String())
+		if rl := ClassifyRateLimit("opencode", stderrStr, out.String()); rl != nil {
+			return nil, rl
+		}
+		return nil, fmt.Errorf("opencode: %w: %s", err, stderrStr)
+	}
+	if rl := ClassifyRateLimit("opencode", out.String()); rl != nil {
+		return nil, rl
 	}
 	return out.Bytes(), nil
 }
