@@ -26,6 +26,7 @@ type ChatModel struct {
 	history      []runner.ConvMessage
 	lines        []chatLine
 	input        string
+	cursor       int // rune index in input
 	vp           viewport.Model
 	waiting      bool
 	ctx          context.Context
@@ -126,16 +127,31 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 			}
 			userMsg := m.input
 			m.input = ""
+			m.cursor = 0
 			m.history = append(m.history, runner.ConvMessage{Role: "user", Content: userMsg})
 			m.lines = append(m.lines, chatLine{role: "user", content: userMsg})
 			m.waiting = true
 			m.refreshViewport()
 			return m, chatSendCmd(m.llm, m.ctx, m.systemPrompt, m.history)
+		case "left":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "right":
+			if m.cursor < runeLen(m.input) {
+				m.cursor++
+			}
+		case "home", "ctrl+a":
+			m.cursor = 0
+		case "end", "ctrl+e":
+			m.cursor = runeLen(m.input)
 		case "backspace":
-			m.input = trimLastRune(m.input)
+			m.input, m.cursor = runeDeleteBefore(m.input, m.cursor)
+		case "delete":
+			m.input, m.cursor = runeDeleteAt(m.input, m.cursor)
 		default:
 			if len(msg.Runes) > 0 {
-				m.input += string(msg.Runes)
+				m.input, m.cursor = runeInsert(m.input, m.cursor, msg.Runes)
 			}
 		}
 
@@ -246,7 +262,7 @@ func (m ChatModel) View() string {
 	} else if m.waiting {
 		statusLine = dimStyle.Render("  waiting… (Esc cancel)")
 	} else {
-		statusLine = inputStyle.Render("› ") + m.input + "█"
+		statusLine = inputStyle.Render("› ") + renderInputWithCursor(m.input, m.cursor)
 	}
 
 	return strings.Join([]string{

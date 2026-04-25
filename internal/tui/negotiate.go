@@ -19,6 +19,7 @@ const negotiateAcceptNowMessage = "Tak, to się zgadza. Nie zadawaj więcej pyta
 type NegotiateModel struct {
 	lines   []chatLine
 	input   string
+	cursor  int // rune index in input
 	vp      viewport.Model
 	sendFn  SendHumanReplyFunc
 	waiting bool // true while waiting for PM response
@@ -59,6 +60,7 @@ func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 		case "ctrl+a":
 			userMsg := negotiateAcceptNowMessage
 			m.input = ""
+			m.cursor = 0
 			m.lines = append(m.lines, chatLine{role: "user", content: userMsg})
 			m.waiting = true
 			m.refreshViewport()
@@ -71,17 +73,32 @@ func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 			}
 			userMsg := m.input
 			m.input = ""
+			m.cursor = 0
 			m.lines = append(m.lines, chatLine{role: "user", content: userMsg})
 			m.waiting = true
 			m.refreshViewport()
 			if m.sendFn != nil {
 				m.sendFn(userMsg)
 			}
+		case "left":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "right":
+			if m.cursor < runeLen(m.input) {
+				m.cursor++
+			}
+		case "home":
+			m.cursor = 0
+		case "end", "ctrl+e":
+			m.cursor = runeLen(m.input)
 		case "backspace":
-			m.input = trimLastRune(m.input)
+			m.input, m.cursor = runeDeleteBefore(m.input, m.cursor)
+		case "delete":
+			m.input, m.cursor = runeDeleteAt(m.input, m.cursor)
 		default:
 			if len(msg.Runes) > 0 {
-				m.input += string(msg.Runes)
+				m.input, m.cursor = runeInsert(m.input, m.cursor, msg.Runes)
 			}
 		}
 	}
@@ -133,7 +150,7 @@ func (m NegotiateModel) View() string {
 	if m.waiting {
 		statusLine = dimStyle.Render("  PM is thinking…")
 	} else {
-		statusLine = inputStyle.Render("› ") + m.input + "█"
+		statusLine = inputStyle.Render("› ") + renderInputWithCursor(m.input, m.cursor)
 	}
 
 	return strings.Join([]string{
