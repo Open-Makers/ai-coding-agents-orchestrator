@@ -3,11 +3,15 @@ package tui
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/agent"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/shirou/gopsutil/v4/cpu"
@@ -16,16 +20,16 @@ import (
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
-	"github.com/shirou/gopsutil/v4/process"
 )
 
 const (
 	sysmonTickInterval = 2 * time.Second
 	sparklineLength    = 20
 	sysmonMinWidth     = 28
-	maxTopProcesses    = 5
 	brailleGraphRows   = 2
 	coreHistoryLength  = 40 // data points per core for dot history
+	projectTreeMaxRows = 512
+	fileActivityTTL    = 15 * time.Second
 )
 
 // sparkBlocks maps a 0–7 intensity level to a Unicode block character.
@@ -38,14 +42,6 @@ var brailleLeftBits = [4]rune{0x01, 0x02, 0x04, 0x40}
 var brailleRightBits = [4]rune{0x08, 0x10, 0x20, 0x80}
 
 const brailleBase = '\u2800'
-
-// topProcess holds a snapshot of one process for display.
-type topProcess struct {
-	pid  int32
-	name string
-	cpu  float64
-	mem  float32
-}
 
 // sysmonTickMsg carries a periodic snapshot of system metrics.
 type sysmonTickMsg struct {
@@ -67,39 +63,52 @@ type sysmonTickMsg struct {
 	goroutines  int
 	hostUptime  uint64
 	loadAvg     [3]float64
-	topProcs    []topProcess
+}
+
+type projectTreeEntry struct {
+	relPath string
+	name    string
+	depth   int
+	isDir   bool
+}
+
+type fileActivity struct {
+	role     bus.AgentRole
+	lastSeen time.Time
 }
 
 // SysmonModel displays a compact system monitor panel.
 type SysmonModel struct {
 	cpuHistory    []float64
-	coreHistories [][]float64 // per-core history for dot graphs
+	coreHistories [][]float64
 	netRecvHist   []float64
 	netSentHist   []float64
 
-	cpuPercent  float64
-	perCore     []float64
-	memPercent  float64
-	memUsed     uint64
-	memTotal    uint64
-	memAvail    uint64
-	memCached   uint64
-	swapPercent float64
-	swapUsed    uint64
-	swapTotal   uint64
-	diskPercent float64
-	diskUsed    uint64
-	diskTotal   uint64
-	goroutines  int
-	hostUptime  uint64
-	loadAvg     [3]float64
-	topProcs    []topProcess
-
-	recvRate    float64
-	sentRate    float64
-	prevNetRecv uint64
-	prevNetSent uint64
-	startTime   time.Time
+	cpuPercent       float64
+	perCore          []float64
+	memPercent       float64
+	memUsed          uint64
+	memTotal         uint64
+	memAvail         uint64
+	memCached        uint64
+	swapPercent      float64
+	swapUsed         uint64
+	swapTotal        uint64
+	diskPercent      float64
+	diskUsed         uint64
+	diskTotal        uint64
+	goroutines       int
+	hostUptime       uint64
+	loadAvg          [3]float64
+	recvRate         float64
+	sentRate         float64
+	prevNetRecv      uint64
+	prevNetSent      uint64
+	startTime        time.Time
+	projectRoot      string
+	projectTree      []projectTreeEntry
+	treeScrollOffset int
+	activeFiles      map[string]fileActivity
 
 	width  int
 	height int
@@ -107,12 +116,14 @@ type SysmonModel struct {
 
 // NewSysmon creates a new system monitor model.
 func NewSysmon() SysmonModel {
+	width := sysmonMinWidth
 	return SysmonModel{
-		cpuHistory:  make([]float64, sparklineLength),
-		netRecvHist: make([]float64, sparklineLength),
-		netSentHist: make([]float64, sparklineLength),
+		cpuHistory:  make([]float64, graphHistoryPoints(width)),
+		netRecvHist: make([]float64, graphHistoryPoints(width)),
+		netSentHist: make([]float64, graphHistoryPoints(width)),
 		startTime:   time.Now(),
-		width:       sysmonMinWidth,
+		activeFiles: make(map[string]fileActivity),
+		width:       width,
 		height:      20,
 	}
 }
@@ -181,9 +192,6 @@ func sysmonTick() tea.Cmd {
 			loadAvg = [3]float64{avg.Load1, avg.Load5, avg.Load15}
 		}
 
-		// Top processes by CPU.
-		procs := collectTopProcesses()
-
 		return sysmonTickMsg{
 			cpuPercent:  cpuPct,
 			perCore:     perCore,
@@ -203,45 +211,8 @@ func sysmonTick() tea.Cmd {
 			goroutines:  runtime.NumGoroutine(),
 			hostUptime:  uptime,
 			loadAvg:     loadAvg,
-			topProcs:    procs,
 		}
 	})
-}
-
-// collectTopProcesses returns the top N processes sorted by CPU usage.
-func collectTopProcesses() []topProcess {
-	procs, err := process.Processes()
-	if err != nil || len(procs) == 0 {
-		return nil
-	}
-
-	var results []topProcess
-	for _, p := range procs {
-		cpuPct, err := p.CPUPercent()
-		if err != nil {
-			continue
-		}
-		memPct, _ := p.MemoryPercent()
-		name, _ := p.Name()
-		if name == "" {
-			continue
-		}
-		results = append(results, topProcess{
-			pid:  p.Pid,
-			name: name,
-			cpu:  cpuPct,
-			mem:  memPct,
-		})
-	}
-
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].cpu > results[j].cpu
-	})
-
-	if len(results) > maxTopProcesses {
-		results = results[:maxTopProcesses]
-	}
-	return results
 }
 
 // Update handles sysmon tick messages.
@@ -250,6 +221,7 @@ func (m SysmonModel) Update(msg tea.Msg) (SysmonModel, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+	m.ensureGraphHistoryCapacity()
 
 	m.cpuPercent = tick.cpuPercent
 	m.perCore = tick.perCore
@@ -267,7 +239,6 @@ func (m SysmonModel) Update(msg tea.Msg) (SysmonModel, tea.Cmd) {
 	m.goroutines = tick.goroutines
 	m.hostUptime = tick.hostUptime
 	m.loadAvg = tick.loadAvg
-	m.topProcs = tick.topProcs
 
 	// Calculate network rates (bytes/s).
 	if m.prevNetRecv > 0 {
@@ -295,6 +266,13 @@ func (m SysmonModel) Update(msg tea.Msg) (SysmonModel, tea.Cmd) {
 	for i := 0; i < coreCount && i < len(m.coreHistories); i++ {
 		m.coreHistories[i] = append(m.coreHistories[i][1:], tick.perCore[i])
 	}
+	m.pruneFileActivity(time.Now())
+	m.refreshProjectTree()
+
+	// Auto-advance tree scroll on each tick.
+	if len(m.projectTree) > 0 {
+		m.treeScrollOffset = (m.treeScrollOffset + 1) % len(m.projectTree)
+	}
 
 	return m, sysmonTick()
 }
@@ -306,11 +284,77 @@ func (m *SysmonModel) SetSize(w, h int) {
 	}
 	m.width = w
 	m.height = h
+	m.ensureGraphHistoryCapacity()
+}
+
+func (m *SysmonModel) ensureGraphHistoryCapacity() {
+	target := graphHistoryPoints(m.width)
+	m.cpuHistory = resizeHistory(m.cpuHistory, target)
+	m.netRecvHist = resizeHistory(m.netRecvHist, target)
+	m.netSentHist = resizeHistory(m.netSentHist, target)
+}
+
+func graphHistoryPoints(width int) int {
+	contentW := width - 6
+	if contentW < 8 {
+		contentW = 8
+	}
+	points := contentW * 2
+	if points < sparklineLength {
+		return sparklineLength
+	}
+	return points
+}
+
+func resizeHistory(history []float64, target int) []float64 {
+	if target <= 0 {
+		target = sparklineLength
+	}
+	if len(history) == target {
+		return history
+	}
+	resized := make([]float64, target)
+	if len(history) == 0 {
+		return resized
+	}
+	if len(history) >= target {
+		copy(resized, history[len(history)-target:])
+		return resized
+	}
+	copy(resized[target-len(history):], history)
+	return resized
+}
+
+// SetProjectRoot configures the project root for the tree view.
+func (m *SysmonModel) SetProjectRoot(root string) {
+	m.projectRoot = root
+	m.refreshProjectTree()
+}
+
+// ObserveBusMessage updates active-file hints for the project tree.
+func (m *SysmonModel) ObserveBusMessage(msg bus.Message) {
+	now := time.Now()
+	switch msg.Type {
+	case bus.MsgRequest:
+		role := msg.To
+		for _, path := range m.pathsForRole(role, msg.Payload) {
+			m.touchFile(path, role, now)
+		}
+	case bus.MsgEvent:
+		if p, ok := msg.Payload.(bus.TokenPayload); ok {
+			for _, path := range extractFilePathsFromText(p.Text) {
+				m.touchFile(path, msg.From, now)
+			}
+		}
+	case bus.MsgResponse:
+		m.clearRoleActivity(msg.From)
+	}
+	m.pruneFileActivity(now)
 }
 
 // View renders the system monitor panel.
 func (m SysmonModel) View() string {
-	contentW := m.width - 4
+	contentW := m.width - 6
 	if contentW < 20 {
 		contentW = 20
 	}
@@ -331,7 +375,7 @@ func (m SysmonModel) View() string {
 
 	addLine := func(content string) {
 		vis := lipgloss.Width(content)
-		pad := contentW + 2 - vis
+		pad := contentW - vis
 		if pad < 0 {
 			pad = 0
 		}
@@ -436,41 +480,31 @@ func (m SysmonModel) View() string {
 	netUpColor := lipgloss.Color("#7aa2f7")
 	dnStyle := lipgloss.NewStyle().Foreground(netDnColor).Bold(true)
 	upStyle := lipgloss.NewStyle().Foreground(netUpColor).Bold(true)
-
 	addLine(dnStyle.Render(" ▼ "+formatRate(m.recvRate)) + "  " +
 		upStyle.Render("▲ "+formatRate(m.sentRate)))
 	addGraphLines(renderBrailleGraph(m.netRecvHist, contentW, brailleGraphRows, netDnColor, 0))
 	addGraphLines(renderBrailleGraph(m.netSentHist, contentW, brailleGraphRows, netUpColor, 0))
 
-	// ── PROC ──
-	if len(m.topProcs) > 0 {
-		addSection("PROC")
-		procNameW := contentW - 18
-		if procNameW < 6 {
-			procNameW = 6
-		}
-		hdrLine := dimStyle.Render(fmt.Sprintf(" %-*s %5s %5s", procNameW, "NAME", "CPU%", "MEM%"))
-		addLine(hdrLine)
-		for _, p := range m.topProcs {
-			name := p.name
-			if len(name) > procNameW {
-				name = name[:procNameW-1] + "…"
-			}
-			cpuVal := fmt.Sprintf("%5.1f", p.cpu)
-			memVal := fmt.Sprintf("%5.1f", p.mem)
-			cpuC := percentColor(p.cpu)
-			memC := percentColor(float64(p.mem))
-			line := dimStyle.Render(fmt.Sprintf(" %-*s", procNameW, name)) + " " +
-				lipgloss.NewStyle().Foreground(cpuC).Render(cpuVal) + " " +
-				lipgloss.NewStyle().Foreground(memC).Render(memVal)
+	// ── TREE ──
+	// footer = sep(1) + session(1) + bottom-border(1) = 3 lines.
+	// treeSection = sep+header(2).
+	// maxRows = space remaining after current lines, tree header, and footer.
+	treeMaxRows := m.height - len(lines) - 2 - 3
+	if treeMaxRows < 3 {
+		treeMaxRows = 3
+	}
+	addSection("TREE")
+	treeLines := m.renderProjectTree(contentW, treeMaxRows)
+	if len(treeLines) == 0 {
+		addLine(dimStyle.Render(" (no project)"))
+	} else {
+		for _, line := range treeLines {
 			addLine(line)
 		}
 	}
 
 	// ── Info footer ──
 	lines = append(lines, bSt.Render("├"+strings.Repeat("─", contentW+2)+"┤"))
-	goLine := labelStyle.Render(" Goroutines: ") + valueStyle.Render(fmt.Sprintf("%d", m.goroutines))
-	addLine(goLine)
 	sessionLine := labelStyle.Render(" Session:    ") + valueStyle.Render(formatElapsed(time.Since(m.startTime).Round(time.Second)))
 	addLine(sessionLine)
 
@@ -479,14 +513,278 @@ func (m SysmonModel) View() string {
 
 	result := strings.Join(lines, "\n")
 
-	// Vertically center if panel is taller than content.
+	// Vertically center if panel is taller than content; clip if shorter.
 	totalLines := len(lines)
-	if m.height > totalLines {
+	if m.height > 0 && totalLines > m.height {
+		clipped := strings.Split(result, "\n")
+		result = strings.Join(clipped[:m.height], "\n")
+	} else if m.height > totalLines {
 		topPad := (m.height - totalLines) / 2
 		result = strings.Repeat("\n", topPad) + result
 	}
 
 	return result
+}
+
+func (m *SysmonModel) refreshProjectTree() {
+	if m.projectRoot == "" {
+		m.projectTree = nil
+		return
+	}
+
+	rootName := filepath.Base(m.projectRoot)
+	entries := []projectTreeEntry{{relPath: ".", name: rootName + "/", depth: 0, isDir: true}}
+	m.walkProjectTree(".", 0, &entries)
+	m.projectTree = entries
+}
+
+func (m *SysmonModel) walkProjectTree(rel string, depth int, entries *[]projectTreeEntry) {
+	if len(*entries) >= projectTreeMaxRows {
+		return
+	}
+	abs := m.projectRoot
+	if rel != "." {
+		abs = filepath.Join(m.projectRoot, rel)
+	}
+
+	children, err := os.ReadDir(abs)
+	if err != nil {
+		return
+	}
+
+	sort.Slice(children, func(i, j int) bool {
+		if children[i].IsDir() != children[j].IsDir() {
+			return children[i].IsDir()
+		}
+		return children[i].Name() < children[j].Name()
+	})
+
+	for _, child := range children {
+		name := child.Name()
+		if shouldSkipTreeEntry(name, child.IsDir()) {
+			continue
+		}
+		childRel := name
+		if rel != "." {
+			childRel = filepath.Join(rel, name)
+		}
+		entry := projectTreeEntry{
+			relPath: filepath.ToSlash(childRel),
+			name:    name,
+			depth:   depth + 1,
+			isDir:   child.IsDir(),
+		}
+		if entry.isDir {
+			entry.name += "/"
+		}
+		*entries = append(*entries, entry)
+		if child.IsDir() {
+			m.walkProjectTree(childRel, depth+1, entries)
+		}
+		if len(*entries) >= projectTreeMaxRows {
+			return
+		}
+	}
+}
+
+func shouldSkipTreeEntry(name string, isDir bool) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", ".idea", ".orchestrator":
+		return true
+	}
+	if strings.HasPrefix(name, ".") && isDir {
+		return true
+	}
+	return false
+}
+
+func (m SysmonModel) renderProjectTree(contentW, maxRows int) []string {
+	if len(m.projectTree) == 0 || maxRows <= 0 {
+		return nil
+	}
+
+	total := len(m.projectTree)
+	dimSt := lipgloss.NewStyle().Foreground(crt.dim)
+
+	if total <= maxRows {
+		// All entries fit — no scrolling needed.
+		var lines []string
+		for _, entry := range m.projectTree {
+			lines = append(lines, m.renderTreeEntry(entry, contentW))
+		}
+		return lines
+	}
+
+	// Scroll: show maxRows entries starting from offset, wrapping around.
+	offset := m.treeScrollOffset % total
+	var lines []string
+	for i := 0; i < maxRows; i++ {
+		idx := (offset + i) % total
+		lines = append(lines, m.renderTreeEntry(m.projectTree[idx], contentW))
+	}
+	// Scroll indicator in the last slot.
+	indicator := dimSt.Render(fmt.Sprintf("  ↕ %d/%d", offset+1, total))
+	lines[len(lines)-1] = indicator
+	return lines
+}
+
+func (m SysmonModel) renderTreeEntry(entry projectTreeEntry, contentW int) string {
+	indent := strings.Repeat("  ", entry.depth)
+	prefix := indent
+	if entry.depth > 0 {
+		prefix += "└─ "
+	}
+	label := prefix + entry.name
+
+	maxW := contentW
+	if maxW < 12 {
+		maxW = 12
+	}
+	if lipgloss.Width(label) > maxW {
+		runes := []rune(label)
+		for i := len(runes); i > 0; i-- {
+			candidate := string(runes[:i]) + "…"
+			if lipgloss.Width(candidate) <= maxW {
+				label = candidate
+				break
+			}
+		}
+	}
+
+	if entry.isDir {
+		style := lipgloss.NewStyle().Foreground(crt.dim)
+		if m.hasActiveDescendant(entry.relPath) {
+			style = lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+		}
+		return style.Render(label)
+	}
+
+	if activity, ok := m.activeFiles[entry.relPath]; ok {
+		return lipgloss.NewStyle().Foreground(roleColor(string(activity.role))).Bold(true).Render(label)
+	}
+	return lipgloss.NewStyle().Foreground(crt.bright).Render(label)
+}
+
+func (m SysmonModel) hasActiveDescendant(relPath string) bool {
+	if relPath == "." {
+		return len(m.activeFiles) > 0
+	}
+	prefix := relPath + "/"
+	for path := range m.activeFiles {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *SysmonModel) touchFile(path string, role bus.AgentRole, now time.Time) {
+	rel := sanitizeObservedPath(m.projectRoot, path)
+	if rel == "" {
+		return
+	}
+	m.activeFiles[rel] = fileActivity{role: role, lastSeen: now}
+}
+
+func (m *SysmonModel) clearRoleActivity(role bus.AgentRole) {
+	for path, activity := range m.activeFiles {
+		if activity.role == role {
+			delete(m.activeFiles, path)
+		}
+	}
+}
+
+func (m *SysmonModel) pruneFileActivity(now time.Time) {
+	for path, activity := range m.activeFiles {
+		if now.Sub(activity.lastSeen) > fileActivityTTL {
+			delete(m.activeFiles, path)
+		}
+	}
+}
+
+func (m SysmonModel) pathsForRole(role bus.AgentRole, payload any) []string {
+	switch p := payload.(type) {
+	case agent.CoderPayload:
+		return append([]string{}, p.PriorFiles...)
+	case agent.CoderFixPayload:
+		return append([]string{}, p.Files...)
+	case agent.TesterPayload:
+		return append([]string{}, p.Files...)
+	case agent.ReviewerPayload:
+		return append([]string{}, p.Files...)
+	case agent.SecurityPayload:
+		return append([]string{}, p.Files...)
+	case agent.UXReviewerPayload:
+		return append([]string{}, p.Files...)
+	case agent.QAPayload:
+		return append([]string{}, p.Files...)
+	}
+
+	switch role {
+	case bus.RolePM:
+		return []string{".orchestrator/vision.md", ".orchestrator/moscow.md"}
+	case bus.RolePlanner:
+		return []string{
+			".orchestrator/architecture.md",
+			".orchestrator/implementation_plan.md",
+			".orchestrator/prompts.md",
+		}
+	}
+	return nil
+}
+
+func extractFilePathsFromText(text string) []string {
+	if text == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(text, func(r rune) bool {
+		switch r {
+		case ' ', '\n', '\t', '\r', '`', '"', '\'', '(', ')', '[', ']', '{', '}', ',', ':', ';':
+			return true
+		}
+		return false
+	})
+
+	seen := map[string]bool{}
+	var paths []string
+	for _, field := range fields {
+		if !strings.Contains(field, ".") || strings.HasPrefix(field, "http") {
+			continue
+		}
+		field = strings.TrimSuffix(field, "…")
+		field = strings.TrimPrefix(field, "./")
+		if strings.Contains(field, "..") {
+			continue
+		}
+		if !strings.Contains(field, "/") && !strings.HasPrefix(field, ".orchestrator/") {
+			continue
+		}
+		if !seen[field] {
+			seen[field] = true
+			paths = append(paths, field)
+		}
+	}
+	return paths
+}
+
+func sanitizeObservedPath(root, path string) string {
+	path = strings.TrimSpace(filepath.ToSlash(path))
+	if path == "" || strings.Contains(path, "..") {
+		return ""
+	}
+
+	if root != "" {
+		rootSlash := filepath.ToSlash(root)
+		if strings.HasPrefix(path, rootSlash+"/") {
+			path = strings.TrimPrefix(path, rootSlash+"/")
+		}
+	}
+
+	path = strings.TrimPrefix(path, "./")
+	if path == "" {
+		return ""
+	}
+	return path
 }
 
 // renderCoreDotted renders a single CPU core as a braille-dot history bar.

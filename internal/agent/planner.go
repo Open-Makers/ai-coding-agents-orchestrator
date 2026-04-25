@@ -99,14 +99,58 @@ MoSCoW Prioritization:
 	if err := a.ws.WriteFile(artifacts.ImplementationPlanFile, []byte(plan+"\n")); err != nil {
 		return bus.Message{}, err
 	}
-	if promptsContent == "" {
-		promptsContent = "(no prompts section generated — approve to continue)"
+	// When the model skips ===PROMPTS=== (common in small models that run out of
+	// focus after a long PLAN section), fire a dedicated second call asking only
+	// for the stage list. This is more reliable than retrying the entire generation.
+	if promptsContent == "" || !HasRealStages(promptsContent) {
+		a.emitToken("\n[generating stage prompts…]\n", false)
+		generated, err := a.generateStagePrompts(ctx, arch, plan)
+		if err != nil {
+			return bus.Message{}, fmt.Errorf("planner: stage prompts: %w", err)
+		}
+		if !HasRealStages(generated) {
+			return bus.Message{}, fmt.Errorf("planner: PROMPTS section missing or has no ===STAGE N: name=== delimiters")
+		}
+		promptsContent = generated
 	}
 	if err := a.ws.WriteFile(artifacts.PromptsFile, []byte(promptsContent+"\n")); err != nil {
 		return bus.Message{}, err
 	}
 
 	return bus.NewMessage(bus.RolePlanner, "", bus.MsgResponse, artifacts.ImplementationPlanFile), nil
+}
+
+// generateStagePrompts fires a focused second LLM call to produce only the
+// ===STAGE N: name=== section when the main planning pass omits it.
+func (a *PlannerAgent) generateStagePrompts(ctx context.Context, arch, plan string) (string, error) {
+	system := `You are a Tech Lead. Given an architecture and implementation plan, produce ONLY a list of implementation stages.
+
+Output format — use EXACTLY this delimiter for each stage (2 to 4 stages total):
+
+===STAGE 1: short description===
+Concise coder instructions: which files to create/modify and what each contains.
+
+===STAGE 2: short description===
+...
+
+Rules:
+- 2 to 4 stages only
+- Must Have features first, then Should Have
+- Each stage must compile independently with previous stages
+- No code blocks, no prose outside stage blocks
+- Output ONLY the stage blocks — nothing else`
+
+	user := fmt.Sprintf("Architecture:\n%s\n\nPlan:\n%s\n\nWrite the stage list now:", arch, plan)
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: system,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: user}},
+	})
+	if err != nil {
+		return "", err
+	}
+	return a.collectStream(ch)
 }
 
 // Revise regenerates a single planning artifact given user feedback.
@@ -240,6 +284,17 @@ func ParseStages(promptsContent string) []Stage {
 		}}
 	}
 	return stages
+}
+
+// HasRealStages reports whether content contains at least one recognised stage
+// delimiter (and therefore would not fall back to the "Full Implementation" stub).
+func HasRealStages(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if idx, _ := parseStageHeader(line); idx > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // parseStageHeader checks if a line is a stage delimiter.

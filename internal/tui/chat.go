@@ -132,12 +132,10 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 			m.refreshViewport()
 			return m, chatSendCmd(m.llm, m.ctx, m.systemPrompt, m.history)
 		case "backspace":
-			if len(m.input) > 0 {
-				m.input = m.input[:len(m.input)-1]
-			}
+			m.input = trimLastRune(m.input)
 		default:
-			if len(msg.String()) == 1 {
-				m.input += msg.String()
+			if len(msg.Runes) > 0 {
+				m.input += string(msg.Runes)
 			}
 		}
 
@@ -208,10 +206,11 @@ func (m *ChatModel) refreshViewport() {
 	for _, line := range m.lines {
 		switch line.role {
 		case "user":
-			sb.WriteString(userStyle.Render("you › ") + line.content + "\n\n")
+			sb.WriteString(renderWrappedChatLine("you › ", line.content, userStyle, lipgloss.NewStyle(), m.vp.Width))
+			sb.WriteString("\n\n")
 		case "assistant":
-			prefix := dimStyle.Render("ai › ")
-			sb.WriteString(prefix + assistantStyle.Render(line.content) + "\n\n")
+			sb.WriteString(renderWrappedChatLine("ai › ", line.content, dimStyle, assistantStyle, m.vp.Width))
+			sb.WriteString("\n\n")
 		}
 	}
 	m.vp.SetContent(sb.String())

@@ -3,8 +3,12 @@ package tui
 import (
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 )
 
 func TestRunnerModelForRole_ExplicitConfig(t *testing.T) {
@@ -168,5 +172,181 @@ func TestStatusBar_StageInfo(t *testing.T) {
 	view := sb.View()
 	if view == "" {
 		t.Fatal("status bar view should not be empty")
+	}
+}
+
+func TestModel_EscDuringPipelineOpensCancelConfirm(t *testing.T) {
+	m := New(nil, nil, "", "", nil, config.Config{})
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd != nil {
+		t.Fatal("expected no quit command while pipeline is still running")
+	}
+
+	model, ok := updated.(Model)
+	if !ok {
+		t.Fatal("expected tui.Model")
+	}
+	if !model.cancelConfirm {
+		t.Fatal("expected esc to open cancel confirmation")
+	}
+	if model.returnToMenu {
+		t.Fatal("should not return to menu before cancellation is confirmed")
+	}
+}
+
+func TestModel_EscAfterPipelineReturnsToMenu(t *testing.T) {
+	m := New(nil, nil, "", "", nil, config.Config{})
+	m.pipelineDone = true
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected quit command after completed pipeline")
+	}
+
+	model, ok := updated.(Model)
+	if !ok {
+		t.Fatal("expected tui.Model")
+	}
+	if !model.returnToMenu {
+		t.Fatal("expected esc to return to menu after pipeline completion")
+	}
+}
+
+func TestModel_CtrlETogglesErrorBanner(t *testing.T) {
+	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m.pipelineDone = true
+	m.pipelineFailed = true
+	m.pipelineErr = "build fix stuck"
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	got := updated.(Model)
+	if !got.hidePipelineErr {
+		t.Fatal("expected pipeline error banner to be hidden")
+	}
+
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	got = updated.(Model)
+	if got.hidePipelineErr {
+		t.Fatal("expected pipeline error banner to be visible again")
+	}
+}
+
+func TestModel_NegotiateEscReturnsToMenuInTaskFlow(t *testing.T) {
+	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m.overlay = overlayNegotiate
+	m.taskRunner = orchestrator.NewTaskRunner(nil, nil, config.Config{}, artifacts.Workspace{}, "")
+
+	cancelled := false
+	m.cancelFunc = func() { cancelled = true }
+
+	updated, cmd := m.Update(NegotiateClosedMsg{})
+	if cmd == nil {
+		t.Fatal("expected quit command when closing negotiate overlay in task flow")
+	}
+
+	got := updated.(Model)
+	if got.overlay != overlayNone {
+		t.Fatal("expected negotiate overlay to close")
+	}
+	if !got.returnToMenu {
+		t.Fatal("expected task flow escape to return to menu")
+	}
+	if !cancelled {
+		t.Fatal("expected task flow escape to cancel the running task")
+	}
+}
+
+func TestModel_NegotiateEscReturnsToMenuBeforePMStarts(t *testing.T) {
+	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m.overlay = overlayNegotiate
+	m.phase = "negotiating"
+	m.overlayNegotiate = NewNegotiate(nil)
+
+	cancelled := false
+	m.cancelFunc = func() { cancelled = true }
+
+	updated, cmd := m.Update(NegotiateClosedMsg{})
+	if cmd == nil {
+		t.Fatal("expected quit command when closing empty negotiate overlay at startup")
+	}
+
+	got := updated.(Model)
+	if got.overlay != overlayNone {
+		t.Fatal("expected negotiate overlay to close")
+	}
+	if !got.returnToMenu {
+		t.Fatal("expected escape to return to menu before PM starts")
+	}
+	if !cancelled {
+		t.Fatal("expected escape to cancel pending run before PM starts")
+	}
+}
+
+func TestModel_NegotiateEscReturnsToMenuDuringPipelineNegotiation(t *testing.T) {
+	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m.overlay = overlayNegotiate
+	m.phase = "negotiating"
+	m.overlayNegotiate = NewNegotiate(nil)
+	m.overlayNegotiate.lines = []chatLine{{role: "assistant", content: "Which files should change?"}}
+
+	cancelled := false
+	m.cancelFunc = func() { cancelled = true }
+
+	updated, cmd := m.Update(NegotiateClosedMsg{})
+	if cmd == nil {
+		t.Fatal("expected quit command when closing negotiate overlay during negotiation")
+	}
+
+	got := updated.(Model)
+	if got.overlay != overlayNone {
+		t.Fatal("expected negotiate overlay to close")
+	}
+	if !got.returnToMenu {
+		t.Fatal("expected escape to return to menu during pipeline negotiation")
+	}
+	if !cancelled {
+		t.Fatal("expected escape to cancel active negotiation")
+	}
+}
+
+func TestModel_CtrlAApprovesTaskRunnerGate(t *testing.T) {
+	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	tr := orchestrator.NewTaskRunner(nil, nil, config.Config{}, artifacts.Workspace{}, "")
+	m.taskRunner = tr
+	m.gateArtifact = "task_spec.json"
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	got := updated.(Model)
+
+	if got.gateArtifact != "" {
+		t.Fatal("expected gate artifact to be cleared after approval")
+	}
+	if !got.approvedGates["task_spec.json"] {
+		t.Fatal("expected task_spec.json to be marked approved")
+	}
+}
+
+func TestModel_ArtifactViewerApproveUsesTaskRunner(t *testing.T) {
+	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	tr := orchestrator.NewTaskRunner(nil, nil, config.Config{}, artifacts.Workspace{}, "")
+	m.taskRunner = tr
+	m.overlay = overlayArtifact
+	m.gateArtifact = "task_spec.json"
+
+	updated, cmd := m.Update(artifactViewerClosedMsg{approved: true})
+	if cmd == nil {
+		t.Fatal("expected waitForBusEvent command after closing artifact viewer")
+	}
+	got := updated.(Model)
+
+	if got.overlay != overlayNone {
+		t.Fatal("expected artifact viewer to close")
+	}
+	if got.gateArtifact != "" {
+		t.Fatal("expected gate artifact to be cleared after viewer approval")
+	}
+	if !got.approvedGates["task_spec.json"] {
+		t.Fatal("expected task_spec.json to be marked approved")
 	}
 }

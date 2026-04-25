@@ -41,6 +41,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		runCmd(os.Args[2:])
+	case "task":
+		taskCmd(os.Args[2:])
 	case "agent":
 		agentCmd(os.Args[2:])
 	case "resume":
@@ -68,7 +70,9 @@ func usage() {
 	fmt.Println(`orchestrator <command>
 
 	Commands:
-	  run --requirements requirements.md  Run a full orchestration workflow
+	  run --requirements requirements.md  Run a full orchestration workflow (legacy greenfield)
+	  task --description "..."            Run a unified task (feature, bugfix, refactor, or greenfield)
+	  task --from-file task.md            Read task description from a file
 	  resume                              Resume last run (not implemented)
 	  report                              Summarize last run artifacts
 	  monitor                             Open the control TUI against a running bus
@@ -150,15 +154,11 @@ func runCmd(args []string) {
 
 	// No requirements given — open the TUI home/picker (unless plain/dry-run mode).
 	if *reqPath == "" && !*dryRun && *ui != "plain" {
-		chosen, updatedCfg, err := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
+		result, err := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
 		if err != nil {
 			fatal(fmt.Errorf("picker: %w", err))
 		}
-		if chosen == "" {
-			return // user quit
-		}
-		*reqPath = chosen
-		cfg = updatedCfg
+		cfg = result.Cfg
 
 		// Project may have changed via project picker (os.Chdir).
 		// Refresh root, config, and workspace to match the selected project.
@@ -173,10 +173,21 @@ func runCmd(args []string) {
 				fatal(err)
 			}
 		}
+
+		if result.ReqPath != "" {
+			*reqPath = result.ReqPath
+		} else if result.ChatMode {
+			// User picked "New Task" — route to the brownfield-aware TaskRunner
+			// (PM negotiation gathers the description from the user).
+			runTaskFlow(root, "", *branch, *ui, cfg, ws)
+			return
+		} else {
+			return // user quit
+		}
 	}
 
-	if *reqPath == "" {
-		_, _ = fmt.Fprintln(os.Stderr, "--requirements is required in plain/dry-run mode")
+	if *reqPath == "" && *ui == "plain" {
+		_, _ = fmt.Fprintln(os.Stderr, "--requirements is required in plain mode")
 		os.Exit(2)
 	}
 
@@ -193,15 +204,14 @@ func runCmd(args []string) {
 
 	resolvedUI := resolveUIMode(*ui)
 
-	b := bus.New()
-	if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
-		slog.Warn("could not open bus log", slog.String("error", err.Error()))
-	}
-	defer b.Close()
-
 	ctx := context.Background()
 
 	if resolvedUI == "plain" {
+		b := bus.New()
+		if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
+			slog.Warn("could not open bus log", slog.String("error", err.Error()))
+		}
+		defer b.Close()
 		agents := buildAgents(b, cfg, ws, root)
 		pipeline := orchestrator.NewPipeline(b, agents, cfg, ws, root)
 		events := b.Subscribe()
@@ -214,6 +224,10 @@ func runCmd(args []string) {
 
 	// TUI mode (default) — loop supports returning to main menu after pipeline.
 	for {
+		b := bus.New()
+		if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
+			slog.Warn("could not open bus log", slog.String("error", err.Error()))
+		}
 		events := b.Subscribe()
 		wsPath := ws.Path("")
 		chatLLM := runner.OpenCodeRunner{}
@@ -234,6 +248,7 @@ func runCmd(args []string) {
 		}()
 
 		result, err := p.Run()
+		b.Close()
 		if err != nil {
 			fatal(err)
 		}
@@ -245,16 +260,11 @@ func runCmd(args []string) {
 		}
 
 		// Re-open the startup picker to choose new requirements.
-		chosen, updatedCfg, err := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
-		if err != nil {
-			fatal(fmt.Errorf("picker: %w", err))
+		startupResult, startupErr := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
+		if startupErr != nil {
+			fatal(fmt.Errorf("picker: %w", startupErr))
 		}
-		if chosen == "" {
-			break // user quit from menu
-		}
-
-		*reqPath = chosen
-		cfg = updatedCfg
+		cfg = startupResult.Cfg
 
 		// Refresh root if project changed.
 		newRoot, rootErr := os.Getwd()
@@ -268,7 +278,161 @@ func runCmd(args []string) {
 				fatal(err)
 			}
 		}
+
+		if startupResult.ReqPath != "" {
+			*reqPath = startupResult.ReqPath
+		} else if startupResult.ChatMode {
+			// "New Task" from the menu — route to TaskRunner instead of the
+			// greenfield Pipeline so existing code is treated as brownfield.
+			runTaskFlow(root, "", *branch, *ui, cfg, ws)
+			return
+		} else {
+			break // user quit from menu
+		}
 	}
+}
+
+// runTaskFlow launches the task runner with the given description.
+// Extracted so both the startup "New Task" flow and the `task` subcommand can reuse it.
+func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws artifacts.Workspace) {
+	if branch != "" {
+		if err := checkoutBranch(root, branch); err != nil {
+			fatal(err)
+		}
+	}
+
+	resolvedUI := resolveUIMode(uiMode)
+
+	ctx := context.Background()
+
+	if resolvedUI == "plain" {
+		b := bus.New()
+		if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
+			slog.Warn("could not open bus log", slog.String("error", err.Error()))
+		}
+		defer b.Close()
+		agents := buildAgents(b, cfg, ws, root)
+		taskRunner := orchestrator.NewTaskRunner(b, agents, cfg, ws, root)
+		events := b.Subscribe()
+		go plainLogger(events)
+		if err := taskRunner.Run(ctx, taskInput); err != nil {
+			fatal(err)
+		}
+		return
+	}
+
+	b := bus.New()
+	if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
+		slog.Warn("could not open bus log", slog.String("error", err.Error()))
+	}
+	agents := buildAgents(b, cfg, ws, root)
+	events := b.Subscribe()
+	wsPath := ws.Path("")
+	chatLLM := runner.OpenCodeRunner{}
+	tuiModel := tui.New(events, nil, root, wsPath, chatLLM, cfg)
+	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
+
+	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
+
+	go func() {
+		taskRunner := orchestrator.NewTaskRunner(b, agents, cfg, ws, root)
+		p.Send(tui.TaskRunnerReadyMsg{Runner: taskRunner, Cancel: pipelineCancel})
+		err := taskRunner.Run(pipelineCtx, taskInput)
+		if pipelineCtx.Err() != nil {
+			err = fmt.Errorf("task cancelled by user")
+		}
+		p.Send(tui.PipelineDoneMsg{Err: err})
+	}()
+
+	result, err := p.Run()
+	b.Close()
+	if err != nil {
+		fatal(err)
+	}
+
+	final, ok := result.(tui.Model)
+	if !ok || !final.ReturnToMenu() {
+		return
+	}
+
+	startupResult, startupErr := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
+	if startupErr != nil {
+		fatal(fmt.Errorf("picker: %w", startupErr))
+	}
+	cfg = startupResult.Cfg
+
+	newRoot, rootErr := os.Getwd()
+	if rootErr == nil && newRoot != root {
+		root = newRoot
+		if reloadedCfg, loadErr := config.Load(root); loadErr == nil {
+			cfg = reloadedCfg
+		}
+		ws, err = artifacts.EnsureWorkspace(root)
+		if err != nil {
+			fatal(err)
+		}
+	}
+
+	if startupResult.ReqPath != "" {
+		runCmd([]string{"--requirements", startupResult.ReqPath, "--ui", uiMode})
+		return
+	}
+	if startupResult.ChatMode {
+		runCmd([]string{"--ui", uiMode})
+		return
+	}
+}
+
+func taskCmd(args []string) {
+	fs := flag.NewFlagSet("task", flag.ExitOnError)
+	description := fs.String("description", "", "task description (omit for interactive)")
+	fromFile := fs.String("from-file", "", "read task description from a file")
+	branch := fs.String("branch", "", "git branch to create and checkout")
+	ui := fs.String("ui", "auto", "ui mode: auto, tui, or plain")
+	_ = fs.Parse(args)
+
+	root, err := os.Getwd()
+	if err != nil {
+		fatal(err)
+	}
+
+	cfg, err := config.Load(root)
+	if err != nil {
+		fatal(fmt.Errorf("load config: %w", err))
+	}
+
+	cpulimit.Apply(cfg.Project.ReservedCores)
+
+	ws, err := artifacts.EnsureWorkspace(root)
+	if err != nil {
+		fatal(err)
+	}
+
+	if err := logging.SetupFile(ws.Dir, logging.LogFileName); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warn: could not open log file: %v\n", err)
+	}
+	defer logging.Close()
+
+	// Auto-detect Go module path.
+	if cfg.Project.ModulePath == "" {
+		cfg.Project.ModulePath = detectGoModulePath(root)
+	}
+
+	taskInput := *description
+	if *fromFile != "" {
+		data, readErr := safefile.ReadFile(filepath.Dir(*fromFile), filepath.Base(*fromFile))
+		if readErr != nil {
+			fatal(fmt.Errorf("read task file: %w", readErr))
+		}
+		taskInput = string(data)
+	}
+
+	if taskInput == "" {
+		_, _ = fmt.Fprintln(os.Stderr, "task requires --description or --from-file")
+		os.Exit(2)
+	}
+
+	runTaskFlow(root, taskInput, *branch, *ui, cfg, ws)
 }
 
 func resolveUIMode(requested string) string {
@@ -316,20 +480,20 @@ func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root str
 	agents := make(map[bus.AgentRole]agent.Agent)
 
 	pmCfg := cfg.Agents["pm"]
-	pmAgent := agent.NewPMAgent(b, makeRunner("pm"), ws,
+	agents[bus.RolePM] = agent.NewPMAgent(b, makeRunner("pm"), ws,
 		pmCfg.Skills, pmCfg.Model)
-	if fixerCfg, ok := cfg.Agents["pm_fixer"]; ok && fixerCfg.Runner != "" {
-		pmAgent.SetFixerRunner(makeRunner("pm_fixer"), fixerCfg.Model)
-	}
-	agents[bus.RolePM] = pmAgent
 
 	plannerCfg := cfg.Agents["planner"]
 	agents[bus.RolePlanner] = agent.NewPlannerAgent(b, makeRunner("planner"), ws,
 		plannerCfg.Skills, plannerCfg.Model)
 
 	coderCfg := cfg.Agents["coder"]
-	agents[bus.RoleCoder] = agent.NewCoderAgent(b, makeRunner("coder"), ws, root, cfg,
+	coderAgent := agent.NewCoderAgent(b, makeRunner("coder"), ws, root, cfg,
 		coderCfg.Skills, coderCfg.Model)
+	if fixerCfg, ok := cfg.Agents["coder_fixer"]; ok && fixerCfg.Runner != "" {
+		coderAgent.SetFixerRunner(makeRunner("coder_fixer"), fixerCfg.Model)
+	}
+	agents[bus.RoleCoder] = coderAgent
 
 	testerCfg := cfg.Agents["tester"]
 	agents[bus.RoleTester] = agent.NewTesterAgent(b, makeRunner("tester"), ws, root, cfg,

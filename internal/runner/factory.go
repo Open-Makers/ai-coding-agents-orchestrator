@@ -51,10 +51,10 @@ type SkillRunner struct {
 }
 
 func (r *SkillRunner) Complete(ctx context.Context, req CompletionRequest) (<-chan Token, error) {
-	req.SystemPrompt = ResolveSkills(req.SystemPrompt, req.Skills, r.loader)
 	if r.promptLanguage != "" && r.promptLanguage != "English" {
-		req.SystemPrompt += fmt.Sprintf("\n\nIMPORTANT: You MUST respond in %s.", r.promptLanguage)
+		req.SystemPrompt = fmt.Sprintf("IMPORTANT: You MUST write ALL responses in %s. Do not use any other language.\n\n", r.promptLanguage) + req.SystemPrompt
 	}
+	req.SystemPrompt = ResolveSkills(req.SystemPrompt, req.Skills, r.loader)
 	return r.inner.Complete(ctx, req)
 }
 

@@ -49,8 +49,8 @@ End with: risks/unknowns and test plan (what to test, not code).
 Skip Could Have and Won't Have — they are out of scope.
 
 ===PROMPTS===
-CRITICAL: You MUST split implementation into 2–8 numbered stages.
-Do NOT put everything in a single stage. Each feature or feature group gets its own stage.
+CRITICAL: You MUST split implementation into 2–4 numbered stages.
+Do NOT put everything in a single stage. Group related features into broad stages.
 
 Use this exact delimiter format for each stage:
 
@@ -65,8 +65,8 @@ Include the existing function signatures/types that need modification.
 Stage rules:
 - Must Have features first, then Should Have features
 - Each stage must compile and pass tests independently (with prior stages)
-- Group related features sharing the same files into one stage
-- MINIMUM 2 stages, MAXIMUM 8 stages — never a single stage
+- Group related features sharing the same files into one stage — prefer FEWER, LARGER stages
+- MINIMUM 2 stages, MAXIMUM 4 stages — never more than 4, never a single stage
 - Later stages state which existing files to modify
 - For brownfield: each stage prompt MUST reference existing code by file path and describe modifications
 - A single-stage plan is NOT acceptable — always decompose into at least 2 stages

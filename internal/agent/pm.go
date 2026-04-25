@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
@@ -10,10 +12,6 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
-
-// minArtifactLength is the minimum acceptable content length for PM artifacts.
-// Artifacts shorter than this are considered generation failures.
-const minArtifactLength = 20
 
 // PMPayload is the input for the Project Manager agent.
 type PMPayload struct {
@@ -24,12 +22,10 @@ type PMPayload struct {
 // PMAgent creates product vision and MoSCoW-prioritized feature list.
 type PMAgent struct {
 	BaseAgent
-	runner      runner.LLMRunner
-	fixerRunner runner.LLMRunner // optional: separate runner for retries with a better model
-	ws          artifacts.Workspace
-	skills      []string
-	model       string
-	fixerModel  string
+	runner runner.LLMRunner
+	ws     artifacts.Workspace
+	skills []string
+	model  string
 }
 
 func NewPMAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills []string, model string) *PMAgent {
@@ -42,14 +38,172 @@ func NewPMAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, skills [
 	}
 }
 
-// SetFixerRunner configures an optional separate runner/model used for retrying
-// artifact generation when the primary model produces empty or insufficient output.
-func (a *PMAgent) SetFixerRunner(r runner.LLMRunner, model string) {
-	a.fixerRunner = r
-	a.fixerModel = model
+func (a *PMAgent) Role() bus.AgentRole { return bus.RolePM }
+
+// GatherRequirements conducts a multi-turn conversation with the user to produce
+// project requirements. The flow is:
+//  1. PM asks clarifying questions until it has enough information
+//  2. PM produces a ===SUMMARY=== — caller publishes it and waits for approval
+//  3. User confirms summary (via humanCh)
+//  4. PM produces ===REQUIREMENTS=== — returned to caller
+//
+// The caller (Pipeline/TaskRunner) is responsible for the approval gates.
+func (a *PMAgent) GatherRequirements(ctx context.Context, projectCtx string, humanCh <-chan string) (summary string, requirements string, err error) {
+	systemPrompt := fmt.Sprintf(prompts.MustLoad("pm-gather"), projectCtx)
+
+	messages := []runner.ConvMessage{}
+
+	select {
+	case reply, ok := <-humanCh:
+		if !ok {
+			return "", "", fmt.Errorf("pm gather: human channel closed")
+		}
+		messages = append(messages, runner.ConvMessage{Role: "user", Content: reply})
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+
+	// Phase 1: Conversation → produce SUMMARY.
+	for {
+		output, streamErr := a.completeGatherTurn(ctx, systemPrompt, messages)
+		if streamErr != nil {
+			return "", "", fmt.Errorf("pm gather: %w", streamErr)
+		}
+
+		// Check if PM produced a summary.
+		if s := parseSummarySection(output); s != "" {
+			summary = s
+			messages = append(messages, runner.ConvMessage{Role: "assistant", Content: output})
+			break
+		}
+
+		// PM is asking questions — relay to human.
+		a.Bus.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgConversation,
+			bus.ConversationPayload{From: "pm", Content: output}))
+
+		select {
+		case reply, ok := <-humanCh:
+			if !ok {
+				return "", "", fmt.Errorf("pm gather: human channel closed")
+			}
+			messages = append(messages,
+				runner.ConvMessage{Role: "assistant", Content: output},
+				runner.ConvMessage{Role: "user", Content: reply},
+			)
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		}
+	}
+
+	// Publish summary for display, then wait for user confirmation.
+	a.Bus.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgConversation,
+		bus.ConversationPayload{From: "pm", Content: summary}))
+
+	select {
+	case reply, ok := <-humanCh:
+		if !ok {
+			return "", "", fmt.Errorf("pm gather: human channel closed after summary")
+		}
+		messages = append(messages, runner.ConvMessage{Role: "user", Content: reply})
+	case <-ctx.Done():
+		return "", "", ctx.Err()
+	}
+
+	// Phase 2: Generate REQUIREMENTS based on the approved summary.
+	output, streamErr := a.completeGatherTurn(ctx, systemPrompt, messages)
+	if streamErr != nil {
+		return "", "", fmt.Errorf("pm gather requirements: %w", streamErr)
+	}
+
+	if r := parseRequirementsSection(output); r != "" {
+		requirements = r
+	} else {
+		// Fallback: treat entire output as requirements.
+		requirements = output
+	}
+
+	return summary, requirements, nil
 }
 
-func (a *PMAgent) Role() bus.AgentRole { return bus.RolePM }
+func (a *PMAgent) completeGatherTurn(ctx context.Context, systemPrompt string, messages []runner.ConvMessage) (string, error) {
+	req := runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     messages,
+	}
+
+	ch, err := a.runner.Complete(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("runner: %w", err)
+	}
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return "", fmt.Errorf("stream: %w", err)
+	}
+	if !looksLikeGatherPromptLeak(output) {
+		return output, nil
+	}
+
+	retryPrompt := systemPrompt + "\n\nCRITICAL: Your previous reply was invalid because it echoed internal instructions, placeholders, or the wrong language. " +
+		"Reply directly to the user in the required language only. Do not mention process steps like Discuss, Summarize, or Requirements. " +
+		"Do not output code. Ask concise clarifying question(s) or, if enough information is available, output only the required summary/requirements block."
+
+	ch, err = a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: retryPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     messages,
+	})
+	if err != nil {
+		return "", fmt.Errorf("runner retry: %w", err)
+	}
+	output, err = a.collectStream(ch)
+	if err != nil {
+		return "", fmt.Errorf("stream retry: %w", err)
+	}
+	return output, nil
+}
+
+func looksLikeGatherPromptLeak(output string) bool {
+	trimmed := strings.TrimSpace(strings.ToLower(output))
+	if trimmed == "" {
+		return false
+	}
+
+	needles := []string{
+		"1. **discuss**",
+		"2. **summarize**",
+		"3. **requirements**",
+		"wait for the user to confirm the summary",
+		"(brief summary:",
+		"(requirement 1",
+		"## must have",
+		"## should have",
+		"## could have",
+		"## won't have",
+		"what would you like to build or change?",
+	}
+	for _, needle := range needles {
+		if strings.Contains(trimmed, needle) {
+			return true
+		}
+	}
+
+	return strings.Contains(trimmed, "```") || strings.Contains(trimmed, "describe(") || strings.Contains(trimmed, "const ")
+}
+
+// parseSummarySection extracts the content between ===SUMMARY=== and ===END===.
+func parseSummarySection(output string) string {
+	sections := parseSections(output, "SUMMARY")
+	return strings.TrimSpace(sections["SUMMARY"])
+}
+
+// parseRequirementsSection extracts the content between ===REQUIREMENTS=== and ===END===.
+func parseRequirementsSection(output string) string {
+	sections := parseSections(output, "REQUIREMENTS")
+	return strings.TrimSpace(sections["REQUIREMENTS"])
+}
 
 func (a *PMAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
 	payload, ok := msg.Payload.(PMPayload)
@@ -57,22 +211,9 @@ func (a *PMAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error)
 		return bus.Message{}, fmt.Errorf("pm: unexpected payload type %T", msg.Payload)
 	}
 
-	vision, moscow, err := a.generate(ctx, payload, a.runner, a.model)
+	vision, moscow, err := a.generate(ctx, payload)
 	if err != nil {
 		return bus.Message{}, fmt.Errorf("pm: %w", err)
-	}
-
-	if a.fixerRunner != nil && (len(strings.TrimSpace(vision)) < minArtifactLength || len(strings.TrimSpace(moscow)) < minArtifactLength) {
-		a.emitEvent("artifact too short, retrying with fixer model…")
-		retryVision, retryMoscow, retryErr := a.generate(ctx, payload, a.fixerRunner, a.fixerModel)
-		if retryErr == nil {
-			if len(strings.TrimSpace(retryVision)) > len(strings.TrimSpace(vision)) {
-				vision = retryVision
-			}
-			if len(strings.TrimSpace(retryMoscow)) > len(strings.TrimSpace(moscow)) {
-				moscow = retryMoscow
-			}
-		}
 	}
 
 	if err := a.ws.WriteFile(artifacts.VisionFile, []byte(vision+"\n")); err != nil {
@@ -86,25 +227,30 @@ func (a *PMAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error)
 }
 
 // generate runs the LLM completion and extracts vision/moscow sections.
-func (a *PMAgent) generate(ctx context.Context, payload PMPayload, r runner.LLMRunner, model string) (string, string, error) {
+func (a *PMAgent) generate(ctx context.Context, payload PMPayload) (string, string, error) {
 	systemPrompt := fmt.Sprintf(prompts.MustLoad("pm-system"), payload.ProjectContext)
 
 	userContent := fmt.Sprintf("Create the product vision and MoSCoW feature prioritization for the following requirements.\n\nRequirements:\n%s", payload.Requirements)
 
-	ch, err := r.Complete(ctx, runner.CompletionRequest{
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,
 		Skills:       a.skills,
-		Model:        model,
+		Model:        a.model,
 		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
 	})
 	if err != nil {
 		return "", "", fmt.Errorf("runner: %w", err)
 	}
 
-	output, err := a.collectStream(ch)
+	output, usage, err := a.collectPMOutput(ch)
 	if err != nil {
 		return "", "", fmt.Errorf("stream: %w", err)
 	}
+	output = normalizePMOutput(output)
+	if usage != nil {
+		a.emitUsage(*usage)
+	}
+	a.emitOutput(formatPMDisplay(output))
 
 	sections := parseSections(output, "VISION", "MOSCOW")
 	vision := sections["VISION"]
@@ -122,10 +268,169 @@ func (a *PMAgent) generate(ctx context.Context, payload PMPayload, r runner.LLMR
 	return vision, moscow, nil
 }
 
-// emitEvent publishes a system event about the PM agent status.
-func (a *PMAgent) emitEvent(text string) {
-	a.Bus.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgEvent,
-		bus.TokenPayload{Text: text + "\n", Done: false}))
+func (a *PMAgent) collectPMOutput(ch <-chan runner.Token) (string, *runner.TokenUsage, error) {
+	var sb strings.Builder
+	var usage *runner.TokenUsage
+	for tok := range ch {
+		if tok.Error != nil {
+			return sb.String(), usage, tok.Error
+		}
+		if tok.Done {
+			usage = tok.Usage
+			break
+		}
+		sb.WriteString(tok.Text)
+	}
+	return sb.String(), usage, nil
+}
+
+func normalizePMOutput(output string) string {
+	trimmed := strings.TrimSpace(output)
+	if trimmed == "" {
+		return output
+	}
+
+	jsonText := strings.TrimSpace(trimmed)
+	if strings.HasPrefix(jsonText, "```") {
+		lines := strings.Split(jsonText, "\n")
+		if len(lines) >= 2 && strings.HasPrefix(lines[0], "```") {
+			lines = lines[1:]
+			if n := len(lines); n > 0 && strings.TrimSpace(lines[n-1]) == "```" {
+				lines = lines[:n-1]
+			}
+			jsonText = strings.TrimSpace(strings.Join(lines, "\n"))
+		}
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(jsonText), &doc); err != nil {
+		return output
+	}
+
+	vision, hasVision := lookupMapKey(doc, "VISION")
+	moscow, hasMoscow := lookupMapKey(doc, "MOSCOW")
+	if !hasVision && !hasMoscow {
+		return output
+	}
+
+	var parts []string
+	if hasVision {
+		parts = append(parts, "===VISION===\n"+formatPMSectionBody(vision, 0))
+	}
+	if hasMoscow {
+		parts = append(parts, "===MOSCOW===\n"+formatPMSectionBody(moscow, 0))
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+func formatPMDisplay(output string) string {
+	sections := parseSections(output, "VISION", "MOSCOW")
+	vision := strings.TrimSpace(sections["VISION"])
+	moscow := strings.TrimSpace(sections["MOSCOW"])
+	if vision == "" && moscow == "" {
+		return output
+	}
+
+	var parts []string
+	if vision != "" {
+		parts = append(parts, "VISION\n"+vision)
+	}
+	if moscow != "" {
+		parts = append(parts, "MOSCOW\n"+moscow)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+func lookupMapKey(doc map[string]any, want string) (any, bool) {
+	for k, v := range doc {
+		if strings.EqualFold(k, want) {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+func formatPMSectionBody(value any, depth int) string {
+	indent := strings.Repeat("  ", depth)
+	switch v := value.(type) {
+	case map[string]any:
+		keys := orderedPMKeys(v)
+		var lines []string
+		for _, key := range keys {
+			item := v[key]
+			switch child := item.(type) {
+			case map[string]any, []any:
+				lines = append(lines, fmt.Sprintf("%s- %s", indent, key))
+				lines = append(lines, formatPMSectionBody(child, depth+1))
+			default:
+				lines = append(lines, fmt.Sprintf("%s- %s: %s", indent, key, formatPMScalar(child)))
+			}
+		}
+		return strings.Join(lines, "\n")
+	case []any:
+		var lines []string
+		for _, item := range v {
+			switch child := item.(type) {
+			case map[string]any, []any:
+				lines = append(lines, fmt.Sprintf("%s-", indent))
+				lines = append(lines, formatPMSectionBody(child, depth+1))
+			default:
+				lines = append(lines, fmt.Sprintf("%s- %s", indent, formatPMScalar(child)))
+			}
+		}
+		return strings.Join(lines, "\n")
+	default:
+		return indent + formatPMScalar(v)
+	}
+}
+
+func orderedPMKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	order := map[string]int{
+		"Problem statement":            0,
+		"Target users":                 1,
+		"Value proposition":            2,
+		"Success criteria":             3,
+		"Constraints and assumptions":  4,
+		"Existing codebase assessment": 5,
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		oi, iok := order[keys[i]]
+		oj, jok := order[keys[j]]
+		switch {
+		case iok && jok:
+			return oi < oj
+		case iok:
+			return true
+		case jok:
+			return false
+		default:
+			return keys[i] < keys[j]
+		}
+	})
+	return keys
+}
+
+func formatPMScalar(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case float64:
+		if x == float64(int64(x)) {
+			return fmt.Sprintf("%d", int64(x))
+		}
+		return fmt.Sprintf("%v", x)
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", x))
+	}
 }
 
 // ArbitrateResult is the PM's decision on an unparseable review response.
@@ -193,4 +498,330 @@ func parseArbitrateResult(text string) ArbitrateResult {
 	}
 
 	return ArbitrateResult{MustFix: mustFix, Pass: pass}
+}
+
+// TaskSpec is the PM's formalized understanding of a task.
+type TaskSpec struct {
+	Title              string   `json:"title"`
+	Description        string   `json:"description"`
+	Scope              string   `json:"scope"`
+	AcceptanceCriteria []string `json:"acceptance_criteria"`
+	Constraints        []string `json:"constraints,omitempty"`
+	FilesToModify      []string `json:"files_to_modify,omitempty"`
+}
+
+// ExecutionPlan is the PM's strategy for implementing a task.
+type ExecutionPlan struct {
+	NeedsArchitecture bool   `json:"needs_architecture"`
+	NeedsDetailedPlan bool   `json:"needs_detailed_plan"`
+	CoderInstructions string `json:"coder_instructions"`
+}
+
+// NegotiateTask conducts a multi-turn conversation to formalize a TaskSpec.
+// PM emits questions via bus; human responses arrive through humanCh.
+// When PM is satisfied, it emits the final TaskSpec.
+func (a *PMAgent) NegotiateTask(ctx context.Context, input, projectCtx string, humanCh <-chan string) (TaskSpec, error) {
+	systemPrompt := fmt.Sprintf(prompts.MustLoad("pm-negotiate"), projectCtx)
+
+	messages := []runner.ConvMessage{
+		{Role: "user", Content: input},
+	}
+
+	for {
+		ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+			SystemPrompt: systemPrompt,
+			Skills:       a.skills,
+			Model:        a.model,
+			Messages:     messages,
+		})
+		if err != nil {
+			return TaskSpec{}, fmt.Errorf("pm negotiate: runner: %w", err)
+		}
+
+		output, err := a.collectStream(ch)
+		if err != nil {
+			return TaskSpec{}, fmt.Errorf("pm negotiate: stream: %w", err)
+		}
+
+		// Check if PM produced a TaskSpec.
+		if spec, ok := parseTaskSpec(output); ok {
+			return spec, nil
+		}
+
+		if shouldForceTaskSpec(messages, output) {
+			spec, ok, err := a.forceTaskSpec(ctx, systemPrompt, messages)
+			if err != nil {
+				return TaskSpec{}, fmt.Errorf("pm negotiate force taskspec: %w", err)
+			}
+			if ok {
+				return spec, nil
+			}
+		}
+
+		// PM is asking questions — relay to human via bus.
+		a.Bus.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgConversation,
+			bus.ConversationPayload{From: "pm", Content: output}))
+
+		// Wait for human reply.
+		select {
+		case reply, ok := <-humanCh:
+			if !ok {
+				return TaskSpec{}, fmt.Errorf("pm negotiate: human channel closed")
+			}
+			messages = append(messages,
+				runner.ConvMessage{Role: "assistant", Content: output},
+				runner.ConvMessage{Role: "user", Content: reply},
+			)
+		case <-ctx.Done():
+			return TaskSpec{}, ctx.Err()
+		}
+	}
+}
+
+func (a *PMAgent) forceTaskSpec(ctx context.Context, systemPrompt string, messages []runner.ConvMessage) (TaskSpec, bool, error) {
+	forcedMessages := append([]runner.ConvMessage{}, messages...)
+	forcedMessages = append(forcedMessages, runner.ConvMessage{
+		Role: "user",
+		Content: "Using the repository context and the conversation so far, stop asking clarifying questions and emit the TASKSPEC now. " +
+			"Make reasonable assumptions where needed and put them in CONSTRAINTS.",
+	})
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     forcedMessages,
+	})
+	if err != nil {
+		return TaskSpec{}, false, err
+	}
+
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return TaskSpec{}, false, err
+	}
+
+	spec, ok := parseTaskSpec(output)
+	return spec, ok, nil
+}
+
+func shouldForceTaskSpec(messages []runner.ConvMessage, output string) bool {
+	if len(messages) < 3 {
+		return false
+	}
+	if !looksLikeGenericClarification(output) {
+		return false
+	}
+
+	lastUser := lastConversationMessage(messages, "user")
+	if lastUser == "" {
+		return false
+	}
+	if isAffirmative(lastUser) {
+		return true
+	}
+
+	assistantTurns := 0
+	for _, msg := range messages {
+		if msg.Role == "assistant" {
+			assistantTurns++
+		}
+	}
+	return assistantTurns >= 2
+}
+
+func looksLikeGenericClarification(text string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(text))
+	if trimmed == "" {
+		return false
+	}
+
+	needles := []string{
+		"możesz podać bardziej szczegółowe informacje",
+		"czy możesz podać bardziej szczegółowe informacje",
+		"co dokładnie chcesz zmienić",
+		"jakie dokładnie",
+		"provide more details",
+		"could you provide more details",
+		"what exactly do you want to change",
+	}
+	for _, needle := range needles {
+		if strings.Contains(trimmed, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func lastConversationMessage(messages []runner.ConvMessage, role string) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == role {
+			return strings.TrimSpace(messages[i].Content)
+		}
+	}
+	return ""
+}
+
+func isAffirmative(text string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(text))
+	switch trimmed {
+	case "tak", "tak.", "tak!", "yes", "yes.", "exactly", "dokładnie", "zgadza się", "correct", "right":
+		return true
+	}
+	return false
+}
+
+// PlanTask asks the PM to decide the execution strategy for a task.
+// brownfield indicates the target repository already contains source code;
+// when true, PM is instructed to plan surgical changes instead of scaffolding.
+func (a *PMAgent) PlanTask(ctx context.Context, spec TaskSpec, projectCtx string, brownfield bool) (ExecutionPlan, error) {
+	systemPrompt := "You are a Product Manager deciding the execution strategy for a task."
+
+	specText := fmt.Sprintf("Title: %s\nScope: %s\nBrownfield: %t\nDescription:\n%s\nAcceptance Criteria:\n",
+		spec.Title, spec.Scope, brownfield, spec.Description)
+	for _, ac := range spec.AcceptanceCriteria {
+		specText += "- " + ac + "\n"
+	}
+	if len(spec.Constraints) > 0 {
+		specText += "Constraints:\n"
+		for _, c := range spec.Constraints {
+			specText += "- " + c + "\n"
+		}
+	}
+	if len(spec.FilesToModify) > 0 {
+		specText += "Files to modify:\n"
+		for _, f := range spec.FilesToModify {
+			specText += "- " + f + "\n"
+		}
+	}
+
+	userContent := fmt.Sprintf(prompts.MustLoad("pm-plan-task"), specText, projectCtx)
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
+	})
+	if err != nil {
+		return ExecutionPlan{}, fmt.Errorf("pm plan task: runner: %w", err)
+	}
+
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return ExecutionPlan{}, fmt.Errorf("pm plan task: stream: %w", err)
+	}
+
+	return parseExecutionPlan(output), nil
+}
+
+// parseTaskSpec extracts a TaskSpec from PM output. Returns (spec, true) if found.
+func parseTaskSpec(output string) (TaskSpec, bool) {
+	sections := parseSections(output, "TASKSPEC")
+	content := sections["TASKSPEC"]
+	if content == "" {
+		return TaskSpec{}, false
+	}
+
+	spec := TaskSpec{}
+	lines := strings.Split(content, "\n")
+	currentField := ""
+	var descLines []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		upper := strings.ToUpper(trimmed)
+
+		if strings.HasPrefix(upper, "===END===") {
+			break
+		}
+
+		switch {
+		case strings.HasPrefix(upper, "TITLE:"):
+			spec.Title = strings.TrimSpace(strings.TrimPrefix(trimmed, trimmed[:6]))
+			currentField = ""
+		case strings.HasPrefix(upper, "SCOPE:"):
+			scope := strings.TrimSpace(strings.TrimPrefix(trimmed, trimmed[:6]))
+			spec.Scope = strings.ToLower(scope)
+			currentField = ""
+		case strings.HasPrefix(upper, "DESCRIPTION:"):
+			currentField = "description"
+		case strings.HasPrefix(upper, "ACCEPTANCE_CRITERIA:") || strings.HasPrefix(upper, "ACCEPTANCE CRITERIA:"):
+			currentField = "acceptance"
+		case strings.HasPrefix(upper, "CONSTRAINTS:"):
+			currentField = "constraints"
+		case strings.HasPrefix(upper, "FILES_TO_MODIFY:") || strings.HasPrefix(upper, "FILES TO MODIFY:"):
+			currentField = "files"
+		default:
+			item := extractListItem(line)
+			switch currentField {
+			case "description":
+				descLines = append(descLines, line)
+			case "acceptance":
+				if item != "" {
+					spec.AcceptanceCriteria = append(spec.AcceptanceCriteria, item)
+				}
+			case "constraints":
+				if item != "" {
+					spec.Constraints = append(spec.Constraints, item)
+				}
+			case "files":
+				if item != "" {
+					spec.FilesToModify = append(spec.FilesToModify, item)
+				}
+			}
+		}
+	}
+
+	spec.Description = strings.TrimSpace(strings.Join(descLines, "\n"))
+
+	if spec.Title == "" {
+		return TaskSpec{}, false
+	}
+
+	return spec, true
+}
+
+// parseExecutionPlan extracts an ExecutionPlan from PM output.
+func parseExecutionPlan(output string) ExecutionPlan {
+	sections := parseSections(output, "EXECUTION_PLAN")
+	content := sections["EXECUTION_PLAN"]
+	if content == "" {
+		// Fallback: treat entire output as coder instructions.
+		return ExecutionPlan{CoderInstructions: output}
+	}
+
+	plan := ExecutionPlan{}
+	lines := strings.Split(content, "\n")
+	currentField := ""
+	var instrLines []string
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		upper := strings.ToUpper(trimmed)
+
+		if strings.HasPrefix(upper, "===END===") {
+			break
+		}
+
+		switch {
+		case strings.HasPrefix(upper, "NEEDS_ARCHITECTURE:"):
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, trimmed[:19]))
+			plan.NeedsArchitecture = strings.EqualFold(val, "true")
+			currentField = ""
+		case strings.HasPrefix(upper, "NEEDS_DETAILED_PLAN:"):
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, trimmed[:20]))
+			plan.NeedsDetailedPlan = strings.EqualFold(val, "true")
+			currentField = ""
+		case strings.HasPrefix(upper, "CODER_INSTRUCTIONS:"):
+			currentField = "instructions"
+		default:
+			if currentField == "instructions" {
+				instrLines = append(instrLines, line)
+			}
+		}
+	}
+
+	plan.CoderInstructions = strings.TrimSpace(strings.Join(instrLines, "\n"))
+	return plan
 }

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,16 +40,35 @@ type CoderResult struct {
 	Files []string
 }
 
+// BuildFixStuckError indicates that the build/test fix loop is repeating the
+// same failure and was aborted to avoid an infinite cycle.
+type BuildFixStuckError struct {
+	RepeatCount int
+}
+
+func (e BuildFixStuckError) Error() string {
+	return fmt.Sprintf("build fix stuck: same error repeated %d times", e.RepeatCount)
+}
+
+// IsBuildFixStuck reports whether err represents an aborted fix loop caused by
+// repeated identical validation failures.
+func IsBuildFixStuck(err error) bool {
+	var target BuildFixStuckError
+	return errors.As(err, &target)
+}
+
 // CoderAgent generates code and writes files to disk one by one.
 type CoderAgent struct {
 	BaseAgent
-	runner runner.LLMRunner
-	ws     artifacts.Workspace
-	root   string
-	cfg    config.Config
-	exec   *executil.Runner
-	skills []string
-	model  string
+	runner      runner.LLMRunner
+	fixerRunner runner.LLMRunner // optional: separate runner for fix iterations
+	ws          artifacts.Workspace
+	root        string
+	cfg         config.Config
+	exec        *executil.Runner
+	skills      []string
+	model       string
+	fixerModel  string
 }
 
 func NewCoderAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, root string, cfg config.Config, skills []string, model string) *CoderAgent {
@@ -66,16 +86,46 @@ func NewCoderAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, root 
 
 func (a *CoderAgent) Role() bus.AgentRole { return bus.RoleCoder }
 
+// SetFixerRunner configures an optional separate runner/model used for fix
+// iterations (BuildAndFix, CoderFixPayload). When not set, fixes use the
+// primary runner/model.
+func (a *CoderAgent) SetFixerRunner(r runner.LLMRunner, model string) {
+	a.fixerRunner = r
+	a.fixerModel = model
+}
+
+// fixRunner returns the runner to use for fix completions.
+func (a *CoderAgent) fixRunner() runner.LLMRunner {
+	if a.fixerRunner != nil {
+		return a.fixerRunner
+	}
+	return a.runner
+}
+
+// fixModel returns the model to use for fix completions.
+func (a *CoderAgent) fixModel() string {
+	if a.fixerModel != "" {
+		return a.fixerModel
+	}
+	return a.model
+}
+
 func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
 	systemPrompt, userContent, err := a.buildPrompt(msg)
 	if err != nil {
 		return bus.Message{}, err
 	}
 
-	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+	// Use fixer runner/model for fix payloads, primary for initial generation.
+	r, mdl := a.runner, a.model
+	if _, isFix := msg.Payload.(CoderFixPayload); isFix {
+		r, mdl = a.fixRunner(), a.fixModel()
+	}
+
+	ch, err := r.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,
 		Skills:       a.skills,
-		Model:        a.model,
+		Model:        mdl,
 		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
 	})
 	if err != nil {
@@ -98,13 +148,23 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 	if err := a.ws.WriteFile(artifacts.ChangesFile, []byte(sections["CHANGES"]+"\n")); err != nil {
 		return bus.Message{}, err
 	}
-	if err := a.ws.WriteFile(artifacts.TestCmdsFile, []byte(sections["TEST_CMDS"]+"\n")); err != nil {
-		return bus.Message{}, err
+	if cmds := strings.TrimSpace(sections["TEST_CMDS"]); cmds != "" && !a.ws.FileExists(artifacts.TestCmdsFile) {
+		if err := a.ws.WriteFile(artifacts.TestCmdsFile, []byte(cmds+"\n")); err != nil {
+			return bus.Message{}, err
+		}
 	}
 
 	// Initial code generation must produce at least one file.
+	// If none found, retry once with a format-correction prompt so small models
+	// that output raw code without path/fence markers get a second chance.
 	if _, isInitial := msg.Payload.(CoderPayload); isInitial && len(written) == 0 {
-		return bus.Message{}, fmt.Errorf("coder: no file blocks found in initial code generation output (raw output saved to %s)", artifacts.RawCoderOutputFile)
+		written, totalUsage, err = a.retryFormatCorrection(ctx, r, mdl, systemPrompt, fullOutput, totalUsage)
+		if err != nil {
+			return bus.Message{}, fmt.Errorf("coder: format retry: %w", err)
+		}
+		if len(written) == 0 {
+			return bus.Message{}, fmt.Errorf("coder: no file blocks found in initial code generation output (raw output saved to %s)", artifacts.RawCoderOutputFile)
+		}
 	}
 
 	// Ensure go.mod exists immediately after writing files so that
@@ -115,6 +175,41 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 	a.Bus.Publish(bus.NewMessage(bus.RoleCoder, "", bus.MsgEvent, "EventFilesWritten"))
 
 	return bus.NewMessage(bus.RoleCoder, "", bus.MsgResponse, CoderResult{Files: written}), nil
+}
+
+// retryFormatCorrection sends the raw output back to the model and asks it to
+// reformat any source code using proper file-block syntax. Used when the first
+// pass produces text/code without the required bold-path + fence structure.
+func (a *CoderAgent) retryFormatCorrection(ctx context.Context, r runner.LLMRunner, mdl, systemPrompt, rawOutput string, prevUsage runner.TokenUsage) ([]string, runner.TokenUsage, error) {
+	a.emitToken("\n[retrying: reformatting output into file blocks…]\n", false)
+
+	correctionPrompt := "The following is source code you produced, but it is missing the required file block format.\n" +
+		"Reformat ALL source code below into proper file blocks — one block per file.\n\n" +
+		"Required format for EVERY file:\n\n" +
+		"**path/to/file.go**\n```go\n// full file content\n```\n\n" +
+		"Do NOT add explanations. Output ONLY the file blocks.\n\n" +
+		"Source code to reformat:\n\n" + rawOutput
+
+	ch, err := r.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Model:        mdl,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: correctionPrompt}},
+	})
+	if err != nil {
+		return nil, prevUsage, err
+	}
+
+	written, retryOutput, retryUsage, err := a.streamAndWriteFiles(ch)
+	if err != nil {
+		return nil, prevUsage, err
+	}
+	_ = a.ws.WriteFile(artifacts.RawCoderOutputFile, []byte(retryOutput+"\n"))
+
+	total := runner.TokenUsage{
+		InputTokens:  prevUsage.InputTokens + retryUsage.InputTokens,
+		OutputTokens: prevUsage.OutputTokens + retryUsage.OutputTokens,
+	}
+	return written, total, nil
 }
 
 // streamAndWriteFiles consumes the LLM token stream, detects code fence blocks,
@@ -231,6 +326,9 @@ func (a *CoderAgent) writeOneFile(path, content string) error {
 	if path == "" {
 		return fmt.Errorf("empty path after sanitization")
 	}
+	if strings.HasSuffix(path, "_test.go") {
+		return fmt.Errorf("refusing to write %s: tester owns test files", path)
+	}
 	if strings.HasSuffix(path, ".go") {
 		content = fixInvalidGoPackage(content)
 	}
@@ -271,22 +369,53 @@ func (a *CoderAgent) buildPrompt(msg bus.Message) (string, string, error) {
 
 		system := fmt.Sprintf(prompts.MustLoad("coder-initial"), moduleInfo, projectName, projectName, payload.ProjectContext)
 
+		const fileBlockReminder = `OUTPUT FORMAT — you MUST follow this exactly for every file:
+
+**path/to/file.go**
+` + "```" + `go
+package example
+
+// complete file content here
+` + "```" + `
+
+Every code block MUST be preceded by the bold file path on its own line.
+Without it the file will NOT be saved. No descriptions, no prose — only file blocks.`
+
 		var userParts []string
 
 		if payload.StageIndex > 0 {
 			userParts = append(userParts, fmt.Sprintf(
-				"You are implementing %s.\nImplement ONLY this stage's scope. Do NOT implement features from other stages.\nOutput source code files ONLY — no explanations.",
-				payload.StageName))
+				"You are implementing %s.\nImplement ONLY this stage's scope. Do NOT implement features from other stages.\n\n%s",
+				payload.StageName, fileBlockReminder))
 		} else {
-			userParts = append(userParts, "Implement the following plan. Output source code files ONLY — no explanations.\nIMPORTANT: Implement ALL features marked as \"Must Have\" and \"Should Have\". Skip \"Could Have\" and \"Won't Have\" items.")
+			userParts = append(userParts, "Implement the following plan.\nIMPORTANT: Implement ALL features marked as \"Must Have\" and \"Should Have\". Skip \"Could Have\" and \"Won't Have\" items.\n\n"+fileBlockReminder)
 		}
 
 		userParts = append(userParts, fmt.Sprintf("Plan:\n%s", payload.Plan))
 
 		// Include existing project files for brownfield context.
+		// Split test files from source files so TDD tests are never mislabeled
+		// as "files to modify" (which causes models to describe patches instead
+		// of outputting new source code blocks).
 		existingFiles := a.collectExistingSourceFiles()
-		if len(existingFiles) > 0 {
-			sourceCtx := a.buildSourceContext(existingFiles)
+		var existingTests, existingSrc []string
+		for _, f := range existingFiles {
+			if strings.HasSuffix(f, "_test.go") {
+				existingTests = append(existingTests, f)
+			} else {
+				existingSrc = append(existingSrc, f)
+			}
+		}
+		if len(existingTests) > 0 {
+			testCtx := a.buildSourceContext(existingTests)
+			if testCtx != "" {
+				userParts = append(userParts, fmt.Sprintf(
+					"EXISTING TEST FILES (TDD) — implement source code to make these tests pass. Do NOT re-output or modify these test files:\n%s",
+					testCtx))
+			}
+		}
+		if len(existingSrc) > 0 {
+			sourceCtx := a.buildSourceContext(existingSrc)
 			if sourceCtx != "" {
 				userParts = append(userParts, fmt.Sprintf(
 					"EXISTING PROJECT FILES — you MUST modify these files, not create new ones with different paths:\n%s",
@@ -423,7 +552,8 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 	a.ensureGoMod()
 
 	buildCommand := a.buildCmd()
-	if buildCommand == "" {
+	testCommands := a.testCmds()
+	if buildCommand == "" && len(testCommands) == 0 {
 		return files, nil
 	}
 
@@ -436,27 +566,48 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 	prevBuildErr := ""
 	repeatCount := 0
 	var totalUsage runner.TokenUsage
+	testContext := a.buildSourceContext(a.collectRelatedTestFiles(files))
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		if unlimited {
-			a.emitToken(fmt.Sprintf("build check (%d): $ %s\n", attempt, buildCommand), false)
+			a.emitToken(fmt.Sprintf("validation check (%d)\n", attempt), false)
 		} else {
-			a.emitToken(fmt.Sprintf("build check (%d/%d): $ %s\n", attempt, maxAttempts, buildCommand), false)
+			a.emitToken(fmt.Sprintf("validation check (%d/%d)\n", attempt, maxAttempts), false)
 		}
 
-		buildErr := a.runBuild(buildCommand)
-		if buildErr == "" {
-			a.emitToken("build: OK\n", false)
+		failureKind := "build"
+		failureOutput := ""
+
+		if buildCommand != "" {
+			a.emitToken(fmt.Sprintf("$ %s\n", buildCommand), false)
+			failureOutput = a.runBuild(buildCommand)
+		}
+
+		if failureOutput == "" && len(testCommands) > 0 {
+			testFailure := a.runTestCommands(testCommands)
+			if testFailure != "" {
+				failureKind = "test"
+				failureOutput = testFailure
+			}
+		}
+
+		if failureOutput == "" {
+			if buildCommand != "" {
+				a.emitToken("build: OK\n", false)
+			}
+			if len(testCommands) > 0 {
+				a.emitToken("tests: OK\n", false)
+			}
 			a.emit(bus.MsgEvent, "done")
 			a.emitUsage(totalUsage)
 			return files, nil
 		}
 
 		a.emit(bus.MsgEvent, "fixing")
-		a.emitToken(fmt.Sprintf("build failed:\n%s\n", buildErr), false)
+		a.emitToken(fmt.Sprintf("%s failed:\n%s\n", failureKind, failureOutput), false)
 
 		// Detect repeated identical errors — LLM is stuck in a loop.
-		normalizedErr := normalizeBuildError(buildErr)
+		normalizedErr := normalizeBuildError(failureOutput)
 		if normalizedErr == prevBuildErr {
 			repeatCount++
 		} else {
@@ -466,37 +617,42 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 		if repeatCount >= maxRepeatedBuildErrors {
 			a.emitToken(fmt.Sprintf("same build error repeated %d times — aborting fix loop\n", repeatCount), false)
 			// Attempt auto-repair for known patterns before giving up.
-			if autoFixed := a.autoFixKnownBuildErrors(buildErr, files); autoFixed {
+			if autoFixed := a.autoFixKnownBuildErrors(failureOutput, files); autoFixed {
 				a.emitToken("applied automatic fixes for known error patterns, retrying…\n", false)
 				repeatCount = 0
 				prevBuildErr = ""
 				continue
 			}
 			a.emitUsage(totalUsage)
-				return files, fmt.Errorf("build fix stuck: same error repeated %d times", repeatCount)
+			return files, BuildFixStuckError{RepeatCount: repeatCount}
 		}
 
 		if attempt == maxAttempts {
 			break
 		}
 
-		a.emitToken(fmt.Sprintf("fixing build errors (attempt %d)…\n", attempt), false)
+		a.emitToken(fmt.Sprintf("fixing %s issues (attempt %d)…\n", failureKind, attempt), false)
 
 		// Extract files mentioned in errors to focus the fix.
-		errorFiles := extractFilesFromErrors(buildErr)
+		errorFiles := extractFilesFromErrors(failureOutput)
 		errorFileList := ""
 		if len(errorFiles) > 0 {
 			errorFileList = "\n\nFiles with errors:\n- " + strings.Join(errorFiles, "\n- ")
 		}
 
 		sourceContext := a.buildSourceContext(files)
-		fixPrompt := fmt.Sprintf("Build command failed:\n$ %s\n\nBuild errors:\n%s%s\n\nCurrent source files:\n%s\n\nFix ONLY the files that have compilation errors. Do NOT re-output files that compile correctly. Do NOT create new files or restructure the project.",
-			buildCommand, buildErr, errorFileList, sourceContext)
+		readOnlyTests := ""
+		if testContext != "" {
+			readOnlyTests = "\n\nRead-only test files (DO NOT MODIFY):\n" + testContext
+		}
+		validationSummary := a.validationSummary(buildCommand, testCommands)
+		fixPrompt := fmt.Sprintf("Validation failed during %s.\n\n%s\n\nFailure output:\n%s%s\n\nCurrent source files:\n%s\n\nFix ONLY the files that have errors. Use the existing tests as the contract. Do NOT re-output files that already work. Do NOT create new files or restructure the project.",
+			failureKind, validationSummary, failureOutput, errorFileList, sourceContext+readOnlyTests)
 
-		ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		ch, err := a.fixRunner().Complete(ctx, runner.CompletionRequest{
 			SystemPrompt: prompts.MustLoad("coder-build-fix"),
 			Skills:       a.skills,
-			Model:        a.model,
+			Model:        a.fixModel(),
 			Messages:     []runner.ConvMessage{{Role: "user", Content: fixPrompt}},
 		})
 		if err != nil {
@@ -642,6 +798,125 @@ func (a *CoderAgent) runBuild(command string) string {
 		return output
 	}
 	return ""
+}
+
+func (a *CoderAgent) runTestCommands(cmds []string) string {
+	for _, cmd := range cmds {
+		if isInteractiveCommand(cmd) {
+			a.emitToken(fmt.Sprintf("skipping interactive test command: %s\n", cmd), false)
+			continue
+		}
+		a.emitToken(fmt.Sprintf("$ %s\n", cmd), false)
+		res := a.exec.Run(cmd)
+		if res.ExitCode == 0 {
+			continue
+		}
+		output := strings.TrimSpace(res.Stderr)
+		if output == "" {
+			output = strings.TrimSpace(res.Stdout)
+		}
+		if output == "" {
+			output = fmt.Sprintf("exit code %d", res.ExitCode)
+		}
+		return fmt.Sprintf("command: %s\n%s", cmd, output)
+	}
+	return ""
+}
+
+func (a *CoderAgent) testCmds() []string {
+	data, err := a.ws.ReadFile(artifacts.TestCmdsFile)
+	if err == nil {
+		cmds := filterTestCommands(parseCmds(string(data)), a.buildCmd())
+		if len(cmds) > 0 {
+			return cmds
+		}
+	}
+	return a.defaultTestCmds()
+}
+
+func (a *CoderAgent) defaultTestCmds() []string {
+	switch a.detectLanguage() {
+	case "go":
+		return []string{"go test ./..."}
+	case "node", "javascript", "typescript":
+		return []string{"npm test"}
+	case "python":
+		return []string{"python -m pytest"}
+	case "rust":
+		return []string{"cargo test"}
+	default:
+		return nil
+	}
+}
+
+func (a *CoderAgent) collectRelatedTestFiles(files []string) []string {
+	seen := make(map[string]bool)
+	var tests []string
+	for _, rel := range files {
+		dir := filepath.Dir(rel)
+		if dir == "." || dir == "" {
+			dir = ""
+		}
+		absDir := a.root
+		if dir != "" {
+			absDir = filepath.Join(a.root, dir)
+		}
+		entries, err := os.ReadDir(absDir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), "_test.go") {
+				continue
+			}
+			testRel := entry.Name()
+			if dir != "" {
+				testRel = filepath.Join(dir, entry.Name())
+			}
+			testRel = filepath.ToSlash(testRel)
+			if seen[testRel] {
+				continue
+			}
+			seen[testRel] = true
+			tests = append(tests, testRel)
+		}
+	}
+	return tests
+}
+
+func filterTestCommands(cmds []string, buildCommand string) []string {
+	var filtered []string
+	for _, cmd := range cmds {
+		if cmd == "" || cmd == buildCommand {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(cmd))
+		switch {
+		case strings.HasPrefix(lower, "go build "):
+			continue
+		case strings.HasPrefix(lower, "cargo build"):
+			continue
+		case strings.HasPrefix(lower, "npm run build"):
+			continue
+		case strings.HasPrefix(lower, "mvn compile"):
+			continue
+		case strings.HasPrefix(lower, "gradle compile"):
+			continue
+		}
+		filtered = append(filtered, cmd)
+	}
+	return filtered
+}
+
+func (a *CoderAgent) validationSummary(buildCommand string, testCommands []string) string {
+	var sections []string
+	if buildCommand != "" {
+		sections = append(sections, "Build command:\n$ "+buildCommand)
+	}
+	if len(testCommands) > 0 {
+		sections = append(sections, "Test commands:\n$ "+strings.Join(testCommands, "\n$ "))
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 // ensureGoMod initialises go.mod if the project is Go and no go.mod exists.

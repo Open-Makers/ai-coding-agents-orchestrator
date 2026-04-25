@@ -37,6 +37,8 @@ const (
 	NiceToHaveFile           = "nice_to_have.md"
 	SummaryFile              = "summary.md"
 	RunLogFile               = "runlog.txt"
+	TaskSpecFile             = "task_spec.json"
+	TaskPlanFile             = "task_plan.md"
 )
 
 // Workspace represents the .orchestrator directory inside a repo root.

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
@@ -12,8 +13,9 @@ import (
 )
 
 type ReviewerPayload struct {
-	Files []string // source files to review (read from disk, not raw output)
-	Root  string   // project root for reading files
+	Files          []string // source files to review (read from disk, not raw output)
+	Root           string   // project root for reading files
+	ProjectContext string   // optional repository briefing (brownfield, tree, etc.)
 }
 
 // ReviewResult is the structured outcome of a review.
@@ -71,6 +73,9 @@ func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 	}
 
 	systemPrompt := prompts.MustLoad("reviewer-system")
+	if strings.TrimSpace(payload.ProjectContext) != "" {
+		systemPrompt = fmt.Sprintf("%s\n\nProject context:\n%s", systemPrompt, payload.ProjectContext)
+	}
 
 	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s\n\nTest results:\n%s",
 		string(plan), sourceContext, string(report))

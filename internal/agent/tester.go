@@ -17,9 +17,12 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
-// TesterPayload carries the list of source files written by the coder.
+// TesterPayload carries the implementation plan and/or source files for test generation.
 type TesterPayload struct {
-	Files []string
+	Files          []string
+	Plan           string
+	ProjectContext string
+	StageName      string
 }
 
 // TestReport is the structured result written to test_report.json.
@@ -56,13 +59,12 @@ func NewTesterAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, root
 func (a *TesterAgent) Role() bus.AgentRole { return bus.RoleTester }
 
 // GenerateTests creates test files via LLM without running them.
-// Used in the pipeline's Phase 2 where we only want test files on disk
-// before the build-and-fix step.
-func (a *TesterAgent) GenerateTests(ctx context.Context, files []string) error {
-	if len(files) == 0 {
+// Used in TDD mode where tests are written before or alongside implementation.
+func (a *TesterAgent) GenerateTests(ctx context.Context, payload TesterPayload) error {
+	if len(payload.Files) == 0 && strings.TrimSpace(payload.Plan) == "" {
 		return nil
 	}
-	return a.generateTests(ctx, files)
+	return a.generateTests(ctx, payload)
 }
 
 func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error) {
@@ -119,18 +121,17 @@ func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error)
 	return bus.NewMessage(bus.RoleTester, "", bus.MsgResponse, report), nil
 }
 
-// generateTests uses the LLM to create unit test files for the given source files.
-func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
-	var sourceContext strings.Builder
+// generateTests uses the LLM to create unit test files from the plan and/or source files.
+func (a *TesterAgent) generateTests(ctx context.Context, payload TesterPayload) error {
+	var promptParts []string
 
 	// Include go.mod so LLM knows the module path and available dependencies.
 	if gomod, err := safefile.ReadFile(a.root, "go.mod"); err == nil {
-		sourceContext.WriteString("**go.mod**\n```\n")
-		sourceContext.Write(gomod)
-		sourceContext.WriteString("\n```\n\n")
+		promptParts = append(promptParts, fmt.Sprintf("**go.mod**\n```\n%s\n```", string(gomod)))
 	}
 
-	for _, path := range files {
+	var sourceContext strings.Builder
+	for _, path := range payload.Files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
 		}
@@ -144,13 +145,27 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 		}
 	}
 
-	if sourceContext.Len() == 0 {
+	if strings.TrimSpace(payload.Plan) != "" {
+		header := "Implementation plan"
+		if strings.TrimSpace(payload.StageName) != "" {
+			header = payload.StageName
+		}
+		promptParts = append(promptParts, fmt.Sprintf("**%s**\n%s", header, payload.Plan))
+	}
+
+	if sourceContext.Len() > 0 {
+		promptParts = append(promptParts, "Source files to test:\n\n"+sourceContext.String())
+	}
+
+	if len(promptParts) == 0 {
 		return nil
 	}
 
 	systemPrompt := prompts.MustLoad("tester-generate")
-
-	userContent := fmt.Sprintf("Source files to test:\n\n%s", sourceContext.String())
+	if strings.TrimSpace(payload.ProjectContext) != "" {
+		systemPrompt = fmt.Sprintf("%s\n\nProject context:\n%s", systemPrompt, payload.ProjectContext)
+	}
+	userContent := strings.Join(promptParts, "\n\n")
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
 		SystemPrompt: systemPrompt,
@@ -165,6 +180,13 @@ func (a *TesterAgent) generateTests(ctx context.Context, files []string) error {
 	output, err := a.collectStream(ch)
 	if err != nil {
 		return fmt.Errorf("tester: stream: %w", err)
+	}
+
+	sections := parseSections(output, "TEST_CMDS")
+	if cmds := strings.TrimSpace(sections["TEST_CMDS"]); cmds != "" {
+		if err := a.ws.WriteFile(artifacts.TestCmdsFile, []byte(cmds+"\n")); err != nil {
+			return err
+		}
 	}
 
 	testFiles := a.writeTestBlocks(output)

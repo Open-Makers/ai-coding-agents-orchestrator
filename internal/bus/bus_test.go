@@ -119,3 +119,35 @@ func TestBus_UsageMessageType(t *testing.T) {
 		t.Fatal("timeout")
 	}
 }
+
+func TestPublishSubscribe_BurstPreservesGateAfterTokens(t *testing.T) {
+	b := New()
+	ch := b.Subscribe()
+
+	tokenCount := defaultSubBuf - 2
+	for i := 0; i < tokenCount; i++ {
+		b.Publish(NewMessage(RolePM, "", MsgEvent, TokenPayload{
+			Text: "x",
+			Done: false,
+		}))
+	}
+
+	gate := NewMessage(RoleSystem, "", MsgHumanGate, "vision.md")
+	b.Publish(gate)
+
+	foundGate := false
+	for i := 0; i < tokenCount+1; i++ {
+		select {
+		case msg := <-ch:
+			if msg.ID == gate.ID {
+				foundGate = true
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timeout draining burst messages")
+		}
+	}
+
+	if !foundGate {
+		t.Fatal("expected human gate to survive token burst")
+	}
+}

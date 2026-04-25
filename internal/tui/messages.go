@@ -47,6 +47,7 @@ type AgentEventMsg struct {
 // Requirements picker/editor messages.
 type RequirementsSavedMsg struct{ Path string }
 type EditorCancelledMsg struct{}
+type PickerCancelledMsg struct{}
 type PickerSelectedMsg struct {
 	Path  string
 	IsNew bool
@@ -75,6 +76,12 @@ type ChatClosedMsg struct{}
 // PipelineDoneMsg is sent when the pipeline finishes (successfully or with an error).
 type PipelineDoneMsg struct {
 	Err error
+}
+
+// TaskRunnerReadyMsg is sent when the TaskRunner is ready to receive interaction.
+type TaskRunnerReadyMsg struct {
+	Runner *orchestrator.TaskRunner
+	Cancel context.CancelFunc
 }
 
 // waitForBusEvent is a tea.Cmd that reads one message from the bus channel.

@@ -221,6 +221,9 @@ func (m *AgentPanelModel) syncViewport() {
 	if m.currentLine != "" {
 		src = append(append([]string{}, m.lines...), m.currentLine)
 	}
+	if m.vp.Width > 0 {
+		src = strings.Split(wrapContent(strings.Join(src, "\n"), m.vp.Width), "\n")
+	}
 	// Apply syntax highlighting to code blocks.
 	if m.highlight != nil {
 		src = m.highlight.highlightLines(src)

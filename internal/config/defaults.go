@@ -15,13 +15,13 @@ func DefaultConfig() Config {
 			"pm": {
 				Skills: []string{"agentic-engineering"},
 			},
-			"pm_fixer": {
-				Skills: []string{"agentic-engineering"},
-			},
 			"planner": {
 				Skills: []string{"agentic-engineering", "architecture-decision-records", "codebase-onboarding", "golang-patterns", "coding-standards"},
 			},
 			"coder": {
+				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},
+			},
+			"coder_fixer": {
 				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},
 			},
 			"tester": {

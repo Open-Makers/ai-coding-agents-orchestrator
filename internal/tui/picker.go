@@ -112,6 +112,8 @@ func (m PickerModel) Update(msg tea.Msg) (PickerModel, tea.Cmd) {
 			}
 		case "q":
 			return m, tea.Quit
+		case "esc":
+			return m, func() tea.Msg { return PickerCancelledMsg{} }
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -253,6 +255,7 @@ func (m PickerModel) View() string {
 	footer := footerStyle.Render(
 		hintText("↑↓", "navigate") + "  " +
 			hintText("Enter", "select") + "  " +
+			hintText("Esc", "menu") + "  " +
 			hintText("q", "quit"),
 	)
 

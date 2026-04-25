@@ -11,7 +11,11 @@ import (
 )
 
 const defaultRingSize = 500
-const defaultSubBuf = 100
+
+// defaultSubBuf must absorb large token bursts from streaming LLM responses.
+// If this buffer is too small, the non-blocking fan-out below drops token
+// events and even follow-up control messages like human_gate approvals.
+const defaultSubBuf = 4096
 
 type Bus struct {
 	mu      sync.RWMutex

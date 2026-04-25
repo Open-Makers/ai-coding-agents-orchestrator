@@ -73,8 +73,9 @@ func TestQualityGate_PassOnFirstTry(t *testing.T) {
 	}
 
 	p := &Pipeline{b: b, agents: agents, niceToHave: make(map[string][]string), agentDurations: make(map[bus.AgentRole]time.Duration)}
+	p.quality = NewQualityGate(b, agents, config.Config{}, artifacts.Workspace{}, "", p.niceToHave, p.agentDurations)
 	files := []string{"main.go"}
-	if err := p.qualityGate(context.Background(), "ctx", &files); err != nil {
+	if err := p.quality.RunChecks(context.Background(), "ctx", &files); err != nil {
 		t.Fatalf("expected success, got: %v", err)
 	}
 }
@@ -119,8 +120,9 @@ func TestQualityGate_FixAndRestart(t *testing.T) {
 
 	cfg := config.Config{}
 	p := &Pipeline{b: b, agents: agents, cfg: cfg, niceToHave: make(map[string][]string), agentDurations: make(map[bus.AgentRole]time.Duration)}
+	p.quality = NewQualityGate(b, agents, cfg, artifacts.Workspace{}, "", p.niceToHave, p.agentDurations)
 	files := []string{"main.go"}
-	if err := p.qualityGate(context.Background(), "ctx", &files); err != nil {
+	if err := p.quality.RunChecks(context.Background(), "ctx", &files); err != nil {
 		t.Fatalf("expected success after fix, got: %v", err)
 	}
 

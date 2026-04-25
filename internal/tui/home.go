@@ -18,7 +18,8 @@ import (
 type homeAction int
 
 const (
-	homeActionRun homeAction = iota
+	homeActionNewTask homeAction = iota
+	homeActionRunPipeline
 	homeActionOpenProject
 	homeActionGlobalSettings
 	homeActionSetup
@@ -139,7 +140,8 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		cachedOverrides:  overrides,
 		recentProjects:   LoadRecentProjects(),
 		items: []homeMenuItem{
-			{icon: "▶", label: "Run Pipeline", desc: "Select requirements and start agents", action: homeActionRun, key: "Enter"},
+			{icon: "▶", label: "New Task", desc: "Start a PM chat to define a new task before execution", action: homeActionNewTask, key: "Enter"},
+			{icon: "📋", label: "Run Pipeline", desc: "Choose a requirements file and run the full pipeline", action: homeActionRunPipeline, key: "r"},
 			{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
 			{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
 			{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
@@ -198,6 +200,11 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			} else {
 				return m, m.selectAction(selected)
 			}
+		case "r", "R":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
+			return m, m.selectAction(homeActionRunPipeline)
 		case "s", "S":
 			if !m.projectValid {
 				return m, m.selectAction(homeActionOpenProject)
@@ -227,22 +234,27 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			if !m.projectValid {
 				return m, m.selectAction(homeActionOpenProject)
 			}
-			return m, m.selectAction(homeActionRun)
+			return m, m.selectAction(homeActionNewTask)
 		case "2":
-			return m, m.selectAction(homeActionOpenProject)
-		case "3":
-			return m, m.selectAction(homeActionGlobalSettings)
-		case "4":
 			if !m.projectValid {
 				return m, m.selectAction(homeActionOpenProject)
 			}
-			return m, m.selectAction(homeActionSetup)
+			return m, m.selectAction(homeActionRunPipeline)
+		case "3":
+			return m, m.selectAction(homeActionOpenProject)
+		case "4":
+			return m, m.selectAction(homeActionGlobalSettings)
 		case "5":
 			if !m.projectValid {
 				return m, m.selectAction(homeActionOpenProject)
 			}
-			return m, m.selectAction(homeActionClean)
+			return m, m.selectAction(homeActionSetup)
 		case "6":
+			if !m.projectValid {
+				return m, m.selectAction(homeActionOpenProject)
+			}
+			return m, m.selectAction(homeActionClean)
+		case "7":
 			m.confirmQuit = true
 		}
 	}
@@ -514,7 +526,7 @@ func (m HomeModel) renderLogo(maxW int) string {
 // ── Pipeline visualisation ───────────────────────────────────────────────────
 
 func (m HomeModel) renderPipeline(maxW int) string {
-	agents := []string{"PM", "PLAN", "CODE", "TEST", "REVIEW", "UX", "SEC", "QA"}
+	agents := []string{"TASK", "PM", "CODE", "TEST", "REVIEW", "UX", "SEC", "QA"}
 
 	arrow := lipgloss.NewStyle().Foreground(crt.dim).Render(" → ")
 
@@ -615,7 +627,8 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 
 	// Each menu item gets its own accent color.
 	itemColors := []lipgloss.Color{
-		p.green,  // Run Pipeline
+		p.green,  // New Task
+		p.cyan,   // Run Pipeline
 		p.accent, // Open Project
 		p.cyan,   // Global Settings
 		p.gold,   // Project Setup
@@ -769,6 +782,7 @@ func (m HomeModel) renderFooter(style lipgloss.Style) string {
 	}
 	hints = append(hints,
 		hint("Enter", "select"),
+		hint("r", "pipeline"),
 		hint("o", "project"),
 		hint("g", "global"),
 		hint("s", "setup"),
@@ -843,7 +857,7 @@ func resolveLanguageFromRoot(root string, cfg config.Config) string {
 // resolveOverrides returns all agents with their effective runner/model.
 func resolveOverrides(agents map[string]config.AgentConfig, defaultRunner, defaultModel string) []agentOverride {
 	var overrides []agentOverride
-	roles := []string{"pm", "pm_fixer", "planner", "coder", "tester", "reviewer", "ux_reviewer", "security", "qa"}
+	roles := []string{"pm", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security", "qa"}
 	for _, role := range roles {
 		if ac, ok := agents[role]; ok {
 			r := ac.Runner
@@ -926,7 +940,7 @@ func isValidProjectRoot(root string) bool {
 // requiresProject returns true for actions that need a valid project directory.
 func requiresProject(action homeAction) bool {
 	switch action {
-	case homeActionRun, homeActionSetup, homeActionClean:
+	case homeActionNewTask, homeActionRunPipeline, homeActionSetup, homeActionClean:
 		return true
 	case homeActionOpenProject, homeActionGlobalSettings, homeActionQuit:
 		return false

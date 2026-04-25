@@ -22,15 +22,15 @@ const (
 	startupPhaseHome        startupPhase = iota // main menu
 	startupPhaseSetup                           // API key / model config
 	startupPhaseModulePath                      // Go module path input
-	startupPhasePicker                          // file picker
-	startupPhaseEditor                          // inline requirements editor
+	startupPhasePicker                          // file picker (legacy pipeline)
+	startupPhaseEditor                          // inline requirements editor (legacy)
 	startupPhaseOpenProject                     // project directory browser
 	startupPhaseProjectList                     // recent projects + browse
 )
 
 // startupModel is a standalone Bubble Tea model shown when the orchestrator is
 // launched without a requirements file. It progresses through:
-// home → (open project →) (setup →) picker → (editor →) done.
+// home → (open project →) (setup →) PM chat | picker → done.
 type startupModel struct {
 	phase         startupPhase
 	projectPicker ProjectPickerModel
@@ -44,7 +44,8 @@ type startupModel struct {
 	wsDir         string // .orchestrator directory path
 	wsReqPath     string // absolute path to write new requirements
 	cfg           config.Config
-	reqPath       string // result — non-empty when resolved
+	reqPath       string // result — non-empty when resolved (legacy pipeline)
+	chatMode      bool   // result — true when PM chat-based requirements gathering was selected
 	width         int
 	height        int
 }
@@ -100,8 +101,16 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.action {
 			case homeActionQuit:
 				return m, tea.Quit
-			case homeActionRun:
-				// If Go project has no module path and no go.mod, ask for it first.
+			case homeActionNewTask:
+				// PM chat-based requirements gathering — skip file picker.
+				if m.needsModulePath() {
+					return m, m.showModulePathInput()
+				}
+				cleanWorkspace(m.wsDir, false)
+				m.chatMode = true
+				return m, tea.Quit
+			case homeActionRunPipeline:
+				// Legacy pipeline flow: choose or create requirements.md first.
 				if m.needsModulePath() {
 					return m, m.showModulePathInput()
 				}
@@ -113,7 +122,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.phase = startupPhaseProjectList
 				return m, m.projectPicker.Init()
 			case homeActionClean:
-				cleanWorkspace(m.wsDir)
+				cleanWorkspace(m.wsDir, true)
 				m.home = NewHomeModel(m.cfg, m.root)
 				// Trigger viewport init + spinner for the fresh model.
 				m.home.width, m.home.height = m.width, m.height
@@ -269,6 +278,9 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cleanIfRequirementsChanged(msg.Path)
 				return m, tea.Quit
 			}
+		case PickerCancelledMsg:
+			m.phase = startupPhaseHome
+			return m, m.home.Init()
 		}
 		var cmd tea.Cmd
 		m.picker, cmd = m.picker.Update(msg)
@@ -288,9 +300,6 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.phase = startupPhasePicker
 			return m, nil
 		}
-		var cmd tea.Cmd
-		m.editor, cmd = m.editor.Update(msg)
-		return m, cmd
 
 	case startupPhaseProjectList:
 		switch msg := msg.(type) {
@@ -401,6 +410,13 @@ func (m *startupModel) showModulePathInput() tea.Cmd {
 	return m.moduleInput.Focus()
 }
 
+func (m *startupModel) showPicker() tea.Cmd {
+	m.picker = NewPicker(m.root, m.wsReqPath)
+	m.picker.SetSize(m.width, m.height)
+	m.phase = startupPhasePicker
+	return m.picker.Init()
+}
+
 // guessModulePath tries to derive a Go module path from the git remote origin URL.
 // Supports both SSH (git@host:owner/repo.git) and HTTPS (https://host/owner/repo.git) formats.
 func guessModulePath(root string) string {
@@ -427,14 +443,6 @@ func guessModulePath(root string) string {
 	}
 
 	return ""
-}
-
-func (m *startupModel) showPicker() tea.Cmd {
-	picker := NewPicker(m.root, filepath.Dir(m.wsReqPath))
-	picker.SetSize(m.width, m.height)
-	m.picker = picker
-	m.phase = startupPhasePicker
-	return m.picker.Init()
 }
 
 // transitionToHome builds a fresh HomeModel for the current root/cfg and
@@ -540,14 +548,17 @@ func (m startupModel) viewModulePath() string {
 }
 
 // cleanWorkspace removes all files in the workspace directory except preserved ones.
-func cleanWorkspace(wsDir string) {
+// When preserveRequirements is false, requirements.md is also removed.
+func cleanWorkspace(wsDir string, preserveRequirements bool) {
 	entries, err := os.ReadDir(wsDir)
 	if err != nil {
 		return
 	}
 	preserve := map[string]bool{
-		artifacts.RequirementsFile:  true,
 		artifacts.ProjectConfigFile: true,
+	}
+	if preserveRequirements {
+		preserve[artifacts.RequirementsFile] = true
 	}
 	for _, entry := range entries {
 		if preserve[entry.Name()] {
@@ -602,21 +613,31 @@ func pairLess(r1, m1, r2, m2 string) bool {
 	return m1 < m2
 }
 
-// RunStartup shows the home/picker/editor flow and returns the selected
-// requirements path and the (possibly updated) config.
-// Returns ("", cfg, nil) when the user quits without selecting.
-func RunStartup(root, wsReqPath string, cfg config.Config) (string, config.Config, error) {
+// StartupResult holds the outcome of the startup flow.
+type StartupResult struct {
+	ReqPath  string        // non-empty when legacy pipeline was selected
+	ChatMode bool          // true when PM chat-based requirements gathering was selected
+	Cfg      config.Config // possibly updated config
+}
+
+// RunStartup shows the home/picker/editor flow and returns the result.
+// Empty ReqPath with ChatMode=false means the user quit without selecting.
+func RunStartup(root, wsReqPath string, cfg config.Config) (StartupResult, error) {
 	m := newStartupModel(root, wsReqPath, cfg)
 	prog := tea.NewProgram(m, tea.WithAltScreen())
 	result, err := prog.Run()
 	if err != nil {
-		return "", cfg, err
+		return StartupResult{Cfg: cfg}, err
 	}
 	final, ok := result.(startupModel)
 	if !ok {
-		return "", cfg, nil
+		return StartupResult{Cfg: cfg}, nil
 	}
-	return final.reqPath, final.cfg, nil
+	return StartupResult{
+		ReqPath:  final.reqPath,
+		ChatMode: final.chatMode,
+		Cfg:      final.cfg,
+	}, nil
 }
 
 // modulePathModel is a minimal Bubble Tea model that only shows the module path

@@ -28,8 +28,9 @@ func projectsFilePath() string {
 	return filepath.Join(home, config.GlobalDir, projectsFile)
 }
 
-// LoadRecentProjects reads the list of recently opened projects from ~/.orchestrator/projects.json.
-// The user's home directory is always excluded.
+// LoadRecentProjects reads the list of recently opened projects from
+// ~/.orchestrator/projects.json. The user's home directory and missing paths
+// are excluded from the returned list.
 func LoadRecentProjects() []RecentProject {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -46,7 +47,7 @@ func LoadRecentProjects() []RecentProject {
 	if err := json.Unmarshal(data, &projects); err != nil {
 		return nil
 	}
-	return filterOutHomeDir(projects)
+	return filterRecentProjects(projects)
 }
 
 // SaveRecentProject adds or bumps a project to the top of the recent list.
@@ -120,8 +121,8 @@ func isHomeDir(path string) bool {
 	return filepath.Clean(path) == filepath.Clean(home)
 }
 
-// filterOutHomeDir removes the user's home directory from a project list.
-func filterOutHomeDir(projects []RecentProject) []RecentProject {
+// filterRecentProjects removes entries that should never be shown in recents.
+func filterRecentProjects(projects []RecentProject) []RecentProject {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return projects
@@ -129,9 +130,14 @@ func filterOutHomeDir(projects []RecentProject) []RecentProject {
 	cleanHome := filepath.Clean(home)
 	var filtered []RecentProject
 	for _, p := range projects {
-		if filepath.Clean(p.Path) != cleanHome {
-			filtered = append(filtered, p)
+		cleanPath := filepath.Clean(p.Path)
+		if cleanPath == cleanHome {
+			continue
 		}
+		if _, err := os.Stat(cleanPath); err != nil {
+			continue
+		}
+		filtered = append(filtered, p)
 	}
 	return filtered
 }

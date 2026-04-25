@@ -1,25 +1,47 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/agent"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/charmbracelet/lipgloss"
 )
 
 func TestNewSysmon(t *testing.T) {
 	sm := NewSysmon()
-	if len(sm.cpuHistory) != sparklineLength {
-		t.Errorf("cpuHistory length = %d, want %d", len(sm.cpuHistory), sparklineLength)
+	wantLen := graphHistoryPoints(sysmonMinWidth)
+	if len(sm.cpuHistory) != wantLen {
+		t.Errorf("cpuHistory length = %d, want %d", len(sm.cpuHistory), wantLen)
 	}
-	if len(sm.netRecvHist) != sparklineLength {
-		t.Errorf("netRecvHist length = %d, want %d", len(sm.netRecvHist), sparklineLength)
+	if len(sm.netRecvHist) != wantLen {
+		t.Errorf("netRecvHist length = %d, want %d", len(sm.netRecvHist), wantLen)
 	}
-	if len(sm.netSentHist) != sparklineLength {
-		t.Errorf("netSentHist length = %d, want %d", len(sm.netSentHist), sparklineLength)
+	if len(sm.netSentHist) != wantLen {
+		t.Errorf("netSentHist length = %d, want %d", len(sm.netSentHist), wantLen)
 	}
 	if sm.startTime.IsZero() {
 		t.Error("startTime should not be zero")
+	}
+}
+
+func TestSysmonSetSizeExpandsGraphHistory(t *testing.T) {
+	sm := NewSysmon()
+	sm.SetSize(60, 20)
+
+	wantLen := graphHistoryPoints(60)
+	if len(sm.cpuHistory) != wantLen {
+		t.Fatalf("cpuHistory length = %d, want %d", len(sm.cpuHistory), wantLen)
+	}
+	if len(sm.netRecvHist) != wantLen {
+		t.Fatalf("netRecvHist length = %d, want %d", len(sm.netRecvHist), wantLen)
+	}
+	if len(sm.netSentHist) != wantLen {
+		t.Fatalf("netSentHist length = %d, want %d", len(sm.netSentHist), wantLen)
 	}
 }
 
@@ -87,23 +109,74 @@ func TestSysmonView(t *testing.T) {
 	sm.sentRate = 512
 	sm.hostUptime = 90000
 	sm.loadAvg = [3]float64{2.1, 1.5, 1.0}
-	sm.topProcs = []topProcess{
-		{pid: 100, name: "orchestrator", cpu: 12.5, mem: 3.2},
-		{pid: 200, name: "ollama", cpu: 8.0, mem: 45.0},
-	}
 	sm.SetSize(44, 60)
 
 	view := sm.View()
 	checks := []string{
-		"SYSTEM MONITOR", "CPU", "MEM", "DSK", "NET", "PROC",
-		"Goroutines", "Session", "C0", "C1",
-		"orchestrator", "ollama",
+		"SYSTEM MONITOR", "CPU", "MEM", "DSK", "NET", "TREE",
+		"Session", "C0", "C1",
 		"Avail", "Cache", "Swap", "Free",
 	}
 	for _, check := range checks {
 		if !strings.Contains(view, check) {
 			t.Errorf("view should contain %q", check)
 		}
+	}
+}
+
+func TestSysmonView_ShowsTree(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "game"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.com/test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "game", "board.go"), []byte("package game\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSysmon()
+	sm.SetProjectRoot(root)
+	sm.SetSize(44, 60)
+
+	view := sm.View()
+	for _, check := range []string{"TREE", "go.mod", "internal/", "game/", "board.go"} {
+		if !strings.Contains(view, check) {
+			t.Fatalf("view should contain %q", check)
+		}
+	}
+}
+
+func TestSysmonObserveBusMessage_TracksActiveFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "game"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "game", "board.go"), []byte("package game\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSysmon()
+	sm.SetProjectRoot(root)
+	now := time.Now()
+
+	sm.ObserveBusMessage(bus.NewMessage(bus.RoleSystem, bus.RoleCoder, bus.MsgRequest, agent.CoderFixPayload{
+		Files: []string{"internal/game/board.go"},
+	}))
+
+	activity, ok := sm.activeFiles["internal/game/board.go"]
+	if !ok {
+		t.Fatal("expected file activity to be recorded")
+	}
+	if activity.role != bus.RoleCoder {
+		t.Fatalf("activity role = %q, want %q", activity.role, bus.RoleCoder)
+	}
+
+	sm.activeFiles["internal/game/board.go"] = fileActivity{role: bus.RoleCoder, lastSeen: now.Add(-fileActivityTTL - time.Second)}
+	sm.pruneFileActivity(now)
+	if _, ok := sm.activeFiles["internal/game/board.go"]; ok {
+		t.Fatal("expected stale activity to be pruned")
 	}
 }
 

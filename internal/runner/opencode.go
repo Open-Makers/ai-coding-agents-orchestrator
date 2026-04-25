@@ -104,8 +104,8 @@ func extractOpenCodeResponseWithUsage(data []byte) (string, TokenUsage) {
 		}
 
 		var event struct {
-			Type  string `json:"type"`
-			Part  struct {
+			Type string `json:"type"`
+			Part struct {
 				Text string `json:"text"`
 			} `json:"part"`
 			Usage *struct {
@@ -147,12 +147,6 @@ func extractOpenCodeResponseWithUsage(data []byte) (string, TokenUsage) {
 	}
 
 	return text, usage
-}
-
-// extractOpenCodeResponse is kept for backward compatibility.
-func extractOpenCodeResponse(data []byte) string {
-	text, _ := extractOpenCodeResponseWithUsage(data)
-	return text
 }
 
 // OpenCodeAvailableModels is a fallback list used when the CLI is unavailable.

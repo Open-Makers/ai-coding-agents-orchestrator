@@ -40,7 +40,8 @@ const (
 	overlayEditor
 	overlayGit
 	overlayChat
-	overlayArtifact // auto-opened on human gate
+	overlayArtifact  // auto-opened on human gate
+	overlayNegotiate // PM requirements conversation
 )
 
 // planningGates lists the artifact filenames gated during the planning phase,
@@ -49,6 +50,12 @@ var planningGates = []string{
 	"architecture.md",
 	"implementation_plan.md",
 	"prompts.md",
+}
+
+// pmGates lists the PM artifacts gated before planning begins.
+var pmGates = []string{
+	"vision.md",
+	"moscow.md",
 }
 
 // gateLabel returns a short human-readable label for a planning gate artifact.
@@ -60,48 +67,67 @@ func gateLabel(filename string) string {
 		return "plan"
 	case "prompts.md":
 		return "prompts"
+	case "requirements.md":
+		return "requirements"
+	case "vision.md":
+		return "vision"
+	case "moscow.md":
+		return "MoSCoW"
+	case "task_spec.json":
+		return "task spec"
 	}
 	return filename
 }
 
 // Model is the root Bubble Tea model for the orchestrator TUI.
 type Model struct {
-	panels        map[bus.AgentRole]AgentPanelModel
-	activeRole    bus.AgentRole // agent currently shown in the main area
-	phase         string        // current pipeline phase for the phase bar
-	statusbar     StatusBarModel
-	sysmon        SysmonModel                   // system monitor panel (right side)
-	showSysmon    bool                          // toggle for sysmon visibility
-	agentConfigs  map[string]config.AgentConfig // per-agent runner/model config
-	events        <-chan bus.Message
-	pipeline      *orchestrator.Pipeline
-	cancelFunc    context.CancelFunc // cancels the pipeline context
-	llm           runner.LLMRunner
-	root          string
-	wsPath        string
-	width         int
-	height        int
-	quitting      bool
-	confirmQuit   bool   // true when showing quit confirmation dialog
-	cancelConfirm bool   // true when showing cancel confirmation dialog
-	cancelled     bool   // true after user confirmed cancel — auto-return to menu
-	gateMsg       string // non-empty while pipeline is waiting for human approval
-	pipelineErr   string // non-empty when pipeline finished with an error
-	pipelineDone  bool   // true after pipeline finished (enables return-to-menu)
-	returnToMenu  bool   // true when user chose to return to menu
-	log           *slog.Logger
+	panels          map[bus.AgentRole]AgentPanelModel
+	activeRole      bus.AgentRole // agent currently shown in the main area
+	phase           string        // current pipeline phase for the phase bar
+	statusbar       StatusBarModel
+	sysmon          SysmonModel                   // system monitor panel (right side)
+	showSysmon      bool                          // toggle for sysmon visibility
+	agentConfigs    map[string]config.AgentConfig // per-agent runner/model config
+	events          <-chan bus.Message
+	pipeline        *orchestrator.Pipeline
+	cancelFunc      context.CancelFunc // cancels the pipeline context
+	llm             runner.LLMRunner
+	root            string
+	wsPath          string
+	width           int
+	height          int
+	quitting        bool
+	confirmQuit     bool                             // true when showing quit confirmation dialog
+	cancelConfirm   bool                             // true when showing cancel confirmation dialog
+	cancelled       bool                             // true after user confirmed cancel — auto-return to menu
+	gateMsg         string                           // non-empty while pipeline is waiting for human approval
+	pipelineErr     string                           // non-empty when pipeline finished with an error
+	pipelineFailed  bool                             // true when pipeline finished with an error
+	hidePipelineErr bool                             // true when the error banner is dismissed
+	pipelineDone    bool                             // true after pipeline finished (enables return-to-menu)
+	returnToMenu    bool                             // true when user chose to return to menu
+	agentUsage      map[bus.AgentRole]bus.AgentUsage // per-agent token usage
+	log             *slog.Logger
 
 	// Planning sub-stage tracking.
 	gateArtifact  string          // filename currently awaiting approval
 	approvedGates map[string]bool // filenames approved so far
 
+	// Coding stage tracking (parsed from "Stage N/M: name" events).
+	codingStageIndex int
+	codingStageTotal int
+
 	// Typed overlay state — only one active at a time.
-	overlay         overlayKind
-	overlayPicker   PickerModel
-	overlayEditor   EditorModel
-	overlayGit      GitPanelModel
-	overlayChat     ChatModel
-	overlayArtifact ArtifactViewerModel
+	overlay          overlayKind
+	overlayPicker    PickerModel
+	overlayEditor    EditorModel
+	overlayGit       GitPanelModel
+	overlayChat      ChatModel
+	overlayArtifact  ArtifactViewerModel
+	overlayNegotiate NegotiateModel
+
+	// taskRunner is used for the unified task flow (may be nil for legacy pipeline).
+	taskRunner *orchestrator.TaskRunner
 }
 
 // PipelineReadyWithCancelMsg returns a tea.Msg with pipeline and cancel func.
@@ -130,13 +156,15 @@ func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPat
 	}
 
 	runnerName, modelName := runnerModelFromConfig(cfg)
+	sysmon := NewSysmon()
+	sysmon.SetProjectRoot(root)
 
 	return Model{
 		panels:        panels,
 		activeRole:    bus.RolePM,
 		phase:         "idle",
 		statusbar:     NewStatusBar(80).WithBranch(GitBranch(root)).WithState("idle").WithRunnerModel(runnerName, modelName),
-		sysmon:        NewSysmon(),
+		sysmon:        sysmon,
 		showSysmon:    true,
 		agentConfigs:  cfg.Agents,
 		events:        events,
@@ -147,6 +175,7 @@ func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPat
 		width:         80,
 		height:        24,
 		log:           logging.ForComponent("tui_model"),
+		agentUsage:    make(map[bus.AgentRole]bus.AgentUsage),
 		approvedGates: make(map[string]bool),
 	}
 }
@@ -206,6 +235,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// This prevents the listener chain from breaking while an overlay is open.
 	if busMsg, ok := msg.(BusMessageMsg); ok {
 		bm := busMsg.Msg
+		m.sysmon.ObserveBusMessage(bm)
 		m.log.Debug("bus message received",
 			slog.String("type", string(bm.Type)),
 			slog.String("from", string(bm.From)),
@@ -220,6 +250,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					slog.String("artifact", s),
 					slog.String("label", gateLabel(s)),
 				)
+				// Close negotiate overlay when a gate fires (PM conversation done).
+				if m.overlay == overlayNegotiate {
+					m.overlay = overlayNone
+				}
 				var reviseFn func(string, string) error
 				if m.pipeline != nil {
 					pipeline := m.pipeline
@@ -237,6 +271,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if stageInfo := extractStageInfo(s); stageInfo != "" {
 					prevStage := m.statusbar.stageInfo
 					m.statusbar = m.statusbar.WithStageInfo(stageInfo)
+					m.codingStageIndex, m.codingStageTotal = parseStageProgress(stageInfo)
 					if prevStage == "" {
 						cmds = append(cmds, statusBarTick())
 					}
@@ -251,10 +286,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					r, mdl := runnerModelForRole(m.agentConfigs, role)
 					m.statusbar = m.statusbar.WithRunnerModel(r, mdl)
 				}
-				for _, ps := range []string{"pm", "planning", "coding", "fixing", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"} {
+				for _, ps := range []string{"negotiating", "pm", "planning", "coding", "fixing", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"} {
 					if s == ps {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
+						if s == "negotiating" && m.overlay != overlayNegotiate {
+							sendFn := func(msg string) {
+								if m.pipeline != nil {
+									m.pipeline.SendHumanReply(msg)
+								}
+								if m.taskRunner != nil {
+									m.taskRunner.SendHumanReply(msg)
+								}
+							}
+							neg := NewNegotiate(sendFn)
+							neg.SetSize(m.contentWidth(), m.height)
+							m.overlayNegotiate = neg
+							m.overlay = overlayNegotiate
+						}
 						// Start elapsed timer on first coding handoff.
 						if s == "coding" && m.pipeline != nil && m.statusbar.codingStarted.IsZero() {
 							codingStart := m.pipeline.CodingStarted()
@@ -265,10 +314,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			// Count output tokens for the status bar.
-			if tp, ok := bm.Payload.(bus.TokenPayload); ok && !tp.Done {
-				m.statusbar = m.statusbar.AddTokenChars(len(tp.Text))
-			}
 		case bus.MsgRequest:
 			if bm.To != "" && bm.To != bus.RoleSystem {
 				m.activeRole = bm.To
@@ -277,6 +322,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case bus.MsgResponse:
 			m.gateMsg = ""
+		case bus.MsgUsage:
+			if u, ok := bm.Payload.(bus.AgentUsage); ok {
+				existing := m.agentUsage[bm.From]
+				existing.InputTokens += u.InputTokens
+				existing.OutputTokens += u.OutputTokens
+				if u.Estimated {
+					existing.Estimated = true
+				}
+				m.agentUsage[bm.From] = existing
+				m.statusbar = m.statusbar.WithAgentUsage(m.agentUsage)
+			}
+		case bus.MsgConversation:
+			if conv, ok := bm.Payload.(bus.ConversationPayload); ok && conv.From == "pm" {
+				// Open negotiate overlay if not already open.
+				if m.overlay != overlayNegotiate {
+					sendFn := func(msg string) {
+						if m.pipeline != nil {
+							m.pipeline.SendHumanReply(msg)
+						}
+						if m.taskRunner != nil {
+							m.taskRunner.SendHumanReply(msg)
+						}
+					}
+					neg := NewNegotiate(sendFn)
+					neg.SetSize(m.contentWidth(), m.height)
+					m.overlayNegotiate = neg
+					m.overlay = overlayNegotiate
+				}
+				m.overlayNegotiate.AddPMMessage(conv.Content)
+			}
 		}
 
 		agentMsg := busToAgentEvent(bm)
@@ -369,7 +444,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.returnToMenu = true
 				return m, tea.Quit
 			}
-		case "ctrl+x":
+		case "esc", "ctrl+x":
 			if m.pipelineDone {
 				// Pipeline already finished (error or success) — return to menu.
 				m.returnToMenu = true
@@ -377,16 +452,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.cancelConfirm = true
 		case "ctrl+a":
-			if m.pipeline != nil && m.gateArtifact != "" {
-				m.approvedGates[m.gateArtifact] = true
-				m.log.Info("gate approved (shortcut)",
-					slog.String("artifact", m.gateArtifact),
-				)
-				m.pipeline.Approve()
-				m.statusbar = m.statusbar.WithState("✓ " + gateLabel(m.gateArtifact) + " approved")
-				m.gateMsg = ""
-				m.gateArtifact = ""
-				m.overlay = overlayNone
+			m.approveCurrentGate("shortcut")
+		case "ctrl+e":
+			if m.pipelineErr != "" {
+				m.hidePipelineErr = !m.hidePipelineErr
+				if m.hidePipelineErr {
+					m.statusbar = m.statusbar.WithState("✗ error hidden — esc/m/ctrl+x menu  q quit")
+				} else {
+					m.statusbar = m.statusbar.WithState("✗ error — esc/m/ctrl+x menu  q quit")
+				}
 			}
 		case "ctrl+r":
 			picker := NewPicker(m.root, m.wsPath)
@@ -429,6 +503,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelFunc = msg.cancel
 		}
 
+	case TaskRunnerReadyMsg:
+		m.taskRunner = msg.Runner
+		if msg.Cancel != nil {
+			m.cancelFunc = msg.Cancel
+		}
+
 	case PipelineDoneMsg:
 		m.pipelineDone = true
 		if m.cancelled {
@@ -437,11 +517,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.Err != nil {
 			m.pipelineErr = msg.Err.Error()
+			m.pipelineFailed = true
+			m.hidePipelineErr = false
 			m.log.Error("pipeline finished with error", slog.String("error", m.pipelineErr))
-			m.statusbar = m.statusbar.WithState("✗ error — m/ctrl+x menu  q quit")
+			m.statusbar = m.statusbar.WithState("✗ error — esc/m/ctrl+x menu  q quit")
 		} else {
+			m.pipelineFailed = false
+			m.hidePipelineErr = false
 			m.log.Info("pipeline completed successfully")
-			m.statusbar = m.statusbar.WithState("✓ done — m/ctrl+x menu  q quit")
+			m.statusbar = m.statusbar.WithState("✓ done — esc/m/ctrl+x menu  q quit")
 		}
 
 	case statusBarTickMsg:
@@ -509,29 +593,38 @@ func (m Model) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+	case overlayNegotiate:
+		switch msg.(type) {
+		case NegotiateClosedMsg:
+			m.overlay = overlayNone
+			if !m.pipelineDone && m.phase == "negotiating" {
+				if m.cancelFunc != nil {
+					m.cancelFunc()
+				}
+				m.returnToMenu = true
+				return m, tea.Quit
+			}
+			if m.taskRunner != nil && !m.pipelineDone {
+				if m.cancelFunc != nil {
+					m.cancelFunc()
+				}
+				m.returnToMenu = true
+				return m, tea.Quit
+			}
+		default:
+			var cmd tea.Cmd
+			m.overlayNegotiate, cmd = m.overlayNegotiate.Update(msg)
+			return m, cmd
+		}
+
 	case overlayArtifact:
 		switch msg := msg.(type) {
 		case artifactViewerClosedMsg:
 			m.overlay = overlayNone
-			if msg.regenerate && m.pipeline != nil {
-				m.log.Info("regeneration requested",
-					slog.String("artifact", m.gateArtifact),
-				)
-				m.pipeline.Regenerate()
-				m.gateMsg = ""
-				m.gateArtifact = ""
-				m.statusbar = m.statusbar.WithState("regenerating…")
-			} else if msg.approved && m.pipeline != nil {
-				approved := m.gateArtifact
-				m.approvedGates[approved] = true
-				m.log.Info("gate approved",
-					slog.String("artifact", approved),
-					slog.String("label", gateLabel(approved)),
-				)
-				m.pipeline.Approve()
-				m.gateMsg = ""
-				m.gateArtifact = ""
-				m.statusbar = m.statusbar.WithState("✓ " + gateLabel(approved) + " approved")
+			if msg.regenerate {
+				m.regenerateCurrentGate()
+			} else if msg.approved {
+				m.approveCurrentGate("viewer")
 			} else {
 				m.log.Debug("gate dismissed without approval",
 					slog.String("artifact", m.gateArtifact),
@@ -575,6 +668,8 @@ func (m Model) View() string {
 		return m.withSysmon(m.overlayGit.View())
 	case overlayChat:
 		return m.withSysmon(m.overlayChat.View())
+	case overlayNegotiate:
+		return m.withSysmon(m.overlayNegotiate.View())
 	case overlayArtifact:
 		artifactView := strings.Join([]string{
 			strings.TrimRight(m.overlayArtifact.View(), "\n"),
@@ -606,7 +701,7 @@ func (m Model) View() string {
 
 	var parts []string
 
-	if m.pipelineDone && m.pipelineErr == "" {
+	if m.pipelineDone && !m.pipelineFailed {
 		agentView := m.renderCongratulations(panelH)
 		if sysmonW > 0 {
 			m.sysmon.SetSize(sysmonW, panelH)
@@ -636,7 +731,7 @@ func (m Model) View() string {
 		}
 	}
 
-	if m.pipelineErr != "" {
+	if m.pipelineErr != "" && !m.hidePipelineErr {
 		banner := lipgloss.NewStyle().
 			Background(crt.border).
 			Foreground(crt.warn).
@@ -644,6 +739,16 @@ func (m Model) View() string {
 			Padding(0, 2).
 			Width(m.width - 4).
 			Render("✗  " + m.pipelineErr)
+		parts = append(parts, banner)
+	}
+	if m.gateArtifact != "" && m.overlay == overlayNone {
+		banner := lipgloss.NewStyle().
+			Background(crt.border).
+			Foreground(crt.primary).
+			Bold(true).
+			Padding(0, 2).
+			Width(m.width - 4).
+			Render("⏸  Waiting for approval: " + gateLabel(m.gateArtifact) + "   Ctrl+A approve")
 		parts = append(parts, banner)
 	}
 	parts = append(parts, m.renderPhaseBar(), m.statusbar.View())
@@ -691,6 +796,55 @@ func (m Model) View() string {
 	return mainView
 }
 
+func (m *Model) approveCurrentGate(source string) {
+	if m.gateArtifact == "" {
+		return
+	}
+	if m.pipeline == nil && m.taskRunner == nil {
+		return
+	}
+
+	approved := m.gateArtifact
+	m.approvedGates[approved] = true
+	m.log.Info("gate approved",
+		slog.String("artifact", approved),
+		slog.String("label", gateLabel(approved)),
+		slog.String("source", source),
+	)
+	if m.pipeline != nil {
+		m.pipeline.Approve()
+	}
+	if m.taskRunner != nil {
+		m.taskRunner.Approve()
+	}
+	m.statusbar = m.statusbar.WithState("✓ " + gateLabel(approved) + " approved")
+	m.gateMsg = ""
+	m.gateArtifact = ""
+	m.overlay = overlayNone
+}
+
+func (m *Model) regenerateCurrentGate() {
+	if m.gateArtifact == "" {
+		return
+	}
+	if m.pipeline == nil && m.taskRunner == nil {
+		return
+	}
+
+	m.log.Info("regeneration requested",
+		slog.String("artifact", m.gateArtifact),
+	)
+	if m.pipeline != nil {
+		m.pipeline.Regenerate()
+	}
+	if m.taskRunner != nil {
+		m.taskRunner.Regenerate()
+	}
+	m.gateMsg = ""
+	m.gateArtifact = ""
+	m.statusbar = m.statusbar.WithState("regenerating…")
+}
+
 // renderPhaseBar renders a one-line pipeline progress indicator.
 // During the planning phase it expands into sub-stages:
 //
@@ -719,6 +873,22 @@ func (m Model) renderPhaseBar() string {
 		parts = append(parts, dimStyle.Render("○ PM"))
 	}
 
+	// PM gates: vision → moscow.
+	for _, gate := range pmGates {
+		label := strings.ToUpper(gateLabel(gate))
+		activeStyle := phaseStyle(label)
+		switch {
+		case m.approvedGates[gate]:
+			parts = append(parts, doneStyle.Render("✓ "+label))
+		case m.gateArtifact == gate:
+			parts = append(parts, activeStyle.Render("⏸ "+label))
+		case strings.Contains(m.phase, "pm") && !m.approvedGates[gate] && m.gateArtifact == "":
+			parts = append(parts, activeStyle.Render("◉ "+label))
+		default:
+			parts = append(parts, dimStyle.Render("○ "+label))
+		}
+	}
+
 	// Planning sub-stages: architecture → plan → prompts.
 	for _, gate := range planningGates {
 		label := strings.ToUpper(gateLabel(gate))
@@ -739,17 +909,41 @@ func (m Model) renderPhaseBar() string {
 	postPhases := []string{"coding", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"}
 	for _, ph := range postPhases {
 		label := strings.ToUpper(ph)
-		if strings.Contains(m.phase, ph) {
+		isCodingActive := (ph == "coding" && strings.Contains(m.phase, "coding")) ||
+			(ph == "coding" && m.phase == "fixing")
+
+		if isCodingActive && m.codingStageTotal > 1 {
+			// Expand into individual stage dots.
+			for s := 1; s <= m.codingStageTotal; s++ {
+				stageDot := fmt.Sprintf("S%d", s)
+				if s == m.codingStageIndex {
+					icon := "◉"
+					if m.phase == "fixing" {
+						icon = "⟳"
+					}
+					parts = append(parts, phaseStyle("CODING").Render(icon+" "+stageDot))
+				} else if s < m.codingStageIndex {
+					parts = append(parts, doneStyle.Render("✓ "+stageDot))
+				} else {
+					parts = append(parts, dimStyle.Render("○ "+stageDot))
+				}
+			}
+		} else if strings.Contains(m.phase, ph) {
 			parts = append(parts, phaseStyle(label).Render("◉ "+label))
 		} else if ph == "coding" && m.phase == "fixing" {
-			// Show FIXING indicator instead of coding dot.
 			parts = append(parts, phaseStyle("FIXING").Render("⟳ FIXING"))
 		} else {
 			parts = append(parts, dimStyle.Render("○ "+label))
 		}
 	}
 
-	return "  " + strings.Join(parts, sepStyle.Render(" → "))
+	joined := "  " + strings.Join(parts, sepStyle.Render(" → "))
+
+	// Clip to terminal width, keeping the active phase visible.
+	if m.width > 0 && lipgloss.Width(joined) > m.width {
+		joined = clipPhaseBar(joined, m.width)
+	}
+	return joined
 }
 
 // renderCongratulations renders a centered congratulations banner with pipeline summary.
@@ -800,7 +994,11 @@ func (m Model) renderCongratulations(height int) string {
 	}
 
 	content.WriteString("\n")
+	content.WriteString(m.renderTokenUsageTable(sectionStyle, separatorStyle, labelStyle, valueStyle, totalStyle, dimStyle))
+	content.WriteString("\n")
 	content.WriteString(dimStyle.Render("Press ") +
+		accentStyle.Render("Esc") +
+		dimStyle.Render("/") +
 		accentStyle.Render("m") +
 		dimStyle.Render(" for menu  or  ") +
 		accentStyle.Render("q") +
@@ -813,6 +1011,91 @@ func (m Model) renderCongratulations(height int) string {
 		Render(content.String())
 
 	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// renderTokenUsageTable renders a per-agent token breakdown table.
+func (m Model) renderTokenUsageTable(
+	sectionStyle, separatorStyle, labelStyle, valueStyle, totalStyle, dimStyle lipgloss.Style,
+) string {
+	// Collect agents that actually have usage data.
+	type row struct {
+		role   bus.AgentRole
+		runner string
+		model  string
+		usage  bus.AgentUsage
+	}
+
+	var rows []row
+	for _, role := range agentOrder {
+		u, ok := m.agentUsage[role]
+		if !ok || (u.InputTokens == 0 && u.OutputTokens == 0) {
+			continue
+		}
+		r, mdl := runnerModelForRole(m.agentConfigs, role)
+		rows = append(rows, row{role: role, runner: r, model: mdl, usage: u})
+	}
+
+	if len(rows) == 0 {
+		return ""
+	}
+
+	sep := separatorStyle.Render(strings.Repeat("─", 49))
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(sectionStyle.Render("TOKEN USAGE PER AGENT"))
+	b.WriteString("\n")
+	b.WriteString(sep)
+	b.WriteString("\n")
+
+	var totalIn, totalOut int
+	anyEstimated := false
+
+	for _, r := range rows {
+		totalIn += r.usage.InputTokens
+		totalOut += r.usage.OutputTokens
+		if r.usage.Estimated {
+			anyEstimated = true
+		}
+
+		est := ""
+		if r.usage.Estimated {
+			est = "~"
+		}
+
+		runnerModel := r.runner
+		if r.model != "" {
+			runnerModel += "/" + r.model
+		}
+
+		line := fmt.Sprintf("  %-10s %-16s in: %5s  out: %5s%s",
+			string(r.role),
+			runnerModel,
+			formatTokens(r.usage.InputTokens),
+			formatTokens(r.usage.OutputTokens),
+			est,
+		)
+		b.WriteString(labelStyle.Render(line))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(sep)
+	b.WriteString("\n")
+
+	est := ""
+	if anyEstimated {
+		est = "~"
+	}
+	totalLine := fmt.Sprintf("  %-10s %-16s in: %5s  out: %5s%s",
+		"TOTAL", "",
+		formatTokens(totalIn),
+		formatTokens(totalOut),
+		est,
+	)
+	b.WriteString(totalStyle.Render(totalLine))
+	b.WriteString("\n")
+
+	return b.String()
 }
 
 // styleSummaryLine applies context-aware styling to a single summary line.
@@ -944,6 +1227,8 @@ func (m *Model) resizeActiveOverlay() tea.Cmd {
 		m.overlayGit.SetSize(cw, m.height)
 	case overlayChat:
 		m.overlayChat.SetSize(cw, m.height)
+	case overlayNegotiate:
+		m.overlayNegotiate.SetSize(cw, m.height)
 	case overlayArtifact:
 		m.overlayArtifact, _ = m.overlayArtifact.Update(tea.WindowSizeMsg{Width: cw, Height: m.height - 2})
 	}
@@ -1017,11 +1302,55 @@ func extractStageInfo(event string) string {
 	return ""
 }
 
+// clipPhaseBar truncates a rendered phase bar to maxWidth visible chars, appending "…".
+// It operates on the raw ANSI string by trimming whole rune clusters from the right.
+func clipPhaseBar(bar string, maxWidth int) string {
+	if lipgloss.Width(bar) <= maxWidth {
+		return bar
+	}
+	// Strip to maxWidth-1 chars (leave room for "…"), then append.
+	runes := []rune(bar)
+	for len(runes) > 0 {
+		candidate := string(runes) + "…"
+		if lipgloss.Width(candidate) <= maxWidth {
+			return candidate
+		}
+		runes = runes[:len(runes)-1]
+	}
+	return "…"
+}
+
+// parseStageProgress extracts (currentIndex, total) from "Stage N/M: name".
+// Returns (0, 0) if the format is not recognised.
+func parseStageProgress(stageInfo string) (int, int) {
+	// stageInfo looks like "Stage 2/5: Must Have — Auth"
+	rest := strings.TrimPrefix(stageInfo, "Stage ")
+	if rest == stageInfo {
+		return 0, 0
+	}
+	slash := strings.Index(rest, "/")
+	if slash < 0 {
+		return 0, 0
+	}
+	colon := strings.Index(rest[slash:], ":")
+	if colon < 0 {
+		return 0, 0
+	}
+	var idx, total int
+	if _, err := fmt.Sscanf(rest[:slash], "%d", &idx); err != nil {
+		return 0, 0
+	}
+	if _, err := fmt.Sscanf(rest[slash+1:slash+colon], "%d", &total); err != nil {
+		return 0, 0
+	}
+	return idx, total
+}
+
 // stateToRole maps a pipeline state string (from setState) to an agent role
 // so the TUI can automatically switch the active panel.
 func stateToRole(state string) bus.AgentRole {
 	switch state {
-	case "pm":
+	case "pm", "negotiating":
 		return bus.RolePM
 	case "planning":
 		return bus.RolePlanner

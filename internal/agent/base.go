@@ -35,6 +35,13 @@ func (a *BaseAgent) emitUsage(usage runner.TokenUsage) {
 	})
 }
 
+func (a *BaseAgent) emitOutput(text string) {
+	if text != "" {
+		a.emitToken(text, false)
+	}
+	a.emitToken("", true)
+}
+
 // Gate publishes a human_gate event (exported so orchestrator can call it if needed).
 func (a *BaseAgent) Gate(msg string) {
 	a.emit(bus.MsgHumanGate, msg)

@@ -168,7 +168,7 @@ type SetupModel struct {
 	height int
 }
 
-var setupAgentRoles = []string{"pm", "pm_fixer", "planner", "coder", "tester", "reviewer", "ux_reviewer", "security", "qa"}
+var setupAgentRoles = []string{"pm", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security", "qa"}
 
 func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfgs map[string]config.AgentConfig) SetupModel {
 	sp := spinner.New()
@@ -257,6 +257,8 @@ func NewSetupModelWithOverrides(currentRunner, currentModel, currentLanguage, cu
 			m.agentOverrides[role] = ov
 		}
 	}
+	// In project setup (non-global), start on the agent overrides section.
+	m.section = sectionAgentSetup
 	return m
 }
 
@@ -464,8 +466,8 @@ func (m SetupModel) handleProviderKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		m.ensureSectionVisible()
 	case "shift+tab":
 		if !m.globalOnly {
-			m.section = sectionAgentSetup
-			m.agentCursor = len(m.agentRoles) - 1
+			m.section = sectionProgLang
+			m.progLangIdx = len(m.progLanguages) - 1
 		} else {
 			m.section = sectionLanguage
 			m.languageIdx = len(m.languages) - 1
@@ -527,7 +529,8 @@ func (m SetupModel) handleLanguageKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		}
 	case "tab":
 		if !m.globalOnly {
-			m.section = sectionProgLang
+			m.section = sectionAgentSetup
+			m.agentCursor = 0
 			m.ensureSectionVisible()
 		} else {
 			m.section = sectionProvider
@@ -552,8 +555,8 @@ func (m SetupModel) handleProgLangKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		if m.progLangIdx > 0 {
 			m.progLangIdx--
 		} else {
-			m.section = sectionLanguage
-			m.languageIdx = len(m.languages) - 1
+			m.section = sectionAgentSetup
+			m.agentCursor = len(m.agentRoles) - 1
 			m.ensureSectionVisible()
 		}
 	case "down", "j":
@@ -561,12 +564,11 @@ func (m SetupModel) handleProgLangKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 			m.progLangIdx++
 		}
 	case "tab":
-		m.section = sectionAgentSetup
-		m.agentCursor = 0
+		m.section = sectionProvider
 		m.ensureSectionVisible()
 	case "shift+tab":
-		m.section = sectionLanguage
-		m.languageIdx = len(m.languages) - 1
+		m.section = sectionAgentSetup
+		m.agentCursor = len(m.agentRoles) - 1
 		m.ensureSectionVisible()
 	case "enter":
 		return m.startValidation()
@@ -610,7 +612,8 @@ func (m SetupModel) handleAgentSetupKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	case "d":
 		m.deleteAgentPrompts()
 	case "tab":
-		m.section = sectionProvider
+		m.section = sectionProgLang
+		m.progLangIdx = 0
 		m.ensureSectionVisible()
 	case "shift+tab":
 		m.section = sectionLanguage
@@ -809,21 +812,35 @@ func (m SetupModel) renderContent() string {
 
 	globalHeader := sectionHeaderStyle.Render("  ◆ Global Defaults") + dimStyle.Render("  — saved to ~/.orchestrator/config.yaml")
 
-	parts := []string{
-		"",
-		globalHeader,
-		providerCard,
-		sep,
-		modelCard,
-		sep,
-		languageCard,
-	}
-
+	var parts []string
 	if !m.globalOnly {
 		progLangCard := m.renderProgLangCard(contentWidth, labelStyle, focusLabelStyle, activeItemStyle, inactiveItemStyle, dimStyle)
 		agentCard := m.renderAgentCard(contentWidth, labelStyle, focusLabelStyle, activeItemStyle, inactiveItemStyle, dimStyle)
 		projectHeader := sectionHeaderStyle.Render("  ◆ Project Overrides") + dimStyle.Render("  — saved to .orchestrator/project.yaml")
-		parts = append(parts, sep, projectHeader, progLangCard, sep, agentCard)
+		parts = []string{
+			"",
+			projectHeader,
+			agentCard,
+			sep,
+			progLangCard,
+			sep,
+			globalHeader,
+			providerCard,
+			sep,
+			modelCard,
+			sep,
+			languageCard,
+		}
+	} else {
+		parts = []string{
+			"",
+			globalHeader,
+			providerCard,
+			sep,
+			modelCard,
+			sep,
+			languageCard,
+		}
 	}
 
 	parts = append(parts, "")
@@ -947,20 +964,7 @@ func (m SetupModel) renderLanguageCard(contentWidth int, label, focusLabel, acti
 	lines = append(lines, dim.Render("  Language for LLM responses (code stays in English):"))
 	lines = append(lines, "")
 
-	for i, lang := range m.languages {
-		sel := isFocused && i == m.languageIdx
-		marker := "    "
-		if i == m.languageIdx {
-			marker = "  ▶ "
-		}
-		if sel {
-			lines = append(lines, active.Render(marker+lang))
-		} else if i == m.languageIdx {
-			lines = append(lines, inactive.Render(marker+lang))
-		} else {
-			lines = append(lines, inactive.Render("    "+lang))
-		}
-	}
+	lines = append(lines, renderWindowedList(m.languages, m.languageIdx, isFocused, active, inactive, dim)...)
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -983,20 +987,7 @@ func (m SetupModel) renderProgLangCard(contentWidth int, label, focusLabel, acti
 	lines = append(lines, dim.Render("  Primary language for generated code (overrides auto-detection):"))
 	lines = append(lines, "")
 
-	for i, lang := range m.progLanguages {
-		sel := isFocused && i == m.progLangIdx
-		marker := "    "
-		if i == m.progLangIdx {
-			marker = "  ▶ "
-		}
-		if sel {
-			lines = append(lines, active.Render(marker+lang))
-		} else if i == m.progLangIdx {
-			lines = append(lines, inactive.Render(marker+lang))
-		} else {
-			lines = append(lines, inactive.Render("    "+lang))
-		}
-	}
+	lines = append(lines, renderWindowedList(m.progLanguages, m.progLangIdx, isFocused, active, inactive, dim)...)
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1084,13 +1075,7 @@ func (m SetupModel) renderAgentCard(contentWidth int, label, focusLabel, active,
 			if len(models) == 0 {
 				agentLines = append(agentLines, dim.Render("  no models available"))
 			} else {
-				for i, mdl := range models {
-					if i == m.agentEditIdx {
-						agentLines = append(agentLines, active.Render("    ▶ "+mdl))
-					} else {
-						agentLines = append(agentLines, inactive.Render("      "+mdl))
-					}
-				}
+				agentLines = append(agentLines, renderWindowedList(models, m.agentEditIdx, true, active, inactive, dim)...)
 			}
 			agentLines = append(agentLines, "")
 			agentLines = append(agentLines, dim.Render("  ↑↓ navigate  Enter select  Bksp reset  Esc back"))
@@ -1116,20 +1101,16 @@ func (m SetupModel) viewOpenCodeModels(active, inactive, dim, _ lipgloss.Style) 
 		return lines
 	}
 
+	// Build labels with cloud/local suffix before windowing.
+	labels := make([]string, len(m.models))
 	for i, mdl := range m.models {
-		sel := isModelSection && i == m.modelIdx
-		label := mdl
+		suffix := dim.Render("  (local)")
 		if strings.Contains(mdl, "/") {
-			label += dim.Render("  (cloud)")
-		} else {
-			label += dim.Render("  (local)")
+			suffix = dim.Render("  (cloud)")
 		}
-		if sel {
-			lines = append(lines, active.Render("  ▶ "+label))
-		} else {
-			lines = append(lines, inactive.Render("    "+label))
-		}
+		labels[i] = mdl + suffix
 	}
+	lines = append(lines, renderWindowedList(labels, m.modelIdx, isModelSection, active, inactive, dim)...)
 	return lines
 }
 
@@ -1148,14 +1129,7 @@ func (m SetupModel) viewClaudeModels(active, inactive, dim lipgloss.Style) []str
 		return lines
 	}
 
-	for i, mdl := range m.claudeModels {
-		sel := isModelSection && i == m.modelIdx
-		if sel {
-			lines = append(lines, active.Render("  ▶ "+mdl))
-		} else {
-			lines = append(lines, inactive.Render("    "+mdl))
-		}
-	}
+	lines = append(lines, renderWindowedList(m.claudeModels, m.modelIdx, isModelSection, active, inactive, dim)...)
 	return lines
 }
 
@@ -1173,14 +1147,7 @@ func (m SetupModel) viewOllamaModels(active, inactive, dim lipgloss.Style) []str
 		return lines
 	}
 
-	for i, mdl := range m.ollamaModels {
-		sel := isModelSection && i == m.modelIdx
-		if sel {
-			lines = append(lines, active.Render("  ▶ "+mdl))
-		} else {
-			lines = append(lines, inactive.Render("    "+mdl))
-		}
-	}
+	lines = append(lines, renderWindowedList(m.ollamaModels, m.modelIdx, isModelSection, active, inactive, dim)...)
 	return lines
 }
 
@@ -1199,14 +1166,7 @@ func (m SetupModel) viewCodexModels(active, inactive, dim lipgloss.Style) []stri
 		return lines
 	}
 
-	for i, mdl := range m.codexModels {
-		sel := isModelSection && i == m.modelIdx
-		if sel {
-			lines = append(lines, active.Render("  ▶ "+mdl))
-		} else {
-			lines = append(lines, inactive.Render("    "+mdl))
-		}
-	}
+	lines = append(lines, renderWindowedList(m.codexModels, m.modelIdx, isModelSection, active, inactive, dim)...)
 	return lines
 }
 
@@ -1357,23 +1317,32 @@ func (m *SetupModel) ensureSectionVisible() {
 
 	var targetLine int
 	switch m.section {
-	case sectionProvider:
-		// Scroll to the very top.
-		m.viewport.SetYOffset(0)
-		return
-	case sectionModel:
-		targetLine = findLineContaining(lines, "Default Model")
-	case sectionLanguage:
-		targetLine = findLineContaining(lines, "Response Language")
-	case sectionProgLang:
-		targetLine = findLineContaining(lines, "Programming Language")
 	case sectionAgentSetup:
+		if m.globalOnly {
+			targetLine = findLineContaining(lines, "Agent Overrides")
+			break
+		}
 		if m.agentEditing {
 			// When editing, scroll to the bottom to show the editing panel.
 			targetLine = totalLines - m.viewport.Height
 		} else {
-			targetLine = findLineContaining(lines, "Agent Overrides")
+			// Agent overrides is the first section in project setup — scroll to top.
+			m.viewport.SetYOffset(0)
+			return
 		}
+	case sectionProgLang:
+		targetLine = findLineContaining(lines, "Programming Language")
+	case sectionProvider:
+		targetLine = findLineContaining(lines, "Default Provider")
+		if targetLine < 0 {
+			// Fallback: global-only mode, provider is at top.
+			m.viewport.SetYOffset(0)
+			return
+		}
+	case sectionModel:
+		targetLine = findLineContaining(lines, "Default Model")
+	case sectionLanguage:
+		targetLine = findLineContaining(lines, "Response Language")
 	}
 
 	if targetLine < 0 {
@@ -1395,6 +1364,55 @@ func (m *SetupModel) ensureSectionVisible() {
 	}
 
 	m.viewport.SetYOffset(target)
+}
+
+// renderWindowedList renders a windowed view of items around cursor.
+// When there are more items than listWindowSize, only a window is shown with
+// "↑ N more" / "↓ N more" indicators. items are raw label strings.
+const listWindowSize = 7
+
+func renderWindowedList(items []string, cursor int, isFocused bool, active, inactive, dim lipgloss.Style) []string {
+	if len(items) == 0 {
+		return nil
+	}
+
+	start, end := 0, len(items)
+	if len(items) > listWindowSize {
+		half := listWindowSize / 2
+		start = cursor - half
+		if start < 0 {
+			start = 0
+		}
+		end = start + listWindowSize
+		if end > len(items) {
+			end = len(items)
+			start = end - listWindowSize
+			if start < 0 {
+				start = 0
+			}
+		}
+	}
+
+	var lines []string
+	if start > 0 {
+		lines = append(lines, dim.Render(fmt.Sprintf("    ↑ %d more", start)))
+	}
+	for i := start; i < end; i++ {
+		sel := isFocused && i == cursor
+		marker := "    "
+		if i == cursor {
+			marker = "  ▶ "
+		}
+		if sel {
+			lines = append(lines, active.Render(marker+items[i]))
+		} else {
+			lines = append(lines, inactive.Render(marker+items[i]))
+		}
+	}
+	if end < len(items) {
+		lines = append(lines, dim.Render(fmt.Sprintf("    ↓ %d more", len(items)-end)))
+	}
+	return lines
 }
 
 // findLineContaining returns the 0-based line index containing substr, or -1.

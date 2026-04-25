@@ -30,6 +30,9 @@ RULES:
 - Do NOT output go.mod
 - Include *_test.go files next to source files
 - No src/ directory
+- Work in TDD mode: existing *_test.go files are the contract
+- Implement production code so the existing tests pass
+- Do NOT rewrite generated tests unless the plan clearly requires changing the behaviour
 
 STAGED EXECUTION:
 - You may receive one stage from a larger plan — implement only that stage
@@ -51,4 +54,3 @@ When the Repository Context contains existing source code:
 - In ===CHANGES===, list each file as [MODIFIED] or [CREATED]
 
 %s
-

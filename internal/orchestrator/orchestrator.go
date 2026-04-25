@@ -19,14 +19,13 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
-// No default limit — quality gate iterates until all checks pass.
-
 // PipelineState represents the current phase of the pipeline.
 type PipelineState string
 
 const (
 	PipelineIdle        PipelineState = "idle"
 	PipelinePM          PipelineState = "pm"
+	PipelineNegotiating PipelineState = "negotiating"
 	PipelinePlanning    PipelineState = "planning"
 	PipelineCoding      PipelineState = "coding"
 	PipelineFixing      PipelineState = "fixing"
@@ -39,7 +38,9 @@ const (
 	PipelineGate        PipelineState = "human_gate"
 )
 
-// Pipeline is the event-driven orchestrator driving agents through the workflow.
+// Pipeline is the event-driven orchestrator for the legacy greenfield workflow.
+// It drives agents through PM → Planner → staged (Code → quality gate).
+// New code should prefer TaskRunner which unifies all work modes.
 type Pipeline struct {
 	b      *bus.Bus
 	agents map[bus.AgentRole]agent.Agent
@@ -49,6 +50,9 @@ type Pipeline struct {
 	state  PipelineState
 	log    *slog.Logger
 
+	// quality is the shared quality gate component.
+	quality *QualityGate
+
 	// niceToHave collects non-blocking suggestions from all review phases.
 	niceToHave map[string][]string
 
@@ -57,6 +61,9 @@ type Pipeline struct {
 
 	// agentDurations accumulates wall-clock time spent in each agent role.
 	agentDurations map[bus.AgentRole]time.Duration
+
+	// humanCh carries replies from the user during PM conversation.
+	humanCh chan string
 
 	// gateCh receives a signal when a human gate is programmatically approved.
 	gateCh chan struct{}
@@ -80,6 +87,8 @@ func NewPipeline(
 	ws artifacts.Workspace,
 	root string,
 ) *Pipeline {
+	niceToHave := make(map[string][]string)
+	agentDurations := make(map[bus.AgentRole]time.Duration)
 	return &Pipeline{
 		b:              b,
 		agents:         agents,
@@ -88,8 +97,10 @@ func NewPipeline(
 		root:           root,
 		state:          PipelineIdle,
 		log:            logging.ForComponent("pipeline"),
-		niceToHave:     make(map[string][]string),
-		agentDurations: make(map[bus.AgentRole]time.Duration),
+		quality:        NewQualityGate(b, agents, cfg, ws, root, niceToHave, agentDurations),
+		niceToHave:     niceToHave,
+		agentDurations: agentDurations,
+		humanCh:        make(chan string, 1),
 		gateCh:         make(chan struct{}, 1),
 		regenerateCh:   make(chan struct{}, 1),
 	}
@@ -102,6 +113,14 @@ func (p *Pipeline) Approve() {
 	default:
 	}
 	p.gateCh <- struct{}{}
+}
+
+// SendHumanReply delivers a user message during the PM conversation phase.
+func (p *Pipeline) SendHumanReply(msg string) {
+	select {
+	case p.humanCh <- msg:
+	default:
+	}
 }
 
 // Regenerate signals the pipeline to delete existing artifacts and re-run the current agent.
@@ -129,28 +148,24 @@ func (p *Pipeline) AgentDurations() map[bus.AgentRole]time.Duration {
 	return result
 }
 
-// maxFix returns 0 (unlimited) — the quality gate iterates until all checks pass.
-// Users can still set max_fix_attempts in config to impose a hard cap if desired.
-func (p *Pipeline) maxFix() int {
-	if p.cfg.Project.MaxFixAttempts > 0 {
-		return p.cfg.Project.MaxFixAttempts
-	}
-	return 0
-}
-
-// Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate: TEST → REVIEW → UX → SECURITY → QA).
+// Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate).
+// If requirementsPath is empty, the PM gathers requirements through a chat conversation.
 func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 	// Configure project-level prompt overrides before agents run.
 	promptsDir := filepath.Join(p.root, artifacts.DirName, appprompts.PromptsDirName)
 	appprompts.SetOverrideDir(promptsDir)
 
-	reqs, err := safefile.ReadFile(filepath.Dir(requirementsPath), filepath.Base(requirementsPath))
-	if err != nil {
-		return fmt.Errorf("read requirements: %w", err)
-	}
+	var reqs []byte
 
-	if err := p.ws.WriteFile(artifacts.RequirementsFile, reqs); err != nil {
-		return err
+	if requirementsPath != "" {
+		var err error
+		reqs, err = safefile.ReadFile(filepath.Dir(requirementsPath), filepath.Base(requirementsPath))
+		if err != nil {
+			return fmt.Errorf("read requirements: %w", err)
+		}
+		if err := p.ws.WriteFile(artifacts.RequirementsFile, reqs); err != nil {
+			return err
+		}
 	}
 
 	projCtx, err := appctx.Collect(p.root, p.cfg)
@@ -158,6 +173,18 @@ func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
 		p.event(fmt.Sprintf("context collect warning: %v", err))
 	}
 	ctxFragment := projCtx.SystemPromptFragment(appctx.ProfileFull)
+
+	// ── PM Requirements Gathering (chat mode) ──
+	if requirementsPath == "" {
+		gatheredReqs, err := p.gatherRequirements(ctx, ctxFragment)
+		if err != nil {
+			return fmt.Errorf("gather requirements: %w", err)
+		}
+		reqs = []byte(gatheredReqs)
+		if err := p.ws.WriteFile(artifacts.RequirementsFile, reqs); err != nil {
+			return err
+		}
+	}
 
 	// ── PM (Product Vision & MoSCoW) ──
 	var moscowData, visionData []byte
@@ -282,13 +309,24 @@ func (p *Pipeline) stagedPipeline(ctx context.Context, architecture, ctxFragment
 
 		stageFiles, err := p.generateCode(ctx, stagePlan, ctxFragment, stageName, stage.Index, totalStages, cumulativeFiles)
 		if err != nil {
+			if agent.IsBuildFixStuck(err) {
+				cumulativeFiles = mergeFileList(cumulativeFiles, stageFiles)
+				cumulativeFiles = p.collectProjectFiles(cumulativeFiles)
+				p.event(fmt.Sprintf("stage %d/%d skipped after fix loop got stuck — continuing with current project state", stage.Index, totalStages))
+				continue
+			}
 			return fmt.Errorf("stage %d (%s) code: %w", stage.Index, stage.Name, err)
 		}
 
 		cumulativeFiles = mergeFileList(cumulativeFiles, stageFiles)
 		cumulativeFiles = p.collectProjectFiles(cumulativeFiles)
 
-		if err := p.qualityGate(ctx, ctxFragment, &cumulativeFiles); err != nil {
+		if err := p.quality.RunChecks(ctx, ctxFragment, &cumulativeFiles); err != nil {
+			if agent.IsBuildFixStuck(err) {
+				cumulativeFiles = p.collectProjectFiles(cumulativeFiles)
+				p.event(fmt.Sprintf("stage %d/%d quality gate got stuck in fix loop — continuing to next stage", stage.Index, totalStages))
+				continue
+			}
 			return fmt.Errorf("stage %d (%s) quality gate: %w", stage.Index, stage.Name, err)
 		}
 
@@ -340,9 +378,25 @@ func (p *Pipeline) collectProjectFiles(existing []string) []string {
 	return agent.FilterSourceFiles(result)
 }
 
-// generateCode runs the Coder for initial code generation, generates tests,
-// and performs initial build-and-fix. Returns the list of files produced.
+// generateCode runs the TDD loop bootstrap: tests first, then coder,
+// then initial build-and-test fix-up. Returns the list of files produced.
 func (p *Pipeline) generateCode(ctx context.Context, plan, ctxFragment, stageName string, stageIndex, totalStages int, priorFiles []string) ([]string, error) {
+	tester, hasTester := p.agents[bus.RoleTester].(*agent.TesterAgent)
+	if hasTester {
+		p.setState(PipelineTesting)
+		p.event("writing tests first…")
+		p.b.Publish(bus.NewMessage(bus.RoleSystem, bus.RoleTester, bus.MsgRequest, "tdd-generate"))
+		if err := tester.GenerateTests(ctx, agent.TesterPayload{
+			Files:          priorFiles,
+			Plan:           plan,
+			ProjectContext: ctxFragment,
+			StageName:      stageName,
+		}); err != nil {
+			p.event(fmt.Sprintf("warning: test generation: %v", err))
+		}
+		p.b.Publish(bus.NewMessage(bus.RoleTester, "", bus.MsgResponse, "tests generated"))
+	}
+
 	p.setState(PipelineCoding)
 	coderResp, err := p.runAgent(ctx, bus.RoleCoder, agent.CoderPayload{
 		Plan:           plan,
@@ -358,25 +412,12 @@ func (p *Pipeline) generateCode(ctx context.Context, plan, ctxFragment, stageNam
 
 	coderResult := extractCoderResult(coderResp)
 
-	// Generate test files.
-	tester, hasTester := p.agents[bus.RoleTester].(*agent.TesterAgent)
-	if hasTester && len(coderResult.Files) > 0 {
-		p.setState(PipelineTesting)
-		p.event("generating tests…")
-		p.b.Publish(bus.NewMessage(bus.RoleSystem, bus.RoleTester, bus.MsgRequest, "generate"))
-		if err := tester.GenerateTests(ctx, coderResult.Files); err != nil {
-			p.event(fmt.Sprintf("warning: test generation: %v", err))
-		}
-		p.b.Publish(bus.NewMessage(bus.RoleTester, "", bus.MsgResponse, "tests generated"))
-	}
-
-	// Initial build-and-fix so source compiles before quality gate.
+	// Initial build-and-test fix loop so source is validated against tests before quality gate.
 	coder, ok := p.agents[bus.RoleCoder].(*agent.CoderAgent)
 	if ok {
 		p.setState(PipelineFixing)
-		p.event("building project…")
-		allFiles := appendTestFiles(coderResult.Files, p.root)
-		fixed, buildErr := coder.BuildAndFix(ctx, allFiles)
+		p.event("running build and tests…")
+		fixed, buildErr := coder.BuildAndFix(ctx, coderResult.Files)
 		if buildErr != nil {
 			return coderResult.Files, fmt.Errorf("build: %w", buildErr)
 		}
@@ -384,328 +425,6 @@ func (p *Pipeline) generateCode(ctx context.Context, plan, ctxFragment, stageNam
 	}
 
 	return coderResult.Files, nil
-}
-
-// qualityGate runs the full quality pipeline in a single loop:
-// test → review → ux_review → security → qa.
-// If any phase finds must-fix issues, the coder fixes them and the loop restarts.
-func (p *Pipeline) qualityGate(ctx context.Context, ctxFragment string, files *[]string) error {
-	maxAttempts := p.maxFix()
-
-	for attempt := 0; maxAttempts == 0 || attempt < maxAttempts; attempt++ {
-		if attempt > 0 {
-			p.event(fmt.Sprintf("quality gate pass %d", attempt+1))
-		}
-
-		// 1. Test
-		failure, err := p.runTests(ctx, *files)
-		if err != nil {
-			return err
-		}
-		if failure != "" {
-			if err := p.fixAndRebuild(ctx, ctxFragment, failure, files, "test", attempt, maxAttempts); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// 2. Code review
-		mustFix, err := p.runReview(ctx, *files)
-		if err != nil {
-			return err
-		}
-		if mustFix != "" {
-			if err := p.fixAndRebuild(ctx, ctxFragment, mustFix, files, "review", attempt, maxAttempts); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// 3. UX review
-		mustFix, err = p.runUXReview(ctx, *files)
-		if err != nil {
-			return err
-		}
-		if mustFix != "" {
-			if err := p.fixAndRebuild(ctx, ctxFragment, "UX/UI ISSUES:\n"+mustFix, files, "ux_review", attempt, maxAttempts); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// 4. Security review
-		mustFix, err = p.runSecurityReview(ctx, *files)
-		if err != nil {
-			return err
-		}
-		if mustFix != "" {
-			if err := p.fixAndRebuild(ctx, ctxFragment, "SECURITY ISSUES:\n"+mustFix, files, "security", attempt, maxAttempts); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// 5. QA review
-		mustFix, err = p.runQAReview(ctx, *files)
-		if err != nil {
-			return err
-		}
-		if mustFix != "" {
-			if err := p.fixAndRebuild(ctx, ctxFragment, "QA CORNER CASE ISSUES:\n"+mustFix, files, "qa", attempt, maxAttempts); err != nil {
-				return err
-			}
-			continue
-		}
-
-		// All phases passed.
-		p.event("quality gate passed — all checks clean")
-		return nil
-	}
-
-	return fmt.Errorf("quality gate still failing after %d attempts", maxAttempts)
-}
-
-// runTests executes the tester agent and returns failure description (empty on success).
-func (p *Pipeline) runTests(ctx context.Context, files []string) (string, error) {
-	p.setState(PipelineTesting)
-	testResp, err := p.runAgent(ctx, bus.RoleTester, agent.TesterPayload{Files: files})
-	if err != nil {
-		return "", fmt.Errorf("test: %w", err)
-	}
-
-	testResult, ok := testResp.Payload.(agent.TestReport)
-	if !ok {
-		return "", fmt.Errorf("tester returned unexpected payload type %T", testResp.Payload)
-	}
-
-	if testResult.Success {
-		p.event("all tests passed")
-		return "", nil
-	}
-
-	return buildTestFailure(testResult), nil
-}
-
-// runReview runs the code reviewer agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runReview(ctx context.Context, files []string) (string, error) {
-	p.setState(PipelineReviewing)
-	reviewResp, err := p.runAgent(ctx, bus.RoleReviewer, agent.ReviewerPayload{
-		Files: files,
-		Root:  p.root,
-	})
-	if err != nil {
-		return "", fmt.Errorf("review: %w", err)
-	}
-
-	result, ok := reviewResp.Payload.(agent.ReviewResult)
-	if !ok {
-		return "", fmt.Errorf("reviewer returned unexpected payload type %T", reviewResp.Payload)
-	}
-
-	if result.Unparsed {
-		p.event("review output could not be parsed — escalating to PM for arbitration")
-		return p.pmArbitrate(ctx, "code review", result.RawOutput)
-	}
-
-	p.collectNiceToHave("Code Review", result.NiceToHave)
-
-	if len(result.MustFix) == 0 {
-		p.event("review passed — no must-fix issues")
-		return "", nil
-	}
-
-	return strings.Join(result.MustFix, "\n"), nil
-}
-
-// runUXReview runs the UX reviewer agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runUXReview(ctx context.Context, files []string) (string, error) {
-	if _, ok := p.agents[bus.RoleUXReviewer]; !ok {
-		p.event("no UX reviewer agent configured — skipping")
-		return "", nil
-	}
-
-	p.setState(PipelineUXReviewing)
-	uxResp, err := p.runAgent(ctx, bus.RoleUXReviewer, agent.UXReviewerPayload{
-		Files: files,
-		Root:  p.root,
-	})
-	if err != nil {
-		return "", fmt.Errorf("ux review: %w", err)
-	}
-
-	result, ok := uxResp.Payload.(agent.UXReviewResult)
-	if !ok {
-		return "", fmt.Errorf("ux reviewer returned unexpected payload type %T", uxResp.Payload)
-	}
-
-	if result.Unparsed {
-		p.event("UX review output could not be parsed — escalating to PM for arbitration")
-		return p.pmArbitrate(ctx, "UX/UI review", result.RawOutput)
-	}
-
-	p.collectNiceToHave("UX/UI", result.NiceToHave)
-
-	if len(result.MustFix) == 0 {
-		p.event("UX review passed — no must-fix issues")
-		return "", nil
-	}
-
-	return strings.Join(result.MustFix, "\n"), nil
-}
-
-// runSecurityReview runs the security agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runSecurityReview(ctx context.Context, files []string) (string, error) {
-	if _, ok := p.agents[bus.RoleSecurity]; !ok {
-		p.event("no security agent configured — skipping")
-		return "", nil
-	}
-
-	p.setState(PipelineSecurity)
-	secResp, err := p.runAgent(ctx, bus.RoleSecurity, agent.SecurityPayload{
-		Files: files,
-		Root:  p.root,
-	})
-	if err != nil {
-		return "", fmt.Errorf("security: %w", err)
-	}
-
-	result, ok := secResp.Payload.(agent.SecurityResult)
-	if !ok {
-		return "", fmt.Errorf("security agent returned unexpected payload type %T", secResp.Payload)
-	}
-
-	if result.Unparsed {
-		p.event("security review output could not be parsed — escalating to PM for arbitration")
-		return p.pmArbitrate(ctx, "security review", result.RawOutput)
-	}
-
-	p.collectNiceToHave("Security", result.NiceToHave)
-
-	if len(result.MustFix) == 0 {
-		p.event("security review passed — no must-fix issues")
-		return "", nil
-	}
-
-	return strings.Join(result.MustFix, "\n"), nil
-}
-
-// runQAReview runs the QA agent and returns must-fix issues (empty on approval).
-func (p *Pipeline) runQAReview(ctx context.Context, files []string) (string, error) {
-	if _, ok := p.agents[bus.RoleQA]; !ok {
-		p.event("no QA agent configured — skipping")
-		return "", nil
-	}
-
-	p.setState(PipelineQA)
-	qaResp, err := p.runAgent(ctx, bus.RoleQA, agent.QAPayload{
-		Files: files,
-		Root:  p.root,
-	})
-	if err != nil {
-		return "", fmt.Errorf("qa: %w", err)
-	}
-
-	result, ok := qaResp.Payload.(agent.QAResult)
-	if !ok {
-		return "", fmt.Errorf("qa agent returned unexpected payload type %T", qaResp.Payload)
-	}
-
-	if result.Unparsed {
-		p.event("QA review output could not be parsed — escalating to PM for arbitration")
-		return p.pmArbitrate(ctx, "QA review", result.RawOutput)
-	}
-
-	p.collectNiceToHave("QA", result.NiceToHave)
-
-	if len(result.MustFix) == 0 {
-		p.event("QA review passed — no must-fix issues")
-		return "", nil
-	}
-
-	return strings.Join(result.MustFix, "\n"), nil
-}
-
-// pmArbitrate escalates an unparseable review response to the PM agent.
-// PM decides whether the coder needs to fix something (returns must-fix string)
-// or the review should pass (returns empty string).
-// If no PM agent is configured, logs a warning and passes the review.
-func (p *Pipeline) pmArbitrate(ctx context.Context, phase, rawOutput string) (string, error) {
-	pm, ok := p.agents[bus.RolePM].(*agent.PMAgent)
-	if !ok {
-		p.event(fmt.Sprintf("no PM agent for arbitration — treating unparsed %s as pass", phase))
-		p.logger().Warn("unparsed review with no PM agent, defaulting to pass",
-			slog.String("phase", phase))
-		return "", nil
-	}
-
-	p.setState(PipelinePM)
-	p.event(fmt.Sprintf("PM arbitrating unparsed %s output…", phase))
-
-	// Publish request so TUI updates PM panel to running state with spinner.
-	p.b.Publish(bus.NewMessage(bus.RoleSystem, bus.RolePM, bus.MsgRequest, "arbitrate"))
-
-	started := time.Now()
-	result, err := pm.Arbitrate(ctx, phase, rawOutput)
-	elapsed := time.Since(started)
-	p.agentDurations[bus.RolePM] += elapsed
-
-	// Publish response so TUI updates PM panel to done state.
-	p.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgResponse, "arbitration complete"))
-
-	if err != nil {
-		return "", fmt.Errorf("pm arbitrate (%s): %w", phase, err)
-	}
-
-	if result.Pass {
-		p.event(fmt.Sprintf("PM verdict: %s review passes", phase))
-		return "", nil
-	}
-
-	mustFix := strings.Join(result.MustFix, "\n")
-	p.event(fmt.Sprintf("PM verdict: %s has %d must-fix issues", phase, len(result.MustFix)))
-	return mustFix, nil
-}
-
-// fixAndRebuild sends failure to coder, rebuilds, and returns.
-// The caller (qualityGate) will restart the full quality pipeline.
-func (p *Pipeline) fixAndRebuild(ctx context.Context, ctxFragment, failure string, files *[]string, phase string, attempt, maxAttempts int) error {
-	if maxAttempts > 0 {
-		if attempt >= maxAttempts-1 {
-			return fmt.Errorf("%s issues not resolved after %d attempts", phase, maxAttempts)
-		}
-		p.event(fmt.Sprintf("%s issues found, sending to coder (attempt %d/%d)", phase, attempt+1, maxAttempts))
-	} else {
-		p.event(fmt.Sprintf("%s issues found, sending to coder (attempt %d)", phase, attempt+1))
-	}
-
-	allFiles := appendTestFiles(*files, p.root)
-	p.setState(PipelineFixing)
-	fixResp, err := p.runAgent(ctx, bus.RoleCoder, agent.CoderFixPayload{
-		Failure:        failure,
-		ProjectContext: ctxFragment,
-		Files:          allFiles,
-	})
-	if err != nil {
-		return fmt.Errorf("code fix (%s): %w", phase, err)
-	}
-
-	fixResult := extractCoderResult(fixResp)
-	*files = mergeFileList(*files, fixResult.Files)
-	*files = p.collectProjectFiles(*files)
-
-	// Rebuild after fix.
-	coder, ok := p.agents[bus.RoleCoder].(*agent.CoderAgent)
-	if ok {
-		p.setState(PipelineFixing)
-		p.event("rebuilding after fix…")
-		fixed, buildErr := coder.BuildAndFix(ctx, *files)
-		if buildErr != nil {
-			return fmt.Errorf("rebuild after %s fix: %w", phase, buildErr)
-		}
-		*files = fixed
-	}
-
-	return nil
 }
 
 func (p *Pipeline) runAgent(ctx context.Context, role bus.AgentRole, payload any) (bus.Message, error) {
@@ -888,295 +607,83 @@ func (p *Pipeline) setState(s PipelineState) {
 	p.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, string(s)))
 }
 
+// gatherRequirements conducts PM↔human conversation to produce requirements.
+// Returns the requirements text after both summary and requirements are approved.
+func (p *Pipeline) gatherRequirements(ctx context.Context, ctxFragment string) (string, error) {
+	p.setState(PipelineNegotiating)
+
+	pm, ok := p.agents[bus.RolePM].(*agent.PMAgent)
+	if !ok {
+		return "", fmt.Errorf("no PM agent configured — cannot gather requirements via chat")
+	}
+
+	p.event("PM starting requirements conversation…")
+	p.b.Publish(bus.NewMessage(bus.RoleSystem, bus.RolePM, bus.MsgRequest, "gather"))
+
+	started := time.Now()
+	summary, requirements, err := pm.GatherRequirements(ctx, ctxFragment, p.humanCh)
+	elapsed := time.Since(started)
+	p.agentDurations[bus.RolePM] += elapsed
+
+	if err != nil {
+		return "", err
+	}
+
+	p.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgResponse, "requirements gathered"))
+
+	// Save and present requirements for approval.
+	if err := p.ws.WriteFile("gathered_summary.md", []byte(summary+"\n")); err != nil {
+		return "", err
+	}
+	if err := p.ws.WriteFile(artifacts.RequirementsFile, []byte(requirements+"\n")); err != nil {
+		return "", err
+	}
+
+	// Emit requirements for display.
+	p.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgEvent,
+		bus.TokenPayload{Text: "=== Requirements ===\n" + requirements + "\n\n", Done: false}))
+	p.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgEvent,
+		bus.TokenPayload{Text: "", Done: true}))
+
+	// Gate: user must approve requirements before proceeding.
+	p.setState(PipelineGate)
+	p.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgHumanGate, artifacts.RequirementsFile))
+
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-p.regenerateCh:
+		// User wants to re-do the conversation — recursive retry.
+		p.event("re-gathering requirements…")
+		_ = os.Remove(p.ws.Path(artifacts.RequirementsFile))
+		_ = os.Remove(p.ws.Path("gathered_summary.md"))
+		return p.gatherRequirements(ctx, ctxFragment)
+	case <-p.gateCh:
+		p.logger().Info("requirements approved")
+		return requirements, nil
+	}
+}
+
 func (p *Pipeline) event(msg string) {
 	p.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, msg))
 }
 
-// collectNiceToHave appends suggestions from a review phase.
-func (p *Pipeline) collectNiceToHave(phase string, items []string) {
-	if len(items) == 0 {
-		return
-	}
-	p.niceToHave[phase] = append(p.niceToHave[phase], items...)
-	p.logger().Info("collected nice-to-have items",
-		slog.String("phase", phase),
-		slog.Int("count", len(items)),
-	)
-}
-
 // saveNiceToHave writes all collected nice-to-have suggestions to a markdown file.
 func (p *Pipeline) saveNiceToHave() {
-	if len(p.niceToHave) == 0 {
-		return
+	saveNiceToHaveFile(p.ws, p.niceToHave, p.logger())
+	total := totalNiceToHave(p.niceToHave)
+	if total > 0 {
+		p.event(fmt.Sprintf("saved %d nice-to-have suggestions to %s", total, artifacts.NiceToHaveFile))
 	}
-
-	var sb strings.Builder
-	sb.WriteString("# Nice to Have / Recommendations\n\n")
-	sb.WriteString("Items deferred from MoSCoW plan and suggestions from review phases.\n\n")
-
-	for _, phase := range []string{"Could Have (from plan)", "Won't Have (from plan)", "Code Review", "UX/UI", "Security", "QA"} {
-		items := p.niceToHave[phase]
-		if len(items) == 0 {
-			continue
-		}
-		sb.WriteString("## " + phase + "\n\n")
-		for _, item := range items {
-			sb.WriteString("- " + item + "\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	content := sb.String()
-	if err := p.ws.WriteFile(artifacts.NiceToHaveFile, []byte(content)); err != nil {
-		p.logger().Warn("failed to write nice-to-have file", slog.String("error", err.Error()))
-	}
-	p.event(fmt.Sprintf("saved %d nice-to-have suggestions to %s", p.totalNiceToHave(), artifacts.NiceToHaveFile))
-}
-
-func (p *Pipeline) totalNiceToHave() int {
-	total := 0
-	for _, items := range p.niceToHave {
-		total += len(items)
-	}
-	return total
 }
 
 // emitSummary builds and emits a final pipeline summary.
 func (p *Pipeline) emitSummary() {
-	var sb strings.Builder
-	sb.WriteString("\n════════════════════════════════════════\n")
-	sb.WriteString("  PIPELINE COMPLETE — SUMMARY\n")
-	sb.WriteString("════════════════════════════════════════\n\n")
-
-	// Review statuses.
-	phases := []struct {
-		name string
-		role bus.AgentRole
-		file string
-	}{
-		{"Code Review", bus.RoleReviewer, artifacts.ReviewFile},
-		{"UX/UI Review", bus.RoleUXReviewer, artifacts.UXReviewFile},
-		{"Security Audit", bus.RoleSecurity, artifacts.SecurityReviewFile},
-		{"QA Review", bus.RoleQA, artifacts.QAReviewFile},
-	}
-
-	for _, ph := range phases {
-		if _, ok := p.agents[ph.role]; !ok {
-			_, err := fmt.Fprintf(&sb, "  ○ %s — skipped\n", ph.name)
-			if err != nil {
-				return
-			}
-			continue
-		}
-		if p.ws.FileExists(ph.file) {
-			_, err := fmt.Fprintf(&sb, "  ✓ %s — passed\n", ph.name)
-			if err != nil {
-				return
-			}
-		} else {
-			_, err := fmt.Fprintf(&sb, "  ? %s — no output\n", ph.name)
-			if err != nil {
-				return
-			}
-		}
-	}
-
-	// Nice-to-have summary.
-	total := p.totalNiceToHave()
-	if total > 0 {
-		_, err := fmt.Fprintf(&sb, "\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile)
-		if err != nil {
-			return
-		}
-		for phase, items := range p.niceToHave {
-			_, err := fmt.Fprintf(&sb, "     • %s: %d items\n", phase, len(items))
-			if err != nil {
-				return
-			}
-		}
-	}
-
-	// Artifacts.
-	sb.WriteString("\n  Artifacts:\n")
-	for _, file := range []string{
-		artifacts.ReviewFile, artifacts.UXReviewFile,
-		artifacts.SecurityReviewFile, artifacts.QAReviewFile,
-		artifacts.NiceToHaveFile,
-	} {
-		if p.ws.FileExists(file) {
-			_, err := fmt.Fprintf(&sb, "    • %s\n", file)
-			if err != nil {
-				return
-			}
-		}
-	}
-
-	// Agent timing.
-	if len(p.agentDurations) > 0 {
-		sb.WriteString("\n  Agent Durations:\n")
-		totalDuration := time.Duration(0)
-		for _, role := range []bus.AgentRole{
-			bus.RolePM, bus.RolePlanner, bus.RoleCoder, bus.RoleTester,
-			bus.RoleReviewer, bus.RoleUXReviewer, bus.RoleSecurity, bus.RoleQA,
-		} {
-			d, ok := p.agentDurations[role]
-			if !ok || d == 0 {
-				continue
-			}
-			totalDuration += d
-			_, _ = fmt.Fprintf(&sb, "    %-12s %s\n", string(role), formatDuration(d))
-		}
-		if totalDuration > 0 {
-			_, _ = fmt.Fprintf(&sb, "    %-12s %s\n", "TOTAL", formatDuration(totalDuration))
-		}
-		if !p.codingStarted.IsZero() {
-			wallClock := time.Since(p.codingStarted)
-			_, _ = fmt.Fprintf(&sb, "    %-12s %s (since first coder handoff)\n", "WALL CLOCK", formatDuration(wallClock))
-		}
-	}
-
-	sb.WriteString("\n════════════════════════════════════════\n")
-
-	summary := sb.String()
-
-	// Save to file.
-	_ = p.ws.WriteFile(artifacts.SummaryFile, []byte(summary))
-
-	// Emit summary to system event.
-	p.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent,
-		bus.TokenPayload{Text: summary, Done: false}))
-	p.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent,
-		bus.TokenPayload{Text: "", Done: true}))
+	emitSummary(p.b, p.ws, p.agents, p.niceToHave, p.agentDurations, p.codingStarted)
 }
 
 // extractDeferredItems parses the plan for "Could Have" and "Won't Have" sections
 // and adds them to nice-to-have so they appear in the final report.
 func (p *Pipeline) extractDeferredItems(plan string) {
-	lines := strings.Split(plan, "\n")
-	section := ""
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		upper := strings.ToUpper(trimmed)
-
-		switch {
-		case strings.Contains(upper, "COULD HAVE"):
-			section = "could"
-		case strings.Contains(upper, "WON'T HAVE") || strings.Contains(upper, "WONT HAVE") || strings.Contains(upper, "WON'T HAVE"):
-			section = "wont"
-		case strings.Contains(upper, "MUST HAVE") || strings.Contains(upper, "SHOULD HAVE"):
-			section = ""
-		case strings.HasPrefix(upper, "## ") || strings.HasPrefix(upper, "==="):
-			// Other section headers reset.
-			if section != "" && !strings.Contains(upper, "COULD") && !strings.Contains(upper, "WON") {
-				section = ""
-			}
-		default:
-			if section == "" {
-				continue
-			}
-			item := strings.TrimSpace(strings.TrimLeft(trimmed, "-*0123456789.)"))
-			if item == "" {
-				continue
-			}
-			label := "Could Have (from plan)"
-			if section == "wont" {
-				label = "Won't Have (from plan)"
-			}
-			p.niceToHave[label] = append(p.niceToHave[label], item)
-		}
-	}
-
-	total := len(p.niceToHave["Could Have (from plan)"]) + len(p.niceToHave["Won't Have (from plan)"])
-	if total > 0 {
-		p.event(fmt.Sprintf("extracted %d deferred items from plan (Could Have + Won't Have)", total))
-	}
-}
-
-func buildTestFailure(test agent.TestReport) string {
-	var parts []string
-	for _, c := range test.Commands {
-		if c.ExitCode != 0 {
-			parts = append(parts, fmt.Sprintf("$ %s\n%s\n%s", c.Command, c.Stdout, c.Stderr))
-		}
-	}
-	return strings.Join(parts, "\n")
-}
-
-// extractCoderResult safely extracts CoderResult from a message, returning
-// an empty result if the payload type doesn't match.
-func extractCoderResult(msg bus.Message) agent.CoderResult {
-	if cr, ok := msg.Payload.(agent.CoderResult); ok {
-		return cr
-	}
-	return agent.CoderResult{}
-}
-
-// mergeFileList returns a combined file list without duplicates.
-func mergeFileList(existing, added []string) []string {
-	seen := make(map[string]bool, len(existing))
-	for _, f := range existing {
-		seen[f] = true
-	}
-	result := make([]string, len(existing))
-	copy(result, existing)
-	for _, f := range added {
-		if !seen[f] {
-			result = append(result, f)
-			seen[f] = true
-		}
-	}
-	return result
-}
-
-// appendTestFiles scans directories of source files for *_test.go files
-// and appends them to the list, so the coder can see and fix tests too.
-func appendTestFiles(files []string, root string) []string {
-	seen := make(map[string]bool, len(files))
-	for _, f := range files {
-		seen[f] = true
-	}
-
-	result := make([]string, len(files))
-	copy(result, files)
-
-	dirs := make(map[string]bool)
-	for _, f := range files {
-		dirs[filepath.Dir(f)] = true
-	}
-
-	for dir := range dirs {
-		absDir := filepath.Join(root, dir)
-		entries, err := os.ReadDir(absDir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), "_test.go") {
-				continue
-			}
-			rel := filepath.Join(dir, e.Name())
-			if !seen[rel] {
-				result = append(result, rel)
-				seen[rel] = true
-			}
-		}
-	}
-	return result
-}
-
-// formatDuration formats a duration as human-readable "Xh Ym Zs" or "Xm Zs" or "Zs".
-func formatDuration(d time.Duration) string {
-	d = d.Round(time.Second)
-	h := int(d.Hours())
-	m := int(d.Minutes()) % 60
-	s := int(d.Seconds()) % 60
-	switch {
-	case h > 0:
-		return fmt.Sprintf("%dh %dm %ds", h, m, s)
-	case m > 0:
-		return fmt.Sprintf("%dm %ds", m, s)
-	default:
-		return fmt.Sprintf("%ds", s)
-	}
+	extractDeferredItems(plan, p.niceToHave, func(msg string) { p.event(msg) })
 }

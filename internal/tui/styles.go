@@ -37,10 +37,10 @@ var crt = themeAmber
 
 // Role colors — each agent gets a distinct accent while keeping CRT aesthetics.
 var roleColors = map[string]lipgloss.Color{
-	"pm":          lipgloss.Color("#e0af68"), // warm gold
-	"pm_fixer":    lipgloss.Color("#d4a056"), // darker gold — fixer variant
+	"pm":          lipgloss.Color("#e0af68"), // gold — project manager
 	"planner":     lipgloss.Color("#7aa2f7"), // soft blue
 	"coder":       lipgloss.Color("#9ece6a"), // green
+	"coder_fixer": lipgloss.Color("#73b34d"), // darker green — fixer variant
 	"tester":      lipgloss.Color("#bb9af7"), // lavender
 	"reviewer":    lipgloss.Color("#f7768e"), // coral pink
 	"ux_reviewer": lipgloss.Color("#ff9e64"), // orange

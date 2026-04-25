@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -16,7 +17,8 @@ type StatusBarModel struct {
 	stageInfo     string // e.g. "Stage 2/5: Must Have — Auth"
 	runner        string
 	model         string
-	tokenChars    int // cumulative output characters (used to estimate tokens)
+	agentUsage    map[bus.AgentRole]bus.AgentUsage
+	totalTokens   int // cached sum of input+output across all agents
 	width         int
 	scrollOffset  int       // marquee scroll position for stageInfo
 	codingStarted time.Time // timestamp of first coder handoff for elapsed timer
@@ -44,9 +46,14 @@ func (m StatusBarModel) WithRunnerModel(r, mdl string) StatusBarModel {
 	return m
 }
 
-// AddTokenChars adds n output characters to the cumulative counter.
-func (m StatusBarModel) AddTokenChars(n int) StatusBarModel {
-	m.tokenChars += n
+// WithAgentUsage updates the per-agent usage map and recomputes the total token count.
+func (m StatusBarModel) WithAgentUsage(usage map[bus.AgentRole]bus.AgentUsage) StatusBarModel {
+	m.agentUsage = usage
+	total := 0
+	for _, u := range usage {
+		total += u.InputTokens + u.OutputTokens
+	}
+	m.totalTokens = total
 	return m
 }
 
@@ -56,10 +63,8 @@ func (m StatusBarModel) AdvanceScroll() StatusBarModel {
 	return m
 }
 
-// formatTokens returns a human-friendly token estimate string.
-// Uses ~4 chars per token as a rough heuristic.
-func formatTokens(chars int) string {
-	tokens := chars / 4
+// formatTokens returns a human-friendly token count string.
+func formatTokens(tokens int) string {
 	switch {
 	case tokens >= 1_000_000:
 		return fmt.Sprintf("%.1fM tok", float64(tokens)/1_000_000)
@@ -100,6 +105,7 @@ var statusBarShortcuts = []statusBarShortcut{
 	{"Ctrl+C", "chat", lipgloss.Color("#2ac3de")},    // cyan — chat
 	{"Ctrl+T", "sysmon", lipgloss.Color("#ff9e64")},  // orange — system monitor
 	{"Ctrl+A", "approve", lipgloss.Color("#9ece6a")}, // green — approve
+	{"Ctrl+E", "error", lipgloss.Color("#f7768e")},   // coral — toggle error banner
 	{"Ctrl+X", "cancel", lipgloss.Color("#f7768e")},  // coral — cancel
 	{"q", "quit", lipgloss.Color("#6b553f")},         // dim — quit
 }
@@ -143,8 +149,8 @@ func (m StatusBarModel) View() string {
 		}
 		suffix += "  " + styleStatusKey.Render(info)
 	}
-	if m.tokenChars > 0 {
-		suffix += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.tokenChars))
+	if m.totalTokens > 0 {
+		suffix += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.totalTokens))
 	}
 	if !m.codingStarted.IsZero() {
 		elapsed := time.Since(m.codingStarted).Round(time.Second)
