@@ -1,7 +1,10 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -90,5 +93,29 @@ func TestOllamaStreamResponse_UnwrapsJSONEnvelope(t *testing.T) {
 	}
 	if text != "czesc" {
 		t.Errorf("expected unwrapped text %q, got %q", "czesc", text)
+	}
+}
+
+func TestOllamaRunner_SendsUnlimitedNumPredict(t *testing.T) {
+	var captured ollamaChatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write([]byte(`{"message":{"role":"assistant","content":"ok"},"done":true}` + "\n"))
+	}))
+	defer srv.Close()
+
+	r := &OllamaRunner{Model: "test", BaseURL: srv.URL}
+	ch, err := r.Complete(context.Background(), CompletionRequest{
+		Messages: []ConvMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	for range ch {
+	}
+
+	if captured.Options.NumPredict != ollamaMaxPredict {
+		t.Errorf("expected num_predict=%d, got %d", ollamaMaxPredict, captured.Options.NumPredict)
 	}
 }

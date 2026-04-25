@@ -13,6 +13,13 @@ import (
 const (
 	ollamaDefaultModel = "qwen2.5-coder:latest"
 	ollamaBaseURL      = "http://localhost:11434"
+
+	// ollamaMaxPredict caps generation at a generous upper bound so long
+	// responses (TASKSPEC, plans, full file rewrites) are not silently
+	// truncated by Ollama's per-model default (often 128 tokens), while
+	// still preventing runaway loops where the model never emits EOS —
+	// especially painful on memory-constrained machines.
+	ollamaMaxPredict = 8192
 )
 
 // OllamaRunner calls the Ollama REST API directly (/api/chat)
@@ -40,6 +47,9 @@ func (r *OllamaRunner) Complete(ctx context.Context, req CompletionRequest) (<-c
 		Model:    model,
 		Messages: messages,
 		Stream:   true,
+		Options: ollamaOptions{
+			NumPredict: ollamaMaxPredict,
+		},
 	}
 
 	payload, err := json.Marshal(body)
@@ -193,6 +203,14 @@ type ollamaChatRequest struct {
 	Model    string              `json:"model"`
 	Messages []ollamaChatMessage `json:"messages"`
 	Stream   bool                `json:"stream"`
+	Options  ollamaOptions       `json:"options,omitempty"`
+}
+
+// ollamaOptions overrides Ollama's per-model generation defaults. We set
+// num_predict explicitly because Ollama defaults it to 128 for many models,
+// which silently truncates long responses (TASKSPEC, plans, code).
+type ollamaOptions struct {
+	NumPredict int `json:"num_predict,omitempty"`
 }
 
 type ollamaChatMessage struct {

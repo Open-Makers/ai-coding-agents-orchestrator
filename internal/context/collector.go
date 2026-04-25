@@ -41,7 +41,7 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 		SourceFiles:   make(map[string]string),
 	}
 
-	files, err := gitLines(root, "ls-files")
+	files, err := gitLines(root, gitArgsWithExcludes("ls-files")...)
 	if err != nil {
 		return pc, fmt.Errorf("context: git ls-files: %w", err)
 	}
@@ -54,7 +54,7 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	}
 	pc.RecentCommits = commits
 
-	diff, _ := gitOutput(root, "diff", "HEAD")
+	diff, _ := gitOutput(root, gitArgsWithExcludes("diff", "HEAD")...)
 	pc.UnstagedDiff = diff
 
 	rootAbs, _ := filepath.Abs(root)
@@ -420,6 +420,16 @@ var excludedTopLevelDirs = []string{
 	".git/",
 	"node_modules/",
 	"vendor/",
+}
+
+// gitArgsWithExcludes appends pathspec exclusions so git commands (ls-files,
+// diff) never surface paths under excludedTopLevelDirs.
+func gitArgsWithExcludes(args ...string) []string {
+	args = append(args, "--", ".")
+	for _, dir := range excludedTopLevelDirs {
+		args = append(args, ":(exclude,glob)"+strings.TrimSuffix(dir, "/")+"/**")
+	}
+	return args
 }
 
 // filterInternalPaths removes paths under directories that should not be part

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
@@ -129,5 +130,51 @@ func TestCollect_ExcludesOrchestratorWorkspace(t *testing.T) {
 		if filepath.ToSlash(f) == ".orchestrator/project.yaml" {
 			t.Fatalf("expected .orchestrator/project.yaml to be excluded, got files: %v", pc.Files)
 		}
+	}
+}
+
+func TestCollect_DiffExcludesOrchestrator(t *testing.T) {
+	root := initGitRepo(t)
+
+	// Initial commit so HEAD exists.
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "-A")
+	runGit(t, root, "commit", "-m", "init")
+
+	// Modify both a real source file and an .orchestrator/ file.
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n// changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".orchestrator"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".orchestrator", "project.yaml"), []byte("agents:\n  coder:\n    runner: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, root, "add", "-A")
+
+	pc, err := Collect(root, config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pc.UnstagedDiff == "" {
+		t.Fatal("expected non-empty diff")
+	}
+	if strings.Contains(pc.UnstagedDiff, ".orchestrator/project.yaml") {
+		t.Fatalf("diff must not include .orchestrator/project.yaml, got:\n%s", pc.UnstagedDiff)
+	}
+	if !strings.Contains(pc.UnstagedDiff, "main.go") {
+		t.Fatalf("expected main.go change in diff, got:\n%s", pc.UnstagedDiff)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }

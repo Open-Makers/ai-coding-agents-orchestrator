@@ -606,28 +606,16 @@ func (a *PMAgent) forceTaskSpec(ctx context.Context, systemPrompt string, messag
 }
 
 func shouldForceTaskSpec(messages []runner.ConvMessage, output string) bool {
-	if len(messages) < 3 {
+	if len(messages) == 0 {
 		return false
 	}
 	if !looksLikeGenericClarification(output) {
 		return false
 	}
-
-	lastUser := lastConversationMessage(messages, "user")
-	if lastUser == "" {
-		return false
-	}
-	if isAffirmative(lastUser) {
-		return true
-	}
-
-	assistantTurns := 0
-	for _, msg := range messages {
-		if msg.Role == "assistant" {
-			assistantTurns++
-		}
-	}
-	return assistantTurns >= 2
+	// The PM prompt forbids generic dismissals. If the model produces one
+	// anyway, force a TASKSPEC immediately using whatever the user already
+	// said — never trap the user in a "please describe the task" loop.
+	return true
 }
 
 func looksLikeGenericClarification(text string) bool {
@@ -641,32 +629,22 @@ func looksLikeGenericClarification(text string) bool {
 		"czy możesz podać bardziej szczegółowe informacje",
 		"co dokładnie chcesz zmienić",
 		"jakie dokładnie",
+		"proszę opisać zadanie",
+		"opisz zadanie",
+		"podaj więcej szczegółów",
 		"provide more details",
 		"could you provide more details",
 		"what exactly do you want to change",
+		"please describe the task",
+		"please describe what you want",
+		"can you elaborate",
+		"what would you like to do",
+		"what do you want to do",
 	}
 	for _, needle := range needles {
 		if strings.Contains(trimmed, needle) {
 			return true
 		}
-	}
-	return false
-}
-
-func lastConversationMessage(messages []runner.ConvMessage, role string) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == role {
-			return strings.TrimSpace(messages[i].Content)
-		}
-	}
-	return ""
-}
-
-func isAffirmative(text string) bool {
-	trimmed := strings.ToLower(strings.TrimSpace(text))
-	switch trimmed {
-	case "tak", "tak.", "tak!", "yes", "yes.", "exactly", "dokładnie", "zgadza się", "correct", "right":
-		return true
 	}
 	return false
 }

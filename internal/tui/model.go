@@ -304,6 +304,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.overlayNegotiate = neg
 							m.overlay = overlayNegotiate
 						}
+						// Pipeline left the negotiation phase — auto-close
+						// the negotiate overlay so the user sees subsequent
+						// stages (planning/coding/…) instead of being stuck
+						// on "PM is thinking…".
+						if s != "negotiating" && m.overlay == overlayNegotiate {
+							m.overlay = overlayNone
+						}
 						// Start elapsed timer on first coding handoff.
 						if s == "coding" && m.pipeline != nil && m.statusbar.codingStarted.IsZero() {
 							codingStart := m.pipeline.CodingStarted()
