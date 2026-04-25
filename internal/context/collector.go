@@ -45,7 +45,7 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	if err != nil {
 		return pc, fmt.Errorf("context: git ls-files: %w", err)
 	}
-	pc.Files = files
+	pc.Files = filterInternalPaths(files)
 
 	commits, err := gitLines(root, "log", "--oneline", "-20")
 	if err != nil {
@@ -75,12 +75,12 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	}
 
 	pc.ProjectType = detectProjectType(rootAbs)
-	pc.IsBrownfield = detectBrownfield(files, pc.ProjectType)
-	pc.TreeStructure = buildTreeStructure(files)
+	pc.IsBrownfield = detectBrownfield(pc.Files, pc.ProjectType)
+	pc.TreeStructure = buildTreeStructure(pc.Files)
 	pc.ProgrammingLanguage = cfg.Project.Language
 
 	if pc.IsBrownfield {
-		pc.SourceFiles = collectSourceFiles(rootAbs, files)
+		pc.SourceFiles = collectSourceFiles(rootAbs, pc.Files)
 	}
 
 	return pc, nil
@@ -411,4 +411,39 @@ func gitOutput(root string, args ...string) (string, error) {
 func fileExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && !info.IsDir()
+}
+
+// excludedTopLevelDirs are directories whose contents must never be exposed
+// as project context — they are tooling/state, not the user's source code.
+var excludedTopLevelDirs = []string{
+	".orchestrator/",
+	".git/",
+	"node_modules/",
+	"vendor/",
+}
+
+// filterInternalPaths removes paths under directories that should not be part
+// of the project review (orchestrator state, VCS internals, dependency dirs).
+func filterInternalPaths(files []string) []string {
+	if len(files) == 0 {
+		return files
+	}
+	out := files[:0:0]
+	for _, f := range files {
+		if isInternalPath(f) {
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+func isInternalPath(path string) bool {
+	normalized := filepath.ToSlash(path)
+	for _, prefix := range excludedTopLevelDirs {
+		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+	}
+	return false
 }

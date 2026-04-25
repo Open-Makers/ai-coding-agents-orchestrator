@@ -80,3 +80,54 @@ func TestCollect_AlwaysInclude_AbsolutePathRejected(t *testing.T) {
 		t.Error("absolute path should have been rejected")
 	}
 }
+
+func TestFilterInternalPaths_DropsOrchestratorAndVCS(t *testing.T) {
+	in := []string{
+		"main.go",
+		".orchestrator/project.yaml",
+		".orchestrator/prompts/coder.md",
+		"internal/foo/foo.go",
+		".git/HEAD",
+		"vendor/lib/lib.go",
+		"node_modules/pkg/index.js",
+	}
+	got := filterInternalPaths(in)
+	want := []string{"main.go", "internal/foo/foo.go"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("got[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestCollect_ExcludesOrchestratorWorkspace(t *testing.T) {
+	root := initGitRepo(t)
+
+	if err := os.MkdirAll(filepath.Join(root, ".orchestrator"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".orchestrator", "project.yaml"), []byte("agents: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	addAll := exec.Command("git", "add", "-A")
+	addAll.Dir = root
+	if out, err := addAll.CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+
+	pc, err := Collect(root, config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range pc.Files {
+		if filepath.ToSlash(f) == ".orchestrator/project.yaml" {
+			t.Fatalf("expected .orchestrator/project.yaml to be excluded, got files: %v", pc.Files)
+		}
+	}
+}
