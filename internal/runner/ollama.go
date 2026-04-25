@@ -75,7 +75,7 @@ func (r *OllamaRunner) buildMessages(req CompletionRequest) []ollamaChatMessage 
 	if req.SystemPrompt != "" {
 		msgs = append(msgs, ollamaChatMessage{
 			Role:    "system",
-			Content: req.SystemPrompt + "\n\nIMPORTANT: Output plain text only, not JSON.",
+			Content: req.SystemPrompt + "\n\nIMPORTANT: Reply with plain text only. Do NOT wrap your reply in JSON, do NOT use ```json fences, do NOT return objects like {\"response\": \"...\"}. Write the answer directly as natural prose.",
 		})
 	}
 
@@ -100,6 +100,7 @@ func (r *OllamaRunner) streamResponse(body io.ReadCloser, ch chan<- Token) {
 
 func (r *OllamaRunner) streamResponseFromBytes(data []byte, ch chan<- Token) {
 	defer close(ch)
+	var buf strings.Builder
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -112,9 +113,13 @@ func (r *OllamaRunner) streamResponseFromBytes(data []byte, ch chan<- Token) {
 			return
 		}
 		if chunk.Message.Content != "" {
-			ch <- Token{Text: chunk.Message.Content}
+			buf.WriteString(chunk.Message.Content)
 		}
 		if chunk.Done {
+			text := unwrapJSONResponse(buf.String())
+			if text != "" {
+				ch <- Token{Text: text}
+			}
 			ch <- Token{
 				Done: true,
 				Usage: &TokenUsage{
@@ -126,7 +131,54 @@ func (r *OllamaRunner) streamResponseFromBytes(data []byte, ch chan<- Token) {
 			return
 		}
 	}
+	if text := unwrapJSONResponse(buf.String()); text != "" {
+		ch <- Token{Text: text}
+	}
 	ch <- Token{Done: true}
+}
+
+// unwrapJSONResponse strips a wrapping JSON envelope that some local models
+// emit despite being asked for plain text, e.g. ```json {"response": "..."} ```
+// or {"response": "..."} or {"reply": "..."}. Returns the original text if
+// no recognized envelope is found.
+func unwrapJSONResponse(s string) string {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return s
+	}
+
+	trimmed = stripCodeFence(trimmed)
+
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return s
+	}
+
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil {
+		return s
+	}
+	for _, key := range []string{"response", "reply", "message", "content", "answer"} {
+		if v, ok := envelope[key]; ok {
+			if str, ok := v.(string); ok && str != "" {
+				return str
+			}
+		}
+	}
+	return s
+}
+
+// stripCodeFence removes a single surrounding triple-backtick fence (with
+// optional language tag) from s.
+func stripCodeFence(s string) string {
+	if !strings.HasPrefix(s, "```") || !strings.HasSuffix(s, "```") {
+		return s
+	}
+	inner := strings.TrimPrefix(s, "```")
+	if nl := strings.IndexByte(inner, '\n'); nl >= 0 {
+		inner = inner[nl+1:]
+	}
+	inner = strings.TrimSuffix(inner, "```")
+	return strings.TrimSpace(inner)
 }
 
 func (r *OllamaRunner) baseURL() string {
