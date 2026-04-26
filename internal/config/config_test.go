@@ -17,7 +17,7 @@ func TestLoad_NoFile(t *testing.T) {
 	if cfg.Project.Language != "go" {
 		t.Errorf("expected language=go, got %q", cfg.Project.Language)
 	}
-	if cfg.Project.TestCmd != "go test ./..." {
+	if cfg.Project.TestCmd != "go test -count=1 ./..." {
 		t.Errorf("unexpected test_cmd: %q", cfg.Project.TestCmd)
 	}
 	if cfg.Agents["planner"].Runner != "" {

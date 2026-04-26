@@ -154,3 +154,30 @@ func TestCoderBuildSourceContextWithSeeds_ExpandsImports(t *testing.T) {
 			barIdx, fooIdx, unrIdx)
 	}
 }
+
+func TestWriteOneFile_NoOpRewriteSkipped(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "pkg", "x.go")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := "package x\n\nfunc Foo() {}\n"
+	if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &CoderAgent{root: root}
+	err := a.writeOneFile("pkg/x.go", original)
+	if err != errNoOpRewrite {
+		t.Fatalf("expected errNoOpRewrite for identical content, got %v", err)
+	}
+
+	// Modified content must still be written.
+	if err := a.writeOneFile("pkg/x.go", "package x\n\nfunc Foo() { _ = 1 }\n"); err != nil {
+		t.Fatalf("unexpected error on real change: %v", err)
+	}
+	out, _ := os.ReadFile(target)
+	if !strings.Contains(string(out), "_ = 1") {
+		t.Errorf("expected real change persisted, got %q", string(out))
+	}
+}

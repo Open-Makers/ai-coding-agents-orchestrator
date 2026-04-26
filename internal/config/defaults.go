@@ -6,9 +6,9 @@ func DefaultConfig() Config {
 		Project: ProjectConfig{
 			Name:           "",
 			Language:       "go",
-			TestCmd:        "go test ./...",
+			TestCmd:        "go test -count=1 ./...",
 			LintCmd:        "golangci-lint run",
-			MaxFixAttempts: 0,
+			MaxFixAttempts: 3,
 			ReservedCores:  2,
 		},
 		Agents: map[string]AgentConfig{

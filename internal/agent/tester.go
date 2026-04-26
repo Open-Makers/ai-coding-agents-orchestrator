@@ -287,7 +287,7 @@ func (a *TesterAgent) fallbackTestCmds() []string {
 	lang := a.detectLanguage()
 	switch lang {
 	case "go":
-		return []string{"go build ./...", "go test ./..."}
+		return []string{"go build ./...", "go test -count=1 ./..."}
 	case "node", "javascript", "typescript":
 		return []string{"npm test"}
 	case "python":

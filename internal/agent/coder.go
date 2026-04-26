@@ -252,7 +252,11 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 				if currentPath != "" {
 					content := strings.Join(contentLines, "\n") + "\n"
 					if err := a.writeOneFile(currentPath, content); err != nil {
-						a.emitToken(fmt.Sprintf("error writing %s: %v\n", currentPath, err), false)
+						if errors.Is(err, errNoOpRewrite) {
+							a.emitToken(fmt.Sprintf("skipped no-op rewrite: %s\n", currentPath), false)
+						} else {
+							a.emitToken(fmt.Sprintf("error writing %s: %v\n", currentPath, err), false)
+						}
 					} else {
 						written = append(written, currentPath)
 						a.emitToken(fmt.Sprintf("wrote: %s\n", currentPath), false)
@@ -321,6 +325,9 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 }
 
 // writeOneFile writes a single file to disk under the project root.
+// Returns ("", nil) when the new content is byte-identical to what is already
+// on disk — that is treated as a no-op rewrite and silently skipped to avoid
+// inflating the "files changed" list during fix iterations.
 func (a *CoderAgent) writeOneFile(path, content string) error {
 	path = sanitizeFilePath(path, a.root)
 	if path == "" {
@@ -333,11 +340,19 @@ func (a *CoderAgent) writeOneFile(path, content string) error {
 		content = fixInvalidGoPackage(content)
 	}
 	target := filepath.Join(a.root, path)
+	if existing, err := os.ReadFile(target); err == nil && string(existing) == content {
+		return errNoOpRewrite
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return fmt.Errorf("mkdir for %s: %w", path, err)
 	}
 	return os.WriteFile(target, []byte(content), 0o600)
 }
+
+// errNoOpRewrite signals that a file write was suppressed because the content
+// was identical to the existing file. Used to short-circuit reporting in the
+// streaming writer without surfacing it as a real error to the user.
+var errNoOpRewrite = errors.New("no-op rewrite skipped")
 
 // findPathInRecent scans recent non-fence lines (newest first) for a file path.
 func findPathInRecent(lines []string) string {
@@ -832,7 +847,7 @@ func (a *CoderAgent) testCmds() []string {
 func (a *CoderAgent) defaultTestCmds() []string {
 	switch a.detectLanguage() {
 	case "go":
-		return []string{"go test ./..."}
+		return []string{"go test -count=1 ./..."}
 	case "node", "javascript", "typescript":
 		return []string{"npm test"}
 	case "python":
