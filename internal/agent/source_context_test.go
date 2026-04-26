@@ -108,7 +108,7 @@ func TestBuildCompactSourceContext_SeedExpandsImports(t *testing.T) {
 	if mainIdx < 0 || fooIdx < 0 || unrIdx < 0 {
 		t.Fatalf("missing one of the expected paths in output:\n%s", out)
 	}
-	if !(mainIdx < fooIdx && fooIdx < unrIdx) {
+	if mainIdx >= fooIdx || fooIdx >= unrIdx {
 		t.Errorf("expected order seed → import → unrelated, got main=%d foo=%d unr=%d", mainIdx, fooIdx, unrIdx)
 	}
 }

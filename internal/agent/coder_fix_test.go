@@ -149,7 +149,7 @@ func TestCoderBuildSourceContextWithSeeds_ExpandsImports(t *testing.T) {
 	if barIdx < 0 || fooIdx < 0 || unrIdx < 0 {
 		t.Fatalf("missing one of the expected paths in output:\n%s", out)
 	}
-	if !(barIdx < fooIdx && fooIdx < unrIdx) {
+	if barIdx >= fooIdx || fooIdx >= unrIdx {
 		t.Errorf("expected order seed → import → unrelated, got bar=%d foo=%d unr=%d",
 			barIdx, fooIdx, unrIdx)
 	}
