@@ -262,3 +262,38 @@ func TestLoadProject_NoFile(t *testing.T) {
 		t.Errorf("expected empty name, got %q", cfg.Project.Name)
 	}
 }
+
+func TestLoad_ContextExcludePatternsAndSemanticIndex(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	orchDir := filepath.Join(dir, GlobalDir)
+	if err := os.MkdirAll(orchDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `
+project:
+  context:
+    exclude_patterns:
+      - "*.generated.go"
+      - "fixtures/**"
+    semantic_index:
+      enabled: true
+      embedder: ollama
+      model: nomic-embed-text
+      top_k: 25
+`
+	if err := os.WriteFile(filepath.Join(orchDir, ProjectFilename), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Project.Context.ExcludePatterns) != 2 {
+		t.Errorf("expected 2 exclude patterns, got %v", cfg.Project.Context.ExcludePatterns)
+	}
+	si := cfg.Project.Context.SemanticIndex
+	if !si.Enabled || si.Embedder != "ollama" || si.Model != "nomic-embed-text" || si.TopK != 25 {
+		t.Errorf("unexpected semantic_index: %+v", si)
+	}
+}

@@ -185,6 +185,7 @@ func (p *Pipeline) run(ctx context.Context, requirementsPath string) error {
 		p.event(fmt.Sprintf("context collect warning: %v", err))
 	}
 	ctxFragment := projCtx.SystemPromptFragment(appctx.ProfileFull)
+	p.quality.SetProjectContext(projCtx)
 
 	// ── PM Requirements Gathering (chat mode) ──
 	if requirementsPath == "" {

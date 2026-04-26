@@ -88,7 +88,19 @@ type ScopeConfig struct {
 }
 
 type ContextConfig struct {
-	AlwaysInclude []string `yaml:"always_include,omitempty"`
+	AlwaysInclude   []string            `yaml:"always_include,omitempty"`
+	ExcludePatterns []string            `yaml:"exclude_patterns,omitempty"`
+	SemanticIndex   SemanticIndexConfig `yaml:"semantic_index,omitempty"`
+}
+
+// SemanticIndexConfig controls the optional embeddings-based file index.
+// Disabled by default; when enabled it requires a reachable embedder backend.
+type SemanticIndexConfig struct {
+	Enabled  bool   `yaml:"enabled,omitempty"`
+	Embedder string `yaml:"embedder,omitempty"` // currently only "ollama"
+	Model    string `yaml:"model,omitempty"`    // e.g. "nomic-embed-text"
+	BaseURL  string `yaml:"base_url,omitempty"` // optional override for embedder endpoint
+	TopK     int    `yaml:"top_k,omitempty"`    // default 20
 }
 
 type AgentConfig struct {
@@ -241,6 +253,24 @@ func merge(dst *Config, src Config) {
 	}
 	if len(src.Project.Context.AlwaysInclude) > 0 {
 		dst.Project.Context.AlwaysInclude = src.Project.Context.AlwaysInclude
+	}
+	if len(src.Project.Context.ExcludePatterns) > 0 {
+		dst.Project.Context.ExcludePatterns = src.Project.Context.ExcludePatterns
+	}
+	if src.Project.Context.SemanticIndex.Enabled {
+		dst.Project.Context.SemanticIndex.Enabled = true
+	}
+	if src.Project.Context.SemanticIndex.Embedder != "" {
+		dst.Project.Context.SemanticIndex.Embedder = src.Project.Context.SemanticIndex.Embedder
+	}
+	if src.Project.Context.SemanticIndex.Model != "" {
+		dst.Project.Context.SemanticIndex.Model = src.Project.Context.SemanticIndex.Model
+	}
+	if src.Project.Context.SemanticIndex.BaseURL != "" {
+		dst.Project.Context.SemanticIndex.BaseURL = src.Project.Context.SemanticIndex.BaseURL
+	}
+	if src.Project.Context.SemanticIndex.TopK > 0 {
+		dst.Project.Context.SemanticIndex.TopK = src.Project.Context.SemanticIndex.TopK
 	}
 	if src.PromptLanguage != "" {
 		dst.PromptLanguage = src.PromptLanguage

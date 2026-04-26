@@ -16,6 +16,7 @@ type ReviewerPayload struct {
 	Files          []string // source files to review (read from disk, not raw output)
 	Root           string   // project root for reading files
 	ProjectContext string   // optional repository briefing (brownfield, tree, etc.)
+	Seeds          []string // optional seed paths (graph + semantic) to expand context
 }
 
 // ReviewResult is the structured outcome of a review.
@@ -65,7 +66,7 @@ func (a *ReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 
 	// Build source context from actual files on disk instead of raw coder output.
 	// This avoids sending markdown decoration, LLM commentary, and duplicate content.
-	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
 	if sourceContext == "" {
 		// Fallback to raw output if no files available.
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)

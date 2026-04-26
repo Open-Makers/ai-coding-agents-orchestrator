@@ -15,6 +15,7 @@ import (
 type QAPayload struct {
 	Files []string // source files to review
 	Root  string   // project root for reading files
+	Seeds []string // optional seed paths (graph + semantic) to expand context
 }
 
 // QAResult is the structured outcome of a QA review.
@@ -56,7 +57,7 @@ func (a *QAAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error)
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
-	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
 	if sourceContext == "" {
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		sourceContext = string(raw)

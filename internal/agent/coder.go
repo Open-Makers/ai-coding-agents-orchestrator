@@ -441,11 +441,13 @@ Without it the file will NOT be saved. No descriptions, no prose — only file b
 	case CoderFixPayload:
 		changes, _ := a.ws.ReadFile(artifacts.ChangesFile)
 
-		// Build source context from actual files on disk.
-		sourceContext := a.buildSourceContext(payload.Files)
-
 		// Extract files mentioned in the failure for targeted fixing.
+		// They drive both the prompt hint and the seed-based context expansion
+		// (their imports + callers get pulled into the source context).
 		errorFiles := extractFilesFromErrors(payload.Failure)
+
+		sourceContext := a.buildSourceContextWithSeeds(payload.Files, errorFiles)
+
 		errorFileList := ""
 		if len(errorFiles) > 0 {
 			errorFileList = "\n\nFiles referenced in errors:\n- " + strings.Join(errorFiles, "\n- ")
@@ -465,39 +467,29 @@ Without it the file will NOT be saved. No descriptions, no prose — only file b
 // maxCoderSourceContext caps total source context size sent to the coder during fixes.
 const maxCoderSourceContext = 60000
 
+// maxCoderPerFileSize caps per-file size when rendering coder source context.
+// Larger than the review per-file budget — coders need full visibility into
+// the files they may modify.
+const maxCoderPerFileSize = 8000
+
 // buildSourceContext reads files from disk and formats them for the LLM prompt.
 // Applies size limits to prevent unbounded context growth in large projects.
+// Falls back to RawCoderOutputFile when no files are known (initial generation).
 func (a *CoderAgent) buildSourceContext(files []string) string {
-	if len(files) == 0 {
-		// Fallback to raw coder output if no file list available.
+	return a.buildSourceContextWithSeeds(files, nil)
+}
+
+// buildSourceContextWithSeeds is the seed-aware variant used by fix paths.
+// Seeds (e.g. files extracted from compiler/test errors) get prepended along
+// with their imports and callers of their primary exported symbol.
+func (a *CoderAgent) buildSourceContextWithSeeds(files, seeds []string) string {
+	if len(files) == 0 && len(seeds) == 0 {
+		// Fallback to raw coder output when nothing else is available
+		// (used during initial generation before any files are written).
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		return string(raw)
 	}
-	var sb strings.Builder
-	totalSize := 0
-	for _, path := range files {
-		if totalSize >= maxCoderSourceContext {
-			sb.WriteString("... (remaining files omitted to fit context budget)\n")
-			break
-		}
-		content, err := safefile.ReadFile(a.root, path)
-		if err != nil {
-			continue
-		}
-		// Skip files with binary content to avoid corrupting LLM context.
-		if isBinaryContent(content) {
-			continue
-		}
-		fileContent := string(content)
-		// Truncate very large individual files.
-		if len(fileContent) > 8000 {
-			fileContent = fileContent[:8000] + "\n... (truncated)"
-		}
-		entry := fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, fileContent)
-		sb.WriteString(entry)
-		totalSize += len(entry)
-	}
-	return sb.String()
+	return buildSourceContextSized(a.root, files, seeds, maxCoderSourceContext, maxCoderPerFileSize, 0)
 }
 
 // collectExistingSourceFiles walks the project root and returns relative paths
@@ -643,7 +635,7 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 			errorFileList = "\n\nFiles with errors:\n- " + strings.Join(errorFiles, "\n- ")
 		}
 
-		sourceContext := a.buildSourceContext(files)
+		sourceContext := a.buildSourceContextWithSeeds(files, errorFiles)
 		readOnlyTests := ""
 		if testContext != "" {
 			readOnlyTests = "\n\nRead-only test files (DO NOT MODIFY):\n" + testContext
