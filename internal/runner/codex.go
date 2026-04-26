@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -85,6 +87,8 @@ func readCodexConfigModel() string {
 }
 
 // Complete implements LLMRunner by running the Codex CLI with the given prompt.
+// Stdout is streamed incrementally so the TUI shows progress live instead of
+// a single burst at the end of generation.
 func (r CodexRunner) Complete(ctx context.Context, req CompletionRequest) (<-chan Token, error) {
 	var userContent strings.Builder
 	for _, m := range req.Messages {
@@ -99,24 +103,18 @@ func (r CodexRunner) Complete(ctx context.Context, req CompletionRequest) (<-cha
 		model = r.Model
 	}
 
-	output, err := r.run(ctx, userContent.String(), req.SystemPrompt, model)
+	cmd, stdout, stderr, err := r.startStreamingProcess(ctx, userContent.String(), req.SystemPrompt, model)
 	if err != nil {
 		return nil, err
 	}
 
+	ch := make(chan Token, 16)
 	fullInput := req.SystemPrompt + "\n\n" + userContent.String()
-	usage := countCodexTokens(model, fullInput, string(output))
-
-	ch := make(chan Token, 2)
-	go func() {
-		ch <- Token{Text: string(output)}
-		ch <- Token{Done: true, Usage: &usage}
-		close(ch)
-	}()
+	go streamCodexOutput(cmd, stdout, stderr, model, fullInput, ch)
 	return ch, nil
 }
 
-func (r CodexRunner) run(ctx context.Context, prompt, systemPrompt, model string) ([]byte, error) {
+func (r CodexRunner) startStreamingProcess(ctx context.Context, prompt, systemPrompt, model string) (*exec.Cmd, io.ReadCloser, *bytes.Buffer, error) {
 	bin := r.Binary
 	if bin == "" {
 		bin = "codex"
@@ -136,21 +134,55 @@ func (r CodexRunner) run(ctx context.Context, prompt, systemPrompt, model string
 
 	cmd := executil.CommandContext(ctx, bin, args...)
 	cmd.Stdin = strings.NewReader(fullPrompt)
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("codex: stdout pipe: %w", err)
+	}
+	stderr := &bytes.Buffer{}
+	cmd.Stderr = stderr
 
-	if err := cmd.Run(); err != nil {
+	if err := cmd.Start(); err != nil {
+		return nil, nil, nil, fmt.Errorf("codex: start: %w", err)
+	}
+	return cmd, stdout, stderr, nil
+}
+
+// streamCodexOutput forwards stdout chunks as Token deltas while the CLI runs,
+// then emits a final Done token with token usage computed from the full output.
+func streamCodexOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr *bytes.Buffer, model, fullInput string, ch chan<- Token) {
+	defer close(ch)
+
+	var collected strings.Builder
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := stdout.Read(buf)
+		if n > 0 {
+			chunk := string(buf[:n])
+			collected.WriteString(chunk)
+			ch <- Token{Text: chunk}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	waitErr := cmd.Wait()
+	output := collected.String()
+	if waitErr != nil && strings.TrimSpace(output) == "" {
 		errMsg := strings.TrimSpace(stderr.String())
 		if errMsg == "" {
-			errMsg = strings.TrimSpace(out.String())
+			errMsg = waitErr.Error()
 		}
-		if rl := ClassifyRateLimit("codex", errMsg, out.String()); rl != nil {
-			return nil, rl
+		if rl := ClassifyRateLimit("codex", errMsg, output); rl != nil {
+			ch <- Token{Error: rl}
+		} else {
+			ch <- Token{Error: fmt.Errorf("codex: %w: %s", waitErr, errMsg)}
 		}
-		return nil, fmt.Errorf("codex: %w: %s", err, errMsg)
+		return
 	}
-	return out.Bytes(), nil
+
+	usage := countCodexTokens(model, fullInput, output)
+	ch <- Token{Done: true, Usage: &usage}
 }
 
 // countCodexTokens uses tiktoken to count input and output tokens exactly.
