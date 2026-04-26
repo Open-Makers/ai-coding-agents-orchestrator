@@ -1323,8 +1323,16 @@ func (m *SetupModel) ensureSectionVisible() {
 			break
 		}
 		if m.agentEditing {
-			// When editing, scroll to the bottom to show the editing panel.
-			targetLine = totalLines - m.viewport.Height
+			// Anchor on the editing panel marker so the runner/model picker
+			// stays in view instead of scrolling past the top of the card.
+			marker := "Select runner for"
+			if m.agentEditStep == 1 {
+				marker = "Select model for"
+			}
+			targetLine = findLineContaining(lines, marker)
+			if targetLine < 0 {
+				targetLine = totalLines - m.viewport.Height
+			}
 		} else {
 			// Agent overrides is the first section in project setup — scroll to top.
 			m.viewport.SetYOffset(0)
