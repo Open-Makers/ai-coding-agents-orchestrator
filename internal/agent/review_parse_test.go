@@ -332,25 +332,6 @@ Approve?: NO`
 	}
 }
 
-func TestParseQAReview_Delegates(t *testing.T) {
-	input := `MUST FIX
-- none
-RECOMMENDATIONS
-- Add fuzz testing
-Approve?: YES`
-
-	r := parseQAReview(input)
-	if r.Unparsed {
-		t.Error("expected Unparsed=false")
-	}
-	if len(r.MustFix) != 0 {
-		t.Errorf("expected 0 must-fix, got %d", len(r.MustFix))
-	}
-	if !r.Approved {
-		t.Error("expected approved=true")
-	}
-}
-
 func TestParseUXReview_Delegates(t *testing.T) {
 	input := `### **Must Fix**
 - Error messages are not user-friendly

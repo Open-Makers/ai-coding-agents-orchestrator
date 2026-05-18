@@ -168,7 +168,7 @@ func TestExtractStageInfo(t *testing.T) {
 }
 
 func TestStatusBar_StageInfo(t *testing.T) {
-	sb := NewStatusBar(120).WithState("coding").WithStageInfo("Stage 2/5: Must Have — Auth")
+	sb := NewStatusBar(120).WithState("coder").WithStageInfo("Stage 2/5: Must Have — Auth")
 	view := sb.View()
 	if view == "" {
 		t.Fatal("status bar view should not be empty")
@@ -213,7 +213,7 @@ func TestModel_EscAfterPipelineReturnsToMenu(t *testing.T) {
 	}
 }
 
-func TestModel_CtrlETogglesErrorBanner(t *testing.T) {
+func TestModel_CtrlEIsNoopWithoutRunner(t *testing.T) {
 	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	m.pipelineDone = true
 	m.pipelineFailed = true
@@ -221,14 +221,11 @@ func TestModel_CtrlETogglesErrorBanner(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
 	got := updated.(Model)
-	if !got.hidePipelineErr {
-		t.Fatal("expected pipeline error banner to be hidden")
+	if got.pipelineResuming {
+		t.Fatal("expected resume to be skipped when no runner is attached")
 	}
-
-	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
-	got = updated.(Model)
-	if got.hidePipelineErr {
-		t.Fatal("expected pipeline error banner to be visible again")
+	if !got.pipelineFailed {
+		t.Fatal("expected pipelineFailed to remain true when there's nothing to resume")
 	}
 }
 

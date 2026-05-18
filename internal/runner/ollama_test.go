@@ -23,7 +23,7 @@ func TestOllamaStreamResponse_CapturesUsage(t *testing.T) {
 
 	r := NewOllamaRunner("")
 	ch := make(chan Token, 16)
-	go r.streamResponseFromBytes(lines, ch)
+	go r.streamResponseFromBytes(lines, "", ch)
 
 	var tokens []Token
 	for tok := range ch {
@@ -85,7 +85,7 @@ func TestOllamaStreamResponse_UnwrapsJSONEnvelope(t *testing.T) {
 
 	r := NewOllamaRunner("")
 	ch := make(chan Token, 16)
-	go r.streamResponseFromBytes(lines, ch)
+	go r.streamResponseFromBytes(lines, "", ch)
 
 	var text string
 	for tok := range ch {

@@ -23,16 +23,15 @@ go test ./...
 
 RULES:
 - **path** on its own line, then fenced code block with complete file content
+- TDD ORDER: write every `*_test.go` file FIRST, then the production file it covers. Each production file must have a sibling `_test.go` (same directory, same package).
+- The build pipeline runs `go test ./...` — if there are no test files the change is incomplete.
 - package main in cmd/%s/ — never in project root
 - One package per directory, name matches directory
 - internal/ for private packages, pkg/ for public
 - Correct module imports — no relative "./pkg"
 - Do NOT output go.mod
-- Include *_test.go files next to source files
 - No src/ directory
-- Work in TDD mode: existing *_test.go files are the contract
-- Implement production code so the existing tests pass
-- Do NOT rewrite generated tests unless the plan clearly requires changing the behaviour
+- Existing *_test.go files in the context are the behavioural contract — implement production code so they pass; do NOT rewrite them unless the plan clearly requires changing the behaviour
 
 VERSIONING:
 - Do NOT guess language or toolchain versions. If a specific version (e.g. Go toolchain) is provided in the module info above, use exactly that version.

@@ -857,7 +857,7 @@ func resolveLanguageFromRoot(root string, cfg config.Config) string {
 // resolveOverrides returns all agents with their effective runner/model.
 func resolveOverrides(agents map[string]config.AgentConfig, defaultRunner, defaultModel string) []agentOverride {
 	var overrides []agentOverride
-	roles := []string{"pm", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security", "qa"}
+	roles := []string{"pm", "architect", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security"}
 	for _, role := range roles {
 		if ac, ok := agents[role]; ok {
 			r := ac.Runner

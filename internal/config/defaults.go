@@ -9,11 +9,13 @@ func DefaultConfig() Config {
 			TestCmd:        "go test -count=1 ./...",
 			LintCmd:        "golangci-lint run",
 			MaxFixAttempts: 3,
-			ReservedCores:  2,
 		},
 		Agents: map[string]AgentConfig{
 			"pm": {
 				Skills: []string{"agentic-engineering"},
+			},
+			"architect": {
+				Skills: []string{"agentic-engineering", "architecture-decision-records", "codebase-onboarding"},
 			},
 			"planner": {
 				Skills: []string{"agentic-engineering", "architecture-decision-records", "codebase-onboarding", "golang-patterns", "coding-standards"},
@@ -35,9 +37,6 @@ func DefaultConfig() Config {
 			},
 			"security": {
 				Skills: []string{"security-scan", "security-review"},
-			},
-			"qa": {
-				Skills: []string{"golang-testing", "coding-standards"},
 			},
 			"pr": {
 				Skills: []string{"git-workflow"},

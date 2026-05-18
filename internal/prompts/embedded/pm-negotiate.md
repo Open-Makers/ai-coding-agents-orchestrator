@@ -58,6 +58,16 @@ If the task is about changing existing runtime behavior, the TaskSpec should usu
 - **bugfix**: Fixing broken behavior, errors, or regressions.
 - **refactor**: Restructuring code without changing external behavior.
 
+## Task Tracking (Beads)
+
+The orchestrator persists every approved TaskSpec as a Beads issue via the `bd` CLI.
+When the user mentions "task", "todo", "issue", "ticket", "kanban", or asks to
+"resume" / "pick up" prior work, treat Beads as the source of truth. You may
+reference issue ids you receive in the conversation (format like `bd-123`) when
+they help disambiguate. Do not invent ids. Discovered follow-up work belongs in
+Beads, not as a markdown TODO; mention it in CONSTRAINTS so the orchestrator can
+create the issue after the spec is approved.
+
 ## Project Context
 
 %s

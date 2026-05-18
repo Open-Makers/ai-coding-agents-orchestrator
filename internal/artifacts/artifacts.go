@@ -30,10 +30,10 @@ const (
 	ChangesFile              = "changes.md"
 	TestCmdsFile             = "test_cmds.txt"
 	TestReportFile           = "test_report.json"
+	TesterRawOutputFile      = "tester_output.md"
 	ReviewFile               = "review.md"
 	UXReviewFile             = "ux_review.md"
 	SecurityReviewFile       = "security_review.md"
-	QAReviewFile             = "qa_review.md"
 	NiceToHaveFile           = "nice_to_have.md"
 	SummaryFile              = "summary.md"
 	RunLogFile               = "runlog.txt"
@@ -130,10 +130,10 @@ var generatedArtifacts = []string{
 	ChangesFile,
 	TestCmdsFile,
 	TestReportFile,
+	TesterRawOutputFile,
 	ReviewFile,
 	UXReviewFile,
 	SecurityReviewFile,
-	QAReviewFile,
 	NiceToHaveFile,
 	SummaryFile,
 }

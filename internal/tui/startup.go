@@ -300,6 +300,9 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.phase = startupPhasePicker
 			return m, nil
 		}
+		var cmd tea.Cmd
+		m.editor, cmd = m.editor.Update(msg)
+		return m, cmd
 
 	case startupPhaseProjectList:
 		switch msg := msg.(type) {

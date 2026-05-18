@@ -25,20 +25,20 @@ import (
 type PipelineState string
 
 const (
-	PipelineIdle        PipelineState = "idle"
-	PipelinePM          PipelineState = "pm"
-	PipelineNegotiating PipelineState = "negotiating"
-	PipelinePlanning    PipelineState = "planning"
-	PipelineCoding      PipelineState = "coding"
-	PipelineFixing      PipelineState = "fixing"
-	PipelineTesting     PipelineState = "testing"
-	PipelineReviewing   PipelineState = "reviewing"
-	PipelineUXReviewing PipelineState = "ux_reviewing"
-	PipelineSecurity    PipelineState = "security"
-	PipelineQA          PipelineState = "qa"
-	PipelineDone        PipelineState = "done"
-	PipelineGate        PipelineState = "human_gate"
-	PipelineRateLimited PipelineState = "rate_limited"
+	PipelineIdle         PipelineState = "idle"
+	PipelinePM           PipelineState = "pm"
+	PipelineNegotiating  PipelineState = "negotiating"
+	PipelineArchitecting PipelineState = "architect"
+	PipelinePlanning     PipelineState = "planner"
+	PipelineCoding       PipelineState = "coder"
+	PipelineFixing       PipelineState = "coder_fixer"
+	PipelineTesting      PipelineState = "tester"
+	PipelineReviewing    PipelineState = "reviewer"
+	PipelineUXReviewing  PipelineState = "ux_reviewer"
+	PipelineSecurity     PipelineState = "security"
+	PipelineDone         PipelineState = "done"
+	PipelineGate         PipelineState = "human_gate"
+	PipelineRateLimited  PipelineState = "rate_limited"
 )
 
 // Pipeline is the event-driven orchestrator for the legacy greenfield workflow.
@@ -151,6 +151,24 @@ func (p *Pipeline) AgentDurations() map[bus.AgentRole]time.Duration {
 	return result
 }
 
+// ResumeBuildFix re-runs the coder's build-and-fix loop using the current project
+// files on disk. Use this after a build-fix failure to give the coder another
+// round of attempts without restarting the whole pipeline.
+func (p *Pipeline) ResumeBuildFix(ctx context.Context) error {
+	coder, ok := p.agents[bus.RoleCoder].(*agent.CoderAgent)
+	if !ok {
+		return fmt.Errorf("no coder agent available to resume")
+	}
+	p.setState(PipelineFixing)
+	p.event("resuming build-and-fix loop…")
+	files := p.collectProjectFiles(nil)
+	if _, err := coder.BuildAndFix(ctx, files); err != nil {
+		return fmt.Errorf("build: %w", err)
+	}
+	p.setState(PipelineDone)
+	return nil
+}
+
 // Run executes the full pipeline: PM → PLAN → per stage (CODE → quality gate).
 // If requirementsPath is empty, the PM gathers requirements through a chat conversation.
 func (p *Pipeline) Run(ctx context.Context, requirementsPath string) error {
@@ -242,6 +260,42 @@ func (p *Pipeline) run(ctx context.Context, requirementsPath string) error {
 		break
 	}
 
+	// ── ARCHITECTURE ──
+	for {
+		p.setState(PipelineArchitecting)
+
+		if p.ws.FileExists(artifacts.ArchitectureFile) {
+			p.event("architecture document found from previous run — presenting for approval")
+			p.emitExistingArchitecture()
+		} else if _, ok := p.agents[bus.RoleArchitect]; ok {
+			_, err = p.runAgent(ctx, bus.RoleArchitect, agent.ArchitectPayload{
+				Requirements:   string(reqs),
+				MoscowPlan:     string(moscowData),
+				ProductVision:  string(visionData),
+				ProjectContext: ctxFragment,
+			})
+			if err != nil {
+				return fmt.Errorf("architect: %w", err)
+			}
+		} else {
+			p.event("no architect agent configured — skipping architecture step")
+			break
+		}
+
+		approved, err := p.waitArtifact(ctx, artifacts.ArchitectureFile)
+		if err != nil {
+			return err
+		}
+		if approved {
+			break
+		}
+		p.event("regenerating architecture…")
+		_ = os.Remove(p.ws.Path(artifacts.ArchitectureFile))
+		_ = os.Remove(p.ws.Path(artifacts.ArchitectureApprovedFile))
+	}
+
+	archData, _ := p.ws.ReadFile(artifacts.ArchitectureFile)
+
 	// ── PLAN ──
 	for {
 		p.setState(PipelinePlanning)
@@ -253,6 +307,7 @@ func (p *Pipeline) run(ctx context.Context, requirementsPath string) error {
 		} else {
 			_, err = p.runAgent(ctx, bus.RolePlanner, agent.PlannerPayload{
 				Requirements:   string(reqs),
+				Architecture:   string(archData),
 				MoscowPlan:     string(moscowData),
 				ProductVision:  string(visionData),
 				ProjectContext: ctxFragment,
@@ -275,7 +330,7 @@ func (p *Pipeline) run(ctx context.Context, requirementsPath string) error {
 	}
 
 	// ── CODE → TEST → REVIEW (staged) ──
-	archData, _ := p.ws.ReadFile(artifacts.ArchitectureFile)
+	archData, _ = p.ws.ReadFile(artifacts.ArchitectureFile)
 	planData, _ := p.ws.ReadFile(artifacts.ImplementationPlanFile)
 	promptsData, _ := p.ws.ReadFile(artifacts.PromptsFile)
 
@@ -489,11 +544,11 @@ func (p *Pipeline) pmArtifactsExist() bool {
 		p.ws.FileExists(artifacts.MoscowFile)
 }
 
-// planningArtifactsExist returns true if all three planning artifacts
-// (architecture, plan, prompts) already exist from a previous run.
+// planningArtifactsExist returns true if both planner-owned artifacts
+// (plan, prompts) already exist from a previous run. The architecture
+// artifact is owned by the architect step and gated separately.
 func (p *Pipeline) planningArtifactsExist() bool {
-	return p.ws.FileExists(artifacts.ArchitectureFile) &&
-		p.ws.FileExists(artifacts.ImplementationPlanFile) &&
+	return p.ws.FileExists(artifacts.ImplementationPlanFile) &&
 		p.ws.FileExists(artifacts.PromptsFile)
 }
 
@@ -508,11 +563,10 @@ func (p *Pipeline) deletePMArtifacts() {
 	}
 }
 
-// deletePlanningArtifacts removes planning artifacts so they can be regenerated.
+// deletePlanningArtifacts removes planner-owned artifacts so they can be regenerated.
+// Architecture is owned by the architect step and deleted from there.
 func (p *Pipeline) deletePlanningArtifacts() {
 	for _, f := range []string{
-		artifacts.ArchitectureFile,
-		artifacts.ArchitectureApprovedFile,
 		artifacts.ImplementationPlanFile,
 		artifacts.PlanApprovedFile,
 		artifacts.PromptsFile,
@@ -522,11 +576,10 @@ func (p *Pipeline) deletePlanningArtifacts() {
 	}
 }
 
-// emitExistingArtifacts publishes the content of existing planning artifacts
-// to the bus so the TUI can display them.
+// emitExistingArtifacts publishes the content of existing planner artifacts
+// (plan + prompts) to the bus so the TUI can display them.
 func (p *Pipeline) emitExistingArtifacts() {
 	for _, artifact := range []string{
-		artifacts.ArchitectureFile,
 		artifacts.ImplementationPlanFile,
 		artifacts.PromptsFile,
 	} {
@@ -538,6 +591,19 @@ func (p *Pipeline) emitExistingArtifacts() {
 			bus.TokenPayload{Text: fmt.Sprintf("=== %s ===\n%s\n\n", artifact, string(content)), Done: false}))
 	}
 	p.b.Publish(bus.NewMessage(bus.RolePlanner, "", bus.MsgEvent,
+		bus.TokenPayload{Text: "", Done: true}))
+}
+
+// emitExistingArchitecture publishes the architecture document to the bus on
+// the architect channel so the TUI can display it during the approval gate.
+func (p *Pipeline) emitExistingArchitecture() {
+	content, err := p.ws.ReadFile(artifacts.ArchitectureFile)
+	if err != nil {
+		return
+	}
+	p.b.Publish(bus.NewMessage(bus.RoleArchitect, "", bus.MsgEvent,
+		bus.TokenPayload{Text: fmt.Sprintf("=== %s ===\n%s\n\n", artifacts.ArchitectureFile, string(content)), Done: false}))
+	p.b.Publish(bus.NewMessage(bus.RoleArchitect, "", bus.MsgEvent,
 		bus.TokenPayload{Text: "", Done: true}))
 }
 
@@ -576,11 +642,11 @@ func (p *Pipeline) waitPMApproval(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// waitPlanningApproval gates on each planning artifact in sequence.
+// waitPlanningApproval gates on each planner-owned artifact in sequence.
+// The architecture artifact is gated by the architect step.
 // Returns false if the user requested regeneration.
 func (p *Pipeline) waitPlanningApproval(ctx context.Context) (bool, error) {
 	for _, filename := range []string{
-		artifacts.ArchitectureFile,
 		artifacts.ImplementationPlanFile,
 		artifacts.PromptsFile,
 	} {
@@ -611,8 +677,16 @@ func (p *Pipeline) waitArtifact(ctx context.Context, filename string) (bool, err
 	}
 }
 
-// ReviseArtifact asks the planner agent to revise an artifact based on user feedback.
+// ReviseArtifact asks the responsible agent to revise an artifact based on user feedback.
+// architecture.md is owned by the architect agent; other planning artifacts go to the planner.
 func (p *Pipeline) ReviseArtifact(ctx context.Context, artifact, feedback string) error {
+	if artifact == artifacts.ArchitectureFile {
+		architect, ok := p.agents[bus.RoleArchitect].(*agent.ArchitectAgent)
+		if !ok {
+			return fmt.Errorf("architect agent not available for revision")
+		}
+		return architect.Revise(ctx, artifact, feedback)
+	}
 	planner, ok := p.agents[bus.RolePlanner].(*agent.PlannerAgent)
 	if !ok {
 		return fmt.Errorf("planner agent not available for revision")

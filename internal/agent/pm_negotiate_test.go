@@ -223,3 +223,65 @@ ACCEPTANCE_CRITERIA:
 		t.Fatal("expected spec to be parsed")
 	}
 }
+
+func TestNegotiateTask_CachedSpecBypassesRunner(t *testing.T) {
+	b := bus.New()
+	defer b.Close()
+
+	root := t.TempDir()
+	ws, err := artifacts.EnsureWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	taskspecOutput := `===TASKSPEC===
+TITLE: Cached negotiation
+SCOPE: feature
+DESCRIPTION:
+Cache the negotiation outcome to skip the LLM on identical inputs.
+ACCEPTANCE_CRITERIA:
+- Identical input + project context returns the cached spec
+- Non-identical input invalidates the cache
+CONSTRAINTS:
+- Persist cache under .orchestrator/taskspec_cache
+FILES_TO_MODIFY:
+- internal/agent/pm.go
+===END===`
+
+	mock := &runner.MockRunner{Responses: []string{taskspecOutput}}
+	pm := NewPMAgent(b, mock, ws, nil, "")
+
+	input := "add caching for taskspec negotiation"
+	projectCtx := "Go service"
+
+	first, err := pm.NegotiateTask(context.Background(), input, projectCtx, make(chan string))
+	if err != nil {
+		t.Fatalf("first negotiate failed: %v", err)
+	}
+	if first.Title != "Cached negotiation" {
+		t.Fatalf("unexpected first title: %q", first.Title)
+	}
+
+	// Second call with identical inputs must NOT consume another mock
+	// response — cache hit short-circuits the runner.
+	pm2 := NewPMAgent(b, &runner.MockRunner{Responses: nil}, ws, nil, "")
+	cached, err := pm2.NegotiateTask(context.Background(), input, projectCtx, make(chan string))
+	if err != nil {
+		t.Fatalf("cached negotiate failed: %v", err)
+	}
+	if cached.Title != first.Title {
+		t.Errorf("cached spec mismatch: got %q want %q", cached.Title, first.Title)
+	}
+}
+
+func TestNegotiateCacheKey_DiffersOnInputChange(t *testing.T) {
+	a := negotiateCacheKey("hello", "ctx")
+	b := negotiateCacheKey("hello!", "ctx")
+	c := negotiateCacheKey("hello", "ctx2")
+	if a == b || a == c || b == c {
+		t.Errorf("expected distinct keys, got %s %s %s", a, b, c)
+	}
+	if a != negotiateCacheKey("  hello  ", "ctx") {
+		t.Error("expected whitespace-trimmed input to produce same key")
+	}
+}

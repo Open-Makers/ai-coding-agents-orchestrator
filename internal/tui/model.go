@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -24,13 +25,13 @@ import (
 
 var agentOrder = []bus.AgentRole{
 	bus.RolePM,
+	bus.RoleArchitect,
 	bus.RolePlanner,
 	bus.RoleCoder,
 	bus.RoleTester,
 	bus.RoleReviewer,
 	bus.RoleUXReviewer,
 	bus.RoleSecurity,
-	bus.RoleQA,
 }
 
 type overlayKind int
@@ -76,39 +77,70 @@ func gateLabel(filename string) string {
 		return "MoSCoW"
 	case "task_spec.json":
 		return "task spec"
+	case "task_plan.md":
+		return "task plan"
 	}
 	return filename
 }
 
+// activePMGates returns the PM-stage gate filenames for the current execution
+// mode. New-task mode uses task_spec.json + task_plan.md instead of the legacy
+// vision.md + moscow.md so the phase bar reflects the right artifacts.
+func (m Model) activePMGates() []string {
+	if m.taskRunner != nil {
+		return []string{"task_spec.json"}
+	}
+	return pmGates
+}
+
+// activePlanningGates returns the planning gate filenames for the current mode.
+// New-task mode gates on architecture.md (when full planning ran) and
+// task_plan.md. The architecture entry only appears once the file exists on
+// disk so feature/bugfix tasks (no detailed planning) don't show a phantom
+// step.
+func (m Model) activePlanningGates() []string {
+	if m.taskRunner != nil {
+		gates := []string{}
+		if m.wsPath != "" {
+			if _, err := os.Stat(filepath.Join(m.wsPath, "architecture.md")); err == nil {
+				gates = append(gates, "architecture.md")
+			}
+		}
+		gates = append(gates, "task_plan.md")
+		return gates
+	}
+	return planningGates
+}
+
 // Model is the root Bubble Tea model for the orchestrator TUI.
 type Model struct {
-	panels          map[bus.AgentRole]AgentPanelModel
-	activeRole      bus.AgentRole // agent currently shown in the main area
-	phase           string        // current pipeline phase for the phase bar
-	statusbar       StatusBarModel
-	sysmon          SysmonModel                   // system monitor panel (right side)
-	showSysmon      bool                          // toggle for sysmon visibility
-	agentConfigs    map[string]config.AgentConfig // per-agent runner/model config
-	events          <-chan bus.Message
-	pipeline        *orchestrator.Pipeline
-	cancelFunc      context.CancelFunc // cancels the pipeline context
-	llm             runner.LLMRunner
-	root            string
-	wsPath          string
-	width           int
-	height          int
-	quitting        bool
-	confirmQuit     bool                             // true when showing quit confirmation dialog
-	cancelConfirm   bool                             // true when showing cancel confirmation dialog
-	cancelled       bool                             // true after user confirmed cancel — auto-return to menu
-	gateMsg         string                           // non-empty while pipeline is waiting for human approval
-	pipelineErr     string                           // non-empty when pipeline finished with an error
-	pipelineFailed  bool                             // true when pipeline finished with an error
-	hidePipelineErr bool                             // true when the error banner is dismissed
-	pipelineDone    bool                             // true after pipeline finished (enables return-to-menu)
-	returnToMenu    bool                             // true when user chose to return to menu
-	agentUsage      map[bus.AgentRole]bus.AgentUsage // per-agent token usage
-	log             *slog.Logger
+	panels           map[bus.AgentRole]AgentPanelModel
+	activeRole       bus.AgentRole // agent currently shown in the main area
+	phase            string        // current pipeline phase for the phase bar
+	statusbar        StatusBarModel
+	sysmon           SysmonModel                   // system monitor panel (right side)
+	showSysmon       bool                          // toggle for sysmon visibility
+	agentConfigs     map[string]config.AgentConfig // per-agent runner/model config
+	events           <-chan bus.Message
+	pipeline         *orchestrator.Pipeline
+	cancelFunc       context.CancelFunc // cancels the pipeline context
+	llm              runner.LLMRunner
+	root             string
+	wsPath           string
+	width            int
+	height           int
+	quitting         bool
+	confirmQuit      bool   // true when showing quit confirmation dialog
+	cancelConfirm    bool   // true when showing cancel confirmation dialog
+	cancelled        bool   // true after user confirmed cancel — auto-return to menu
+	gateMsg          string // non-empty while pipeline is waiting for human approval
+	pipelineErr      string // non-empty when pipeline finished with an error
+	pipelineFailed   bool   // true when pipeline finished with an error
+	pipelineResuming bool   // true while a Ctrl+E build-fix resume is in flight
+	hidePipelineErr  bool   // true when the error banner is dismissed
+	pipelineDone     bool   // true after pipeline finished (enables return-to-menu)
+	returnToMenu     bool   // true when user chose to return to menu
+	log              *slog.Logger
 
 	// Planning sub-stage tracking.
 	gateArtifact  string          // filename currently awaiting approval
@@ -140,6 +172,27 @@ func PipelineReadyWithCancelMsg(p *orchestrator.Pipeline, cancel context.CancelF
 // after pipeline completion (instead of quitting).
 func (m Model) ReturnToMenu() bool {
 	return m.returnToMenu
+}
+
+// buildResumeFn picks the available runner (TaskRunner preferred over Pipeline)
+// and returns a closure that re-runs the coder's build-and-fix loop.
+// Returns nil when no runner is available (nothing to resume).
+func (m Model) buildResumeFn() func(context.Context) error {
+	if tr := m.taskRunner; tr != nil {
+		return func(ctx context.Context) error { return tr.ResumeBuildFix(ctx) }
+	}
+	if p := m.pipeline; p != nil {
+		return func(ctx context.Context) error { return p.ResumeBuildFix(ctx) }
+	}
+	return nil
+}
+
+// runResumeCmd spawns the resume in a fresh background context and routes the
+// outcome back through PipelineDoneMsg so the existing done-handling applies.
+func runResumeCmd(fn func(context.Context) error) tea.Cmd {
+	return func() tea.Msg {
+		return PipelineDoneMsg{Err: fn(context.Background())}
+	}
 }
 
 // New creates the root TUI model.
@@ -176,7 +229,6 @@ func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPat
 		width:         80,
 		height:        24,
 		log:           logging.ForComponent("tui_model"),
-		agentUsage:    make(map[bus.AgentRole]bus.AgentUsage),
 		approvedGates: make(map[string]bool),
 	}
 }
@@ -287,7 +339,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					r, mdl := runnerModelForRole(m.agentConfigs, role)
 					m.statusbar = m.statusbar.WithRunnerModel(r, mdl)
 				}
-				for _, ps := range []string{"negotiating", "pm", "planning", "coding", "fixing", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"} {
+				for _, ps := range []string{"negotiating", "pm", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security", "done"} {
 					if s == ps {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
@@ -313,7 +365,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.overlay = overlayNone
 						}
 						// Start elapsed timer on first coding handoff.
-						if s == "coding" && m.pipeline != nil && m.statusbar.codingStarted.IsZero() {
+						if s == "coder" && m.pipeline != nil && m.statusbar.codingStarted.IsZero() {
 							codingStart := m.pipeline.CodingStarted()
 							if !codingStart.IsZero() {
 								m.statusbar = m.statusbar.WithCodingStarted(codingStart)
@@ -331,16 +383,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case bus.MsgResponse:
 			m.gateMsg = ""
 		case bus.MsgUsage:
-			if u, ok := bm.Payload.(bus.AgentUsage); ok {
-				existing := m.agentUsage[bm.From]
-				existing.InputTokens += u.InputTokens
-				existing.OutputTokens += u.OutputTokens
-				if u.Estimated {
-					existing.Estimated = true
-				}
-				m.agentUsage[bm.From] = existing
-				m.statusbar = m.statusbar.WithAgentUsage(m.agentUsage)
-			}
+			// Token usage is owned by SysmonModel and observed there above
+			// (m.sysmon.ObserveBusMessage). Don't track it separately on
+			// Model — that produced two parallel maps that could drift
+			// between the live monitor and the end-of-run summary.
 		case bus.MsgConversation:
 			if conv, ok := bm.Payload.(bus.ConversationPayload); ok && conv.From == "pm" {
 				// Open negotiate overlay if not already open.
@@ -462,12 +508,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+a":
 			m.approveCurrentGate("shortcut")
 		case "ctrl+e":
-			if m.pipelineErr != "" {
-				m.hidePipelineErr = !m.hidePipelineErr
-				if m.hidePipelineErr {
-					m.statusbar = m.statusbar.WithState("✗ error hidden — esc/m/ctrl+x menu  q quit")
-				} else {
-					m.statusbar = m.statusbar.WithState("✗ error — esc/m/ctrl+x menu  q quit")
+			if m.pipelineFailed && !m.pipelineResuming {
+				resumeFn := m.buildResumeFn()
+				if resumeFn != nil {
+					m.pipelineFailed = false
+					m.pipelineDone = false
+					m.pipelineErr = ""
+					m.hidePipelineErr = false
+					m.pipelineResuming = true
+					m.statusbar = m.statusbar.WithState("↻ resuming build-fix loop…")
+					cmds = append(cmds, runResumeCmd(resumeFn))
 				}
 			}
 		case "ctrl+r":
@@ -519,6 +569,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case PipelineDoneMsg:
 		m.pipelineDone = true
+		m.pipelineResuming = false
 		if m.cancelled {
 			m.returnToMenu = true
 			return m, tea.Quit
@@ -714,7 +765,7 @@ func (m Model) View() string {
 	var parts []string
 
 	if m.pipelineDone && !m.pipelineFailed {
-		agentView := m.renderCongratulations(panelH)
+		agentView := m.renderCongratulations(agentW, panelH)
 		if sysmonW > 0 {
 			m.sysmon.SetSize(sysmonW, panelH)
 			sysmonView := m.sysmon.View()
@@ -875,18 +926,23 @@ func (m Model) renderPhaseBar() string {
 
 	var parts []string
 
+	pmGatesActive := m.activePMGates()
+	planningGatesActive := m.activePlanningGates()
+
 	// PM phase (before planning gates).
 	pmPhase := "pm"
 	if strings.Contains(m.phase, pmPhase) {
 		parts = append(parts, phaseStyle("PM").Render("◉ PM"))
-	} else if m.approvedGates[planningGates[0]] || strings.Contains(m.phase, "planning") || strings.Contains(m.phase, "coding") {
+	} else if (len(planningGatesActive) > 0 && m.approvedGates[planningGatesActive[0]]) ||
+		(len(planningGatesActive) == 0 && len(pmGatesActive) > 0 && m.approvedGates[pmGatesActive[len(pmGatesActive)-1]]) ||
+		strings.Contains(m.phase, "planner") || strings.Contains(m.phase, "coder") {
 		parts = append(parts, doneStyle.Render("✓ PM"))
 	} else {
 		parts = append(parts, dimStyle.Render("○ PM"))
 	}
 
-	// PM gates: vision → moscow.
-	for _, gate := range pmGates {
+	// PM gates: vision → moscow (legacy) or task spec → task plan (new task).
+	for _, gate := range pmGatesActive {
 		label := strings.ToUpper(gateLabel(gate))
 		activeStyle := phaseStyle(label)
 		switch {
@@ -901,8 +957,8 @@ func (m Model) renderPhaseBar() string {
 		}
 	}
 
-	// Planning sub-stages: architecture → plan → prompts.
-	for _, gate := range planningGates {
+	// Planning sub-stages: architecture → plan → prompts (legacy only).
+	for _, gate := range planningGatesActive {
 		label := strings.ToUpper(gateLabel(gate))
 		activeStyle := phaseStyle(label)
 		switch {
@@ -910,7 +966,7 @@ func (m Model) renderPhaseBar() string {
 			parts = append(parts, doneStyle.Render("✓ "+label))
 		case m.gateArtifact == gate:
 			parts = append(parts, activeStyle.Render("⏸ "+label))
-		case strings.Contains(m.phase, "planning") && !m.approvedGates[gate] && m.gateArtifact == "":
+		case strings.Contains(m.phase, "planner") && !m.approvedGates[gate] && m.gateArtifact == "":
 			parts = append(parts, activeStyle.Render("◉ "+label))
 		default:
 			parts = append(parts, dimStyle.Render("○ "+label))
@@ -918,11 +974,11 @@ func (m Model) renderPhaseBar() string {
 	}
 
 	// Post-planning phases.
-	postPhases := []string{"coding", "testing", "reviewing", "ux_reviewing", "security", "qa", "done"}
+	postPhases := []string{"coder", "tester", "reviewer", "ux_reviewer", "security", "done"}
 	for _, ph := range postPhases {
 		label := strings.ToUpper(ph)
-		isCodingActive := (ph == "coding" && strings.Contains(m.phase, "coding")) ||
-			(ph == "coding" && m.phase == "fixing")
+		isCodingActive := (ph == "coder" && strings.Contains(m.phase, "coder")) ||
+			(ph == "coder" && m.phase == "coder_fixer")
 
 		if isCodingActive && m.codingStageTotal > 1 {
 			// Expand into individual stage dots.
@@ -930,20 +986,20 @@ func (m Model) renderPhaseBar() string {
 				stageDot := fmt.Sprintf("S%d", s)
 				if s == m.codingStageIndex {
 					icon := "◉"
-					if m.phase == "fixing" {
+					if m.phase == "coder_fixer" {
 						icon = "⟳"
 					}
-					parts = append(parts, phaseStyle("CODING").Render(icon+" "+stageDot))
+					parts = append(parts, phaseStyle("CODER").Render(icon+" "+stageDot))
 				} else if s < m.codingStageIndex {
 					parts = append(parts, doneStyle.Render("✓ "+stageDot))
 				} else {
 					parts = append(parts, dimStyle.Render("○ "+stageDot))
 				}
 			}
+		} else if ph == "coder" && m.phase == "coder_fixer" {
+			parts = append(parts, phaseStyle("CODER_FIXER").Render("⟳ CODER_FIXER"))
 		} else if strings.Contains(m.phase, ph) {
 			parts = append(parts, phaseStyle(label).Render("◉ "+label))
-		} else if ph == "coding" && m.phase == "fixing" {
-			parts = append(parts, phaseStyle("FIXING").Render("⟳ FIXING"))
 		} else {
 			parts = append(parts, dimStyle.Render("○ "+label))
 		}
@@ -959,7 +1015,7 @@ func (m Model) renderPhaseBar() string {
 }
 
 // renderCongratulations renders a centered congratulations banner with pipeline summary.
-func (m Model) renderCongratulations(height int) string {
+func (m Model) renderCongratulations(width, height int) string {
 	successColor := lipgloss.Color("#73daca")
 	titleStyle := lipgloss.NewStyle().
 		Foreground(successColor).
@@ -1006,8 +1062,6 @@ func (m Model) renderCongratulations(height int) string {
 	}
 
 	content.WriteString("\n")
-	content.WriteString(m.renderTokenUsageTable(sectionStyle, separatorStyle, labelStyle, valueStyle, totalStyle, dimStyle))
-	content.WriteString("\n")
 	content.WriteString(dimStyle.Render("Press ") +
 		accentStyle.Render("Esc") +
 		dimStyle.Render("/") +
@@ -1022,92 +1076,7 @@ func (m Model) renderCongratulations(height int) string {
 		Padding(1, 4).
 		Render(content.String())
 
-	return lipgloss.Place(m.width, height, lipgloss.Center, lipgloss.Center, box)
-}
-
-// renderTokenUsageTable renders a per-agent token breakdown table.
-func (m Model) renderTokenUsageTable(
-	sectionStyle, separatorStyle, labelStyle, valueStyle, totalStyle, dimStyle lipgloss.Style,
-) string {
-	// Collect agents that actually have usage data.
-	type row struct {
-		role   bus.AgentRole
-		runner string
-		model  string
-		usage  bus.AgentUsage
-	}
-
-	var rows []row
-	for _, role := range agentOrder {
-		u, ok := m.agentUsage[role]
-		if !ok || (u.InputTokens == 0 && u.OutputTokens == 0) {
-			continue
-		}
-		r, mdl := runnerModelForRole(m.agentConfigs, role)
-		rows = append(rows, row{role: role, runner: r, model: mdl, usage: u})
-	}
-
-	if len(rows) == 0 {
-		return ""
-	}
-
-	sep := separatorStyle.Render(strings.Repeat("─", 49))
-
-	var b strings.Builder
-	b.WriteString("\n")
-	b.WriteString(sectionStyle.Render("TOKEN USAGE PER AGENT"))
-	b.WriteString("\n")
-	b.WriteString(sep)
-	b.WriteString("\n")
-
-	var totalIn, totalOut int
-	anyEstimated := false
-
-	for _, r := range rows {
-		totalIn += r.usage.InputTokens
-		totalOut += r.usage.OutputTokens
-		if r.usage.Estimated {
-			anyEstimated = true
-		}
-
-		est := ""
-		if r.usage.Estimated {
-			est = "~"
-		}
-
-		runnerModel := r.runner
-		if r.model != "" {
-			runnerModel += "/" + r.model
-		}
-
-		line := fmt.Sprintf("  %-10s %-16s in: %5s  out: %5s%s",
-			string(r.role),
-			runnerModel,
-			formatTokens(r.usage.InputTokens),
-			formatTokens(r.usage.OutputTokens),
-			est,
-		)
-		b.WriteString(labelStyle.Render(line))
-		b.WriteString("\n")
-	}
-
-	b.WriteString(sep)
-	b.WriteString("\n")
-
-	est := ""
-	if anyEstimated {
-		est = "~"
-	}
-	totalLine := fmt.Sprintf("  %-10s %-16s in: %5s  out: %5s%s",
-		"TOTAL", "",
-		formatTokens(totalIn),
-		formatTokens(totalOut),
-		est,
-	)
-	b.WriteString(totalStyle.Render(totalLine))
-	b.WriteString("\n")
-
-	return b.String()
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // styleSummaryLine applies context-aware styling to a single summary line.
@@ -1364,20 +1333,20 @@ func stateToRole(state string) bus.AgentRole {
 	switch state {
 	case "pm", "negotiating":
 		return bus.RolePM
-	case "planning":
+	case "architect":
+		return bus.RoleArchitect
+	case "planner":
 		return bus.RolePlanner
-	case "coding", "fixing":
+	case "coder", "coder_fixer":
 		return bus.RoleCoder
-	case "testing":
+	case "tester":
 		return bus.RoleTester
-	case "reviewing":
+	case "reviewer":
 		return bus.RoleReviewer
-	case "ux_reviewing":
+	case "ux_reviewer":
 		return bus.RoleUXReviewer
 	case "security":
 		return bus.RoleSecurity
-	case "qa":
-		return bus.RoleQA
 	}
 	return ""
 }
@@ -1408,7 +1377,7 @@ func busToAgentEvent(msg bus.Message) AgentEventMsg {
 				text = p.Text
 			}
 		case string:
-			if p == "fixing" {
+			if p == "coder_fixer" {
 				state = AgentFixing
 			} else if p == "done" {
 				state = AgentDone

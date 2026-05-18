@@ -83,7 +83,7 @@ func (m ControlModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case bus.MsgEvent:
 			if s, ok := bm.Payload.(string); ok {
-				for _, ps := range []string{"planning", "coding", "testing", "reviewing", "fixing", "done"} {
+				for _, ps := range []string{"planner", "coder", "tester", "reviewer", "coder_fixer", "done"} {
 					if strings.Contains(s, ps) {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
@@ -245,6 +245,9 @@ func (m ControlModel) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.overlayArtifact, cmd = m.overlayArtifact.Update(msg)
 			return m, cmd
 		}
+	case overlayNegotiate:
+		// PM negotiation overlay is owned by the standalone Model; ControlModel
+		// does not host it. Nothing to dispatch here.
 	}
 
 	// Overlay closed — resume listening to bus events.
@@ -273,6 +276,8 @@ func (m ControlModel) View() string {
 			m.renderPhaseBar(),
 			m.statusbar.View(),
 		}, "\n")
+	case overlayNegotiate:
+		// PM negotiation overlay is not hosted by ControlModel; fall through.
 	}
 
 	convLabel := lipgloss.NewStyle().
@@ -348,7 +353,7 @@ func (m ControlModel) renderPhaseBar() string {
 		case m.gateArtifact == gate:
 			style := phaseActiveStyle(label)
 			parts = append(parts, style.Render("⏸ "+label))
-		case strings.Contains(m.phase, "planning") && !m.approvedGates[gate] && m.gateArtifact == "":
+		case strings.Contains(m.phase, "planner") && !m.approvedGates[gate] && m.gateArtifact == "":
 			style := phaseActiveStyle(label)
 			parts = append(parts, style.Render("◉ "+label))
 		default:
@@ -356,7 +361,7 @@ func (m ControlModel) renderPhaseBar() string {
 		}
 	}
 
-	postPhases := []string{"coding", "testing", "reviewing", "fixing", "done"}
+	postPhases := []string{"coder", "tester", "reviewer", "coder_fixer", "done"}
 	for _, ph := range postPhases {
 		label := strings.ToUpper(ph)
 		if strings.Contains(m.phase, ph) {
@@ -373,7 +378,7 @@ func (m ControlModel) renderPhaseBar() string {
 func (m ControlModel) renderAgentSummary() string {
 	var cells []string
 	for _, role := range []bus.AgentRole{
-		bus.RolePlanner, bus.RoleCoder, bus.RoleTester,
+		bus.RoleArchitect, bus.RolePlanner, bus.RoleCoder, bus.RoleTester,
 		bus.RoleReviewer, bus.RoleSecurity,
 	} {
 		cells = append(cells, renderAgentPill(role, m.agentStates[role]))

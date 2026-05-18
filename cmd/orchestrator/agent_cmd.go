@@ -23,17 +23,17 @@ func agentCmd(args []string) {
 	_ = fs.Parse(args)
 
 	if *roleFlag == "" || *busAddrFlag == "" {
-		fmt.Fprintln(os.Stderr, "usage: orchestrator agent --role=<role> --session=<id> --bus-addr=<path>")
+		_, _ = fmt.Fprintln(os.Stderr, "usage: orchestrator agent --role=<role> --session=<id> --bus-addr=<path>")
 		os.Exit(2)
 	}
 
 	validRoles := map[string]bool{
 		"pm": true, "planner": true, "coder": true, "tester": true,
 		"reviewer": true, "ux_reviewer": true, "security": true,
-		"qa": true, "pr": true,
+		"pr": true,
 	}
 	if !validRoles[*roleFlag] {
-		fmt.Fprintf(os.Stderr, "invalid --role %q (must be one of: pm, planner, coder, tester, reviewer, ux_reviewer, security, qa, pr)\n", *roleFlag)
+		_, _ = fmt.Fprintf(os.Stderr, "invalid --role %q (must be one of: pm, planner, coder, tester, reviewer, ux_reviewer, security, pr)\n", *roleFlag)
 		os.Exit(2)
 	}
 
@@ -41,7 +41,7 @@ func agentCmd(args []string) {
 
 	client, err := bus.DialUnix(*busAddrFlag)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "agent %s: connect to bus: %v\n", role, err)
+		_, _ = fmt.Fprintf(os.Stderr, "agent %s: connect to bus: %v\n", role, err)
 		os.Exit(1)
 	}
 	defer func() { _ = client.Close() }()

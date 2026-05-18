@@ -58,9 +58,6 @@ func TestSysmonUpdate(t *testing.T) {
 		swapPercent: 30.0,
 		swapUsed:    1 * 1024 * 1024 * 1024,
 		swapTotal:   4 * 1024 * 1024 * 1024,
-		diskPercent: 61.2,
-		diskUsed:    500 * 1024 * 1024 * 1024,
-		diskTotal:   1024 * 1024 * 1024 * 1024,
 		netRecv:     1000000,
 		netSent:     500000,
 		goroutines:  47,
@@ -101,9 +98,6 @@ func TestSysmonView(t *testing.T) {
 	sm.swapPercent = 25.0
 	sm.swapUsed = 1 * 1024 * 1024 * 1024
 	sm.swapTotal = 4 * 1024 * 1024 * 1024
-	sm.diskPercent = 45.0
-	sm.diskUsed = 450 * 1024 * 1024 * 1024
-	sm.diskTotal = 1024 * 1024 * 1024 * 1024
 	sm.goroutines = 30
 	sm.recvRate = 2048
 	sm.sentRate = 512
@@ -113,9 +107,9 @@ func TestSysmonView(t *testing.T) {
 
 	view := sm.View()
 	checks := []string{
-		"SYSTEM MONITOR", "CPU", "MEM", "DSK", "NET", "TREE",
+		"SYSTEM MONITOR", "CPU", "MEM", "NET", "TREE",
 		"Session", "C0", "C1",
-		"Avail", "Cache", "Swap", "Free",
+		"Avail", "Cache", "Swap",
 	}
 	for _, check := range checks {
 		if !strings.Contains(view, check) {
@@ -177,6 +171,68 @@ func TestSysmonObserveBusMessage_TracksActiveFiles(t *testing.T) {
 	sm.pruneFileActivity(now)
 	if _, ok := sm.activeFiles["internal/game/board.go"]; ok {
 		t.Fatal("expected stale activity to be pruned")
+	}
+}
+
+func TestSysmonObserveBusMessage_TracksLocalModelTokenUsage(t *testing.T) {
+	sm := NewSysmon()
+	sm.SetSize(60, 80)
+
+	// Simulate a coder agent backed by a local model emitting estimated usage.
+	sm.ObserveBusMessage(bus.NewMessage(bus.RoleCoder, "", bus.MsgUsage, bus.AgentUsage{
+		InputTokens:  1234,
+		OutputTokens: 567,
+		Estimated:    true,
+	}))
+
+	got, ok := sm.agentUsage[bus.RoleCoder]
+	if !ok {
+		t.Fatal("expected coder usage to be recorded")
+	}
+	if got.InputTokens != 1234 || got.OutputTokens != 567 {
+		t.Fatalf("usage mismatch: got %+v", got)
+	}
+	if !got.Estimated {
+		t.Error("expected estimated flag to be propagated")
+	}
+
+	view := sm.View()
+	for _, check := range []string{"TOKENS", "coder", "~"} {
+		if !strings.Contains(view, check) {
+			t.Errorf("view should contain %q to surface local-model usage", check)
+		}
+	}
+}
+
+// TestSysmon_AgentUsageIsSingleSourceOfTruth pins the contract that the
+// monitor panel and the end-of-run summary both read the SAME map. If a
+// future change ever copies the data, this test will catch the drift.
+func TestSysmon_AgentUsageIsSingleSourceOfTruth(t *testing.T) {
+	sm := NewSysmon()
+
+	sm.ObserveBusMessage(bus.NewMessage(bus.RoleCoder, "", bus.MsgUsage, bus.AgentUsage{
+		InputTokens:  100,
+		OutputTokens: 50,
+	}))
+	sm.ObserveBusMessage(bus.NewMessage(bus.RolePlanner, "", bus.MsgUsage, bus.AgentUsage{
+		InputTokens:  200,
+		OutputTokens: 75,
+	}))
+
+	exported := sm.AgentUsage()
+	if got := exported[bus.RoleCoder]; got.InputTokens != 100 || got.OutputTokens != 50 {
+		t.Errorf("AgentUsage()[coder]: got %+v", got)
+	}
+	if got := exported[bus.RolePlanner]; got.InputTokens != 200 || got.OutputTokens != 75 {
+		t.Errorf("AgentUsage()[planner]: got %+v", got)
+	}
+	// Sysmon's own total must equal what summary consumers would compute.
+	var summaryTotal int
+	for _, u := range exported {
+		summaryTotal += u.InputTokens + u.OutputTokens
+	}
+	if sm.totalTokens() != summaryTotal {
+		t.Fatalf("monitor total (%d) != summary total (%d)", sm.totalTokens(), summaryTotal)
 	}
 }
 

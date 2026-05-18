@@ -14,12 +14,14 @@ import (
 // PlannerPayload is the input message payload for PlannerAgent.
 type PlannerPayload struct {
 	Requirements   string
+	Architecture   string // architecture document from ArchitectAgent (approved)
 	MoscowPlan     string // MoSCoW prioritization from PM agent
 	ProductVision  string // Product vision from PM agent
 	ProjectContext string
 }
 
-// PlannerAgent generates architecture, implementation plan and prompts.
+// PlannerAgent generates the implementation plan and per-stage coder prompts
+// from an APPROVED architecture document produced by ArchitectAgent.
 type PlannerAgent struct {
 	BaseAgent
 	runner runner.LLMRunner
@@ -63,7 +65,10 @@ MoSCoW Prioritization:
 
 	systemPrompt := fmt.Sprintf(prompts.MustLoad("planner-system"), moscowContext, payload.ProjectContext)
 
-	userContent := fmt.Sprintf("Write the architecture, plan, and prompts for the following requirements. Remember: NO code, only descriptions.\n\nRequirements:\n%s", payload.Requirements)
+	userContent := fmt.Sprintf(
+		"Write the implementation plan and per-stage coder prompts for the following requirements, building on the approved architecture below. Remember: NO code, only descriptions. Do NOT re-output the architecture.\n\nApproved Architecture:\n%s\n\nRequirements:\n%s",
+		payload.Architecture, payload.Requirements,
+	)
 
 	req := runner.CompletionRequest{
 		SystemPrompt: systemPrompt,
@@ -82,20 +87,15 @@ MoSCoW Prioritization:
 		return bus.Message{}, fmt.Errorf("planner: stream: %w", err)
 	}
 
-	sections := parseSections(output, "ARCHITECTURE", "PLAN", "PROMPTS")
-	arch := sections["ARCHITECTURE"]
+	sections := parseSections(output, "PLAN", "PROMPTS")
 	plan := sections["PLAN"]
 	promptsContent := sections["PROMPTS"]
 
-	// fallback: write everything if sections missing
-	if arch == "" && plan == "" {
-		arch = output
+	// fallback: write everything as plan if PLAN section missing
+	if plan == "" {
 		plan = output
 	}
 
-	if err := a.ws.WriteFile(artifacts.ArchitectureFile, []byte(arch+"\n")); err != nil {
-		return bus.Message{}, err
-	}
 	if err := a.ws.WriteFile(artifacts.ImplementationPlanFile, []byte(plan+"\n")); err != nil {
 		return bus.Message{}, err
 	}
@@ -104,7 +104,7 @@ MoSCoW Prioritization:
 	// for the stage list. This is more reliable than retrying the entire generation.
 	if promptsContent == "" || !HasRealStages(promptsContent) {
 		a.emitToken("\n[generating stage prompts…]\n", false)
-		generated, err := a.generateStagePrompts(ctx, arch, plan)
+		generated, err := a.generateStagePrompts(ctx, payload.Architecture, plan)
 		if err != nil {
 			return bus.Message{}, fmt.Errorf("planner: stage prompts: %w", err)
 		}

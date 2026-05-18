@@ -73,7 +73,6 @@ func TestPromptsForRole(t *testing.T) {
 		{"reviewer", 1},
 		{"ux_reviewer", 1},
 		{"security", 1},
-		{"qa", 1},
 	}
 
 	for _, tt := range tests {
