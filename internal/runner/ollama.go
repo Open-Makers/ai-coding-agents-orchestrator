@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
 const (
@@ -82,7 +84,7 @@ func (r *OllamaRunner) Complete(ctx context.Context, req CompletionRequest) (<-c
 	}
 
 	ch := make(chan Token, 16)
-	go r.streamResponse(resp.Body, ch)
+	go r.streamResponse(resp.Body, joinPromptText(req), ch)
 	return ch, nil
 }
 
@@ -103,7 +105,7 @@ func (r *OllamaRunner) buildMessages(req CompletionRequest) []ollamaChatMessage 
 	return msgs
 }
 
-func (r *OllamaRunner) streamResponse(body io.ReadCloser, ch chan<- Token) {
+func (r *OllamaRunner) streamResponse(body io.ReadCloser, inputText string, ch chan<- Token) {
 	defer func() { _ = body.Close() }()
 	data, err := io.ReadAll(body)
 	if err != nil {
@@ -112,10 +114,10 @@ func (r *OllamaRunner) streamResponse(body io.ReadCloser, ch chan<- Token) {
 		close(ch)
 		return
 	}
-	r.streamResponseFromBytes(data, ch)
+	r.streamResponseFromBytes(data, inputText, ch)
 }
 
-func (r *OllamaRunner) streamResponseFromBytes(data []byte, ch chan<- Token) {
+func (r *OllamaRunner) streamResponseFromBytes(data []byte, inputText string, ch chan<- Token) {
 	defer close(ch)
 	var buf strings.Builder
 	for _, line := range bytes.Split(data, []byte("\n")) {
@@ -137,21 +139,55 @@ func (r *OllamaRunner) streamResponseFromBytes(data []byte, ch chan<- Token) {
 			if text != "" {
 				ch <- Token{Text: text}
 			}
-			ch <- Token{
-				Done: true,
-				Usage: &TokenUsage{
-					InputTokens:  chunk.PromptEvalCount,
-					OutputTokens: chunk.EvalCount,
-					Estimated:    false,
-				},
+			usage := &TokenUsage{
+				InputTokens:  chunk.PromptEvalCount,
+				OutputTokens: chunk.EvalCount,
+				Estimated:    false,
 			}
+			// Some Ollama models / streaming modes omit the eval counts even
+			// on the done chunk. Fall back to a heuristic estimate so the
+			// monitor still reflects local-model usage instead of zero.
+			if usage.InputTokens == 0 && usage.OutputTokens == 0 {
+				usage = estimatedUsage(inputText, text)
+			}
+			ch <- Token{Done: true, Usage: usage}
 			return
 		}
 	}
-	if text := unwrapJSONResponse(buf.String()); text != "" {
+	// Stream ended without an explicit done:true chunk — emit whatever we
+	// collected and an estimated usage so the agent still reports tokens.
+	text := unwrapJSONResponse(buf.String())
+	if text != "" {
 		ch <- Token{Text: text}
 	}
-	ch <- Token{Done: true}
+	ch <- Token{Done: true, Usage: estimatedUsage(inputText, text)}
+}
+
+// joinPromptText concatenates the system prompt and the user/assistant messages
+// of a CompletionRequest into a single string used purely for estimating input
+// token counts when the server does not report them.
+func joinPromptText(req CompletionRequest) string {
+	var sb strings.Builder
+	if req.SystemPrompt != "" {
+		sb.WriteString(req.SystemPrompt)
+		sb.WriteString("\n\n")
+	}
+	for _, m := range req.Messages {
+		sb.WriteString(m.Content)
+		sb.WriteString("\n\n")
+	}
+	return sb.String()
+}
+
+// estimatedUsage returns a TokenUsage filled in from heuristic token counts.
+// Used as a fallback for local-model paths where the server does not report
+// real prompt/completion token counts.
+func estimatedUsage(inputText, outputText string) *TokenUsage {
+	return &TokenUsage{
+		InputTokens:  tokenutil.EstimateTokens(inputText),
+		OutputTokens: tokenutil.EstimateTokens(outputText),
+		Estimated:    true,
+	}
 }
 
 // unwrapJSONResponse strips a wrapping JSON envelope that some local models

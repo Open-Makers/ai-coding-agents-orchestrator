@@ -16,7 +16,6 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/cpulimit"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
@@ -99,8 +98,6 @@ func runCmd(args []string) {
 	if err != nil {
 		fatal(fmt.Errorf("load config: %w", err))
 	}
-
-	cpulimit.Apply(cfg.Project.ReservedCores)
 
 	ws, err := artifacts.EnsureWorkspace(root)
 	if err != nil {
@@ -401,8 +398,6 @@ func taskCmd(args []string) {
 		fatal(fmt.Errorf("load config: %w", err))
 	}
 
-	cpulimit.Apply(cfg.Project.ReservedCores)
-
 	ws, err := artifacts.EnsureWorkspace(root)
 	if err != nil {
 		fatal(err)
@@ -483,6 +478,10 @@ func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root str
 	agents[bus.RolePM] = agent.NewPMAgent(b, makeRunner("pm"), ws,
 		pmCfg.Skills, pmCfg.Model)
 
+	architectCfg := cfg.Agents["architect"]
+	agents[bus.RoleArchitect] = agent.NewArchitectAgent(b, makeRunner("architect"), ws,
+		architectCfg.Skills, architectCfg.Model)
+
 	plannerCfg := cfg.Agents["planner"]
 	agents[bus.RolePlanner] = agent.NewPlannerAgent(b, makeRunner("planner"), ws,
 		plannerCfg.Skills, plannerCfg.Model)
@@ -516,12 +515,6 @@ func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root str
 		secCfg.Skills, secCfg.Model)
 	secAgent.SetMaxContextTokens(secCfg.MaxContextTokens)
 	agents[bus.RoleSecurity] = secAgent
-
-	qaCfg := cfg.Agents["qa"]
-	qaAgent := agent.NewQAAgent(b, makeRunner("qa"), ws,
-		qaCfg.Skills, qaCfg.Model)
-	qaAgent.SetMaxContextTokens(qaCfg.MaxContextTokens)
-	agents[bus.RoleQA] = qaAgent
 
 	return agents
 }

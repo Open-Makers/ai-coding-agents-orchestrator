@@ -178,3 +178,84 @@ func runGit(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 }
+
+func TestFilterInternalPaths_DropsExtendedDirsAndNoise(t *testing.T) {
+	in := []string{
+		"src/app.go",
+		"dist/main.js",
+		"build/output.o",
+		"target/debug/foo",
+		"out/bin",
+		".next/cache/x",
+		".nuxt/dist/x",
+		".cache/y",
+		".parcel-cache/z",
+		"app/__pycache__/m.pyc",
+		".venv/lib/python3/site-packages/x.py",
+		"venv/lib/x",
+		".tox/py3/x",
+		"coverage/lcov.info",
+		".coverage/data",
+		"tmp/scratch",
+		".idea/workspace.xml",
+		".vscode/settings.json",
+		"package-lock.json",
+		"yarn.lock",
+		"pnpm-lock.yaml",
+		"Cargo.lock",
+		"Gemfile.lock",
+		"poetry.lock",
+		"web/jquery.min.js",
+		"web/style.min.css",
+		"web/bundle.js.map",
+		"go.sum",
+	}
+	got := filterInternalPaths(in)
+	for _, f := range got {
+		if f != "src/app.go" && f != "go.sum" {
+			t.Errorf("unexpected path retained: %q", f)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("expected only src/app.go and go.sum to survive, got: %v", got)
+	}
+}
+
+func TestGitArgsWithExcludes_IncludesExtendedDirs(t *testing.T) {
+	args := gitArgsWithExcludes("ls-files")
+	joined := strings.Join(args, " ")
+	for _, dir := range []string{"dist", "build", "target", ".next", "__pycache__", "coverage", ".idea"} {
+		if !strings.Contains(joined, dir+"/**") {
+			t.Errorf("expected %s to be excluded in git args, got %q", dir, joined)
+		}
+	}
+}
+
+func TestIsNoiseFile(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"package-lock.json", true},
+		{"a/b/yarn.lock", true},
+		{"app/jquery.min.js", true},
+		{"styles/main.min.css", true},
+		{"bundle.js.map", true},
+		{"go.sum", false},
+		{"src/main.go", false},
+		{"README.md", false},
+	}
+	for _, c := range cases {
+		if got := isNoiseFile(c.path); got != c.want {
+			t.Errorf("isNoiseFile(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
+func TestFilterInternalPaths_ExcludePatterns(t *testing.T) {
+	in := []string{"src/api.gen.go", "src/api.go", "tools/foo.generated.go"}
+	got := filterInternalPaths(in, "*.gen.go", "*.generated.go")
+	if len(got) != 1 || got[0] != "src/api.go" {
+		t.Errorf("expected only src/api.go, got %v", got)
+	}
+}

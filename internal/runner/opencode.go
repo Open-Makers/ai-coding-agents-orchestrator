@@ -42,7 +42,7 @@ func (r OpenCodeRunner) Complete(ctx context.Context, req CompletionRequest) (<-
 		return nil, err
 	}
 
-	text, usage := extractOpenCodeResponseWithUsage(rawBytes)
+	text, usage := extractOpenCodeResponseWithUsage(rawBytes, sb.String())
 
 	ch := make(chan Token, 2)
 	go func() {
@@ -98,8 +98,9 @@ func (r OpenCodeRunner) runRaw(ctx context.Context, prompt, model string) ([]byt
 // extractOpenCodeResponseWithUsage parses NDJSON event stream from opencode --format json.
 // Returns concatenated text from all "text" type events, plus token usage.
 // If a "usage" event is present, returns exact counts (Estimated: false).
-// Otherwise estimates from output text length (Estimated: true).
-func extractOpenCodeResponseWithUsage(data []byte) (string, TokenUsage) {
+// Otherwise estimates both input and output tokens from text length so local
+// models (run via opencode) still report usage in the monitor instead of zero.
+func extractOpenCodeResponseWithUsage(data []byte, inputText string) (string, TokenUsage) {
 	var sb strings.Builder
 	var foundUsage bool
 	var usage TokenUsage
@@ -148,6 +149,7 @@ func extractOpenCodeResponseWithUsage(data []byte) (string, TokenUsage) {
 
 	if !foundUsage {
 		usage = TokenUsage{
+			InputTokens:  tokenutil.EstimateTokens(inputText),
 			OutputTokens: tokenutil.EstimateTokens(text),
 			Estimated:    true,
 		}

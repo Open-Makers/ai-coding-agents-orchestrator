@@ -7,8 +7,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/chunker"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/embedder"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/index"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
@@ -32,6 +35,9 @@ type ProjectContext struct {
 	ProjectType         string            // detected project type (go, node, rust, etc.)
 	TreeStructure       string            // directory tree summary
 	ProgrammingLanguage string            // explicit language setting from project config
+
+	// idx is the optional semantic index (nil when disabled or unavailable).
+	idx index.Index
 }
 
 // Collect gathers repository context from root using git commands.
@@ -45,7 +51,7 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	if err != nil {
 		return pc, fmt.Errorf("context: git ls-files: %w", err)
 	}
-	pc.Files = filterInternalPaths(files)
+	pc.Files = filterInternalPaths(files, cfg.Project.Context.ExcludePatterns...)
 
 	commits, err := gitLines(root, "log", "--oneline", "-20")
 	if err != nil {
@@ -80,10 +86,34 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	pc.ProgrammingLanguage = cfg.Project.Language
 
 	if pc.IsBrownfield {
-		pc.SourceFiles = collectSourceFiles(rootAbs, pc.Files)
+		pc.SourceFiles = collectSourceFiles(rootAbs, pc.Files, nil)
+	}
+
+	if cfg.Project.Context.SemanticIndex.Enabled {
+		emb, err := embedderFactory(cfg.Project.Context.SemanticIndex)
+		if err == nil {
+			if idx, idxErr := buildOrRefreshIndex(rootAbs, pc.Files, emb); idxErr == nil {
+				pc.idx = idx
+			}
+		}
 	}
 
 	return pc, nil
+}
+
+// embedderFactory is overridable in tests to inject a fake embedder.
+var embedderFactory = func(cfg config.SemanticIndexConfig) (embedder.Embedder, error) {
+	return embedder.New(cfg)
+}
+
+// SetEmbedderFactory swaps the embedder constructor used by Collect when the
+// semantic index is enabled. Returns the previous factory so tests can
+// restore it. Intended for tests only — production callers should leave it
+// alone and rely on configuration.
+func SetEmbedderFactory(f func(config.SemanticIndexConfig) (embedder.Embedder, error)) func(config.SemanticIndexConfig) (embedder.Embedder, error) {
+	prev := embedderFactory
+	embedderFactory = f
+	return prev
 }
 
 // ContextProfile controls how much detail is included in the system prompt fragment.
@@ -180,6 +210,9 @@ func (p ProjectContext) SystemPromptFragment(profile ...ContextProfile) string {
 		for name, content := range p.SourceFiles {
 			_, _ = fmt.Fprintf(&sb, "**%s**\n```\n", name)
 			if len(content) > maxSourceFileSize {
+				// Defensive cap: collectSourceFiles already trims at chunk
+				// boundaries, but very large always-included files still
+				// get truncated here at byte level.
 				sb.WriteString(content[:maxSourceFileSize])
 				sb.WriteString("\n... (truncated)")
 			} else {
@@ -260,11 +293,20 @@ func isSourceFile(path string) bool {
 	return true
 }
 
+// SourceEntry holds a source file's content as injected into the context.
+// Truncated indicates the body was reduced from the original by chunk-level
+// selection (whole functions/types) rather than included verbatim.
+type SourceEntry struct {
+	Content   string
+	Truncated bool
+}
+
 // collectSourceFiles reads key source files from the project to provide
 // existing code context to agents. Prioritizes entry points, core packages,
-// and non-test source files.
-func collectSourceFiles(root string, files []string) map[string]string {
-	ranked := rankSourceFiles(files)
+// and non-test source files. Optional seeds boost scoring for files that the
+// caller knows are relevant (e.g. files referenced by a failing test).
+func collectSourceFiles(root string, files []string, seeds []string) map[string]string {
+	ranked := rankSourceFiles(root, files, seeds)
 	result := make(map[string]string)
 	totalSize := 0
 
@@ -280,7 +322,17 @@ func collectSourceFiles(root string, files []string) map[string]string {
 			continue
 		}
 		size := len(content)
-		if size == 0 || size > maxSourceFileSize*2 {
+		if size == 0 {
+			continue
+		}
+		// Reduce oversized files at chunk boundaries instead of dropping them.
+		if size > maxSourceFileSize*2 {
+			reduced := selectChunksWithinBudget(path, content, maxSourceFileSize)
+			if reduced == "" {
+				continue
+			}
+			result[path] = reduced
+			totalSize += len(reduced)
 			continue
 		}
 		result[path] = string(content)
@@ -290,9 +342,47 @@ func collectSourceFiles(root string, files []string) map[string]string {
 	return result
 }
 
+// selectChunksWithinBudget returns whole-chunk source up to budget, ordered
+// by inclusion priority (exported decls first). The returned string ends with
+// a `... (chunks omitted)` marker when at least one chunk was dropped.
+func selectChunksWithinBudget(path string, content []byte, budget int) string {
+	chunks, err := chunker.Split(path, content)
+	if err != nil || len(chunks) == 0 {
+		return ""
+	}
+	chunker.SortByPriority(chunks)
+	var sb strings.Builder
+	used := 0
+	included := 0
+	for _, c := range chunks {
+		body := c.Body
+		if !strings.HasSuffix(body, "\n") {
+			body += "\n"
+		}
+		if used+len(body) > budget && included > 0 {
+			break
+		}
+		sb.WriteString(body)
+		sb.WriteString("\n")
+		used += len(body) + 1
+		included++
+		if used >= budget {
+			break
+		}
+	}
+	if included < len(chunks) {
+		sb.WriteString("... (chunks omitted)")
+	}
+	return sb.String()
+}
+
 // rankSourceFiles orders files by importance for brownfield context.
-// Entry points and core packages come first, tests last.
-func rankSourceFiles(files []string) []string {
+// Entry points and core packages come first, tests last. When seeds are
+// provided, the seed files (and their imports / callers of their primary
+// exported symbol) get a substantial score boost.
+func rankSourceFiles(root string, files []string, seeds []string) []string {
+	boosts := computeSeedBoosts(root, seeds)
+
 	type scored struct {
 		path  string
 		score int
@@ -336,6 +426,8 @@ func rankSourceFiles(files []string) []string {
 			s -= 30
 		}
 
+		s += boosts[f]
+
 		source = append(source, scored{path: f, score: s})
 	}
 
@@ -351,6 +443,36 @@ func rankSourceFiles(files []string) []string {
 		result[i] = s.path
 	}
 	return result
+}
+
+// computeSeedBoosts assigns score deltas to seed files, their imports, and
+// their callers. Heavier weight goes to the seed itself.
+func computeSeedBoosts(root string, seeds []string) map[string]int {
+	boosts := make(map[string]int)
+	if root == "" || len(seeds) == 0 {
+		return boosts
+	}
+	for _, seed := range seeds {
+		boosts[seed] += 200
+		if imps, err := ImportsOf(root, seed); err == nil {
+			for _, p := range imps {
+				boosts[p] += 80
+			}
+		}
+		sym := PrimarySymbolOf(root, seed)
+		if sym == "" {
+			continue
+		}
+		if callers, err := CallersOf(root, sym); err == nil {
+			for _, p := range callers {
+				if p == seed {
+					continue
+				}
+				boosts[p] += 60
+			}
+		}
+	}
+	return boosts
 }
 
 // buildTreeStructure creates a compact directory tree from file list.
@@ -420,21 +542,69 @@ var excludedTopLevelDirs = []string{
 	".git/",
 	"node_modules/",
 	"vendor/",
+	"dist/",
+	"build/",
+	"target/",
+	"out/",
+	".next/",
+	".nuxt/",
+	".cache/",
+	".parcel-cache/",
+	"__pycache__/",
+	".venv/",
+	"venv/",
+	".tox/",
+	"coverage/",
+	".coverage/",
+	"tmp/",
+	".idea/",
+	".vscode/",
+}
+
+// noiseFileNames are exact file basenames that pollute context (lockfiles).
+var noiseFileNames = map[string]bool{
+	"package-lock.json": true,
+	"yarn.lock":         true,
+	"pnpm-lock.yaml":    true,
+	"Cargo.lock":        true,
+	"Gemfile.lock":      true,
+	"poetry.lock":       true,
+}
+
+// isNoiseFile reports whether a path is generated/non-source noise that should
+// be excluded from context (lockfiles, minified assets, source maps).
+// Note: go.sum is intentionally NOT listed — it is often required.
+func isNoiseFile(path string) bool {
+	base := filepath.Base(path)
+	if noiseFileNames[base] {
+		return true
+	}
+	lower := strings.ToLower(base)
+	switch {
+	case strings.HasSuffix(lower, ".min.js"),
+		strings.HasSuffix(lower, ".min.css"),
+		strings.HasSuffix(lower, ".map"):
+		return true
+	}
+	return false
 }
 
 // gitArgsWithExcludes appends pathspec exclusions so git commands (ls-files,
-// diff) never surface paths under excludedTopLevelDirs.
+// diff) never surface paths under excludedTopLevelDirs (matched at any depth).
 func gitArgsWithExcludes(args ...string) []string {
 	args = append(args, "--", ".")
 	for _, dir := range excludedTopLevelDirs {
-		args = append(args, ":(exclude,glob)"+strings.TrimSuffix(dir, "/")+"/**")
+		name := strings.TrimSuffix(dir, "/")
+		args = append(args, ":(exclude,glob)"+name+"/**")
+		args = append(args, ":(exclude,glob)**/"+name+"/**")
 	}
 	return args
 }
 
 // filterInternalPaths removes paths under directories that should not be part
-// of the project review (orchestrator state, VCS internals, dependency dirs).
-func filterInternalPaths(files []string) []string {
+// of the project review (orchestrator state, VCS internals, dependency dirs),
+// noise files (lockfiles, minified assets), and any user-supplied glob patterns.
+func filterInternalPaths(files []string, extraPatterns ...string) []string {
 	if len(files) == 0 {
 		return files
 	}
@@ -443,15 +613,44 @@ func filterInternalPaths(files []string) []string {
 		if isInternalPath(f) {
 			continue
 		}
+		if isNoiseFile(f) {
+			continue
+		}
+		if matchesAnyPattern(f, extraPatterns) {
+			continue
+		}
 		out = append(out, f)
 	}
 	return out
+}
+
+func matchesAnyPattern(path string, patterns []string) bool {
+	if len(patterns) == 0 {
+		return false
+	}
+	base := filepath.Base(path)
+	for _, p := range patterns {
+		if p == "" {
+			continue
+		}
+		if ok, _ := filepath.Match(p, path); ok {
+			return true
+		}
+		if ok, _ := filepath.Match(p, base); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func isInternalPath(path string) bool {
 	normalized := filepath.ToSlash(path)
 	for _, prefix := range excludedTopLevelDirs {
 		if strings.HasPrefix(normalized, prefix) {
+			return true
+		}
+		// Also exclude when the directory appears as any path segment.
+		if strings.Contains(normalized, "/"+prefix) {
 			return true
 		}
 	}

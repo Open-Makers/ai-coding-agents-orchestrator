@@ -15,6 +15,7 @@ import (
 type UXReviewerPayload struct {
 	Files []string // source files to review
 	Root  string   // project root for reading files
+	Seeds []string // optional seed paths (graph + semantic) to expand context
 }
 
 // UXReviewResult is the structured outcome of a UX/UI review.
@@ -55,7 +56,7 @@ func (a *UXReviewerAgent) Run(ctx context.Context, msg bus.Message) (bus.Message
 	payload, _ := msg.Payload.(UXReviewerPayload)
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
 
-	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens)
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
 	if sourceContext == "" {
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		sourceContext = string(raw)

@@ -25,10 +25,12 @@ const (
 	providerOpenCode providerKind = iota
 	providerClaude
 	providerOllama
+	providerMLX
 	providerCodex
+	providerCopilot
 )
 
-var providerLabels = []string{"OpenCode", "Claude", "Ollama", "Codex"}
+var providerLabels = []string{"OpenCode", "Claude", "Ollama", "oMLX", "Codex", "Copilot"}
 
 func providerFromString(s string) providerKind {
 	switch s {
@@ -36,8 +38,12 @@ func providerFromString(s string) providerKind {
 		return providerClaude
 	case "ollama":
 		return providerOllama
+	case "mlx":
+		return providerMLX
 	case "codex":
 		return providerCodex
+	case "copilot":
+		return providerCopilot
 	default:
 		return providerOpenCode
 	}
@@ -49,8 +55,12 @@ func providerToString(p providerKind) string {
 		return "claude"
 	case providerOllama:
 		return "ollama"
+	case providerMLX:
+		return "mlx"
 	case providerCodex:
 		return "codex"
+	case providerCopilot:
+		return "copilot"
 	default:
 		return "opencode"
 	}
@@ -97,6 +107,11 @@ type ollamaModelsListMsg struct {
 	err    error
 }
 
+type mlxModelsListMsg struct {
+	models []string
+	err    error
+}
+
 type codexModelsListMsg struct {
 	models []string
 	err    error
@@ -107,9 +122,21 @@ type claudeModelsListMsg struct {
 	err    error
 }
 
+type copilotModelsListMsg struct {
+	models []string
+	err    error
+}
+
 // pingResultMsg carries the result of an async model reachability test.
 type pingResultMsg struct {
 	err error
+}
+
+// providerAvailabilityMsg carries the result of an async provider
+// reachability check started during setup initialisation.
+type providerAvailabilityMsg struct {
+	kind providerKind
+	err  error
 }
 
 // ── SetupModel ────────────────────────────────────────────────────────────────
@@ -129,8 +156,14 @@ type SetupModel struct {
 	ollamaModels        []string
 	ollamaModelsLoading bool
 
+	mlxModels        []string
+	mlxModelsLoading bool
+
 	codexModels        []string
 	codexModelsLoading bool
+
+	copilotModels        []string
+	copilotModelsLoading bool
 
 	// Language selection.
 	languages   []string
@@ -159,6 +192,11 @@ type SetupModel struct {
 
 	promptStatus string // status message after prompt export
 
+	// Provider availability — populated asynchronously on Init.
+	// Nil means "not yet checked". A non-error key means the provider's
+	// backend is reachable; a non-nil error explains why it is unavailable.
+	providerAvailability map[providerKind]error
+
 	// Model validation state.
 	pingTesting bool          // true while ping is in progress
 	pingErr     error         // non-nil after a failed ping
@@ -168,7 +206,7 @@ type SetupModel struct {
 	height int
 }
 
-var setupAgentRoles = []string{"pm", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security", "qa"}
+var setupAgentRoles = []string{"pm", "architect", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security"}
 
 func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfgs map[string]config.AgentConfig) SetupModel {
 	sp := spinner.New()
@@ -187,22 +225,27 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 	}
 
 	m := SetupModel{
-		models:              runner.OpenCodeAvailableModels,
-		modelsLoading:       true,
-		claudeModels:        runner.ClaudeModels,
-		claudeModelsLoading: true,
-		ollamaModels:        runner.OllamaPopularModels,
-		ollamaModelsLoading: true,
-		codexModels:         runner.CodexModels,
-		codexModelsLoading:  true,
-		languages:           languages,
-		languageIdx:         langIdx,
-		progLanguages:       config.SupportedProgrammingLanguages,
-		agentRoles:          setupAgentRoles,
-		agentOverrides:      make(map[string]agentSetupOverride),
-		spinner:             sp,
-		width:               80,
-		height:              24,
+		models:               runner.OpenCodeAvailableModels,
+		modelsLoading:        true,
+		claudeModels:         runner.ClaudeModels,
+		claudeModelsLoading:  true,
+		ollamaModels:         runner.OllamaPopularModels,
+		ollamaModelsLoading:  true,
+		mlxModels:            nil,
+		mlxModelsLoading:     true,
+		codexModels:          runner.CodexModels,
+		codexModelsLoading:   true,
+		copilotModels:        nil,
+		copilotModelsLoading: true,
+		providerAvailability: make(map[providerKind]error),
+		languages:            languages,
+		languageIdx:          langIdx,
+		progLanguages:        config.SupportedProgrammingLanguages,
+		agentRoles:           setupAgentRoles,
+		agentOverrides:       make(map[string]agentSetupOverride),
+		spinner:              sp,
+		width:                80,
+		height:               24,
 	}
 
 	m.provider = providerFromString(currentRunner)
@@ -266,21 +309,51 @@ func (m SetupModel) activeModels() []string {
 	return m.modelsForProvider(m.provider)
 }
 
+// providerUnavailable reports whether availability checks have completed for
+// the given provider and concluded the backend is unreachable. A provider
+// that has not yet been probed is treated as available so the UI does not
+// flicker during startup.
+func (m SetupModel) providerUnavailable(p providerKind) bool {
+	if m.providerAvailability == nil {
+		return false
+	}
+	err, checked := m.providerAvailability[p]
+	return checked && err != nil
+}
+
+// nextAvailableProvider returns the next reachable provider in the given
+// direction (+1 or -1), or the starting kind when none is found. Used to
+// skip unavailable providers when cycling with left/right.
+func (m SetupModel) nextAvailableProvider(start providerKind, dir int) providerKind {
+	n := providerKind(len(providerLabels))
+	for step := 1; step < int(n); step++ {
+		candidate := providerKind((int(start) + dir*step + int(n)) % int(n))
+		if !m.providerUnavailable(candidate) {
+			return candidate
+		}
+	}
+	return start
+}
+
 func (m SetupModel) modelsForProvider(p providerKind) []string {
 	switch p {
 	case providerClaude:
 		return m.claudeModels
 	case providerOllama:
 		return m.ollamaModels
+	case providerMLX:
+		return m.mlxModels
 	case providerCodex:
 		return m.codexModels
+	case providerCopilot:
+		return m.copilotModels
 	default:
 		return m.models
 	}
 }
 
 func (m SetupModel) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, fetchOpenCodeModels(), fetchOllamaModels(), fetchCodexModels(), fetchClaudeModels())
+	return tea.Batch(m.spinner.Tick, fetchOpenCodeModels(), fetchOllamaModels(), fetchMLXModels(), fetchCodexModels(), fetchClaudeModels(), fetchCopilotModels(), checkProviderAvailability())
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -352,6 +425,22 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 			m.viewport.SetContent(m.renderContent())
 		}
 
+	case mlxModelsListMsg:
+		m.mlxModelsLoading = false
+		if msg.err == nil && len(msg.models) > 0 {
+			prevModel := ""
+			if m.provider == providerMLX && m.modelIdx < len(m.mlxModels) {
+				prevModel = m.mlxModels[m.modelIdx]
+			}
+			m.mlxModels = msg.models
+			if m.provider == providerMLX {
+				m.modelIdx = findModelIndex(m.mlxModels, prevModel)
+			}
+		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
+
 	case codexModelsListMsg:
 		m.codexModelsLoading = false
 		if msg.err == nil && len(msg.models) > 0 {
@@ -380,6 +469,31 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 				m.modelIdx = findModelIndex(m.claudeModels, prevModel)
 			}
 		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
+
+	case copilotModelsListMsg:
+		m.copilotModelsLoading = false
+		if msg.err == nil && len(msg.models) > 0 {
+			prevModel := ""
+			if m.provider == providerCopilot && m.modelIdx < len(m.copilotModels) {
+				prevModel = m.copilotModels[m.modelIdx]
+			}
+			m.copilotModels = msg.models
+			if m.provider == providerCopilot {
+				m.modelIdx = findModelIndex(m.copilotModels, prevModel)
+			}
+		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
+
+	case providerAvailabilityMsg:
+		if m.providerAvailability == nil {
+			m.providerAvailability = make(map[providerKind]error)
+		}
+		m.providerAvailability[msg.kind] = msg.err
 		if m.ready {
 			m.viewport.SetContent(m.renderContent())
 		}
@@ -454,13 +568,9 @@ func (m SetupModel) handleProviderKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 	prev := m.provider
 	switch msg.String() {
 	case "left", "h":
-		if m.provider > 0 {
-			m.provider--
-		}
+		m.provider = m.nextAvailableProvider(m.provider, -1)
 	case "right", "l":
-		if int(m.provider) < len(providerLabels)-1 {
-			m.provider++
-		}
+		m.provider = m.nextAvailableProvider(m.provider, +1)
 	case "tab", "down", "enter":
 		m.section = sectionModel
 		m.ensureSectionVisible()
@@ -628,13 +738,9 @@ func (m SetupModel) handleAgentEditKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		// Step 0: pick runner.
 		switch msg.String() {
 		case "left", "h":
-			if m.agentEditProv > 0 {
-				m.agentEditProv--
-			}
+			m.agentEditProv = m.nextAvailableProvider(m.agentEditProv, -1)
 		case "right", "l":
-			if int(m.agentEditProv) < len(providerLabels)-1 {
-				m.agentEditProv++
-			}
+			m.agentEditProv = m.nextAvailableProvider(m.agentEditProv, +1)
 		case "enter":
 			m.agentEditStep = 1
 			m.agentEditIdx = 0
@@ -870,16 +976,33 @@ func (m SetupModel) renderContent() string {
 
 func (m SetupModel) renderProviderCard(contentWidth int, label, focusLabel, active, inactive lipgloss.Style) string {
 	p := homePalette
+	offline := lipgloss.NewStyle().Foreground(p.dim).Strikethrough(true)
 
 	var providerTabs []string
 	for i, lbl := range providerLabels {
-		if providerKind(i) == m.provider {
+		kind := providerKind(i)
+		unavailable := m.providerUnavailable(kind)
+		displayLbl := lbl
+		if unavailable {
+			displayLbl = lbl + " (offline)"
+		}
+		switch {
+		case kind == m.provider && unavailable:
+			// Selected but unreachable — keep cursor visible but mark it.
+			tab := offline.Render("▶ " + displayLbl)
+			if m.section == sectionProvider {
+				tab = focusLabel.Render("[ "+lbl+" ]") + " " + offline.Render("(offline)")
+			}
+			providerTabs = append(providerTabs, tab)
+		case kind == m.provider:
 			tab := active.Render("▶ " + lbl)
 			if m.section == sectionProvider {
 				tab = focusLabel.Render("[ " + lbl + " ]")
 			}
 			providerTabs = append(providerTabs, tab)
-		} else {
+		case unavailable:
+			providerTabs = append(providerTabs, offline.Render("  "+displayLbl))
+		default:
 			providerTabs = append(providerTabs, inactive.Render("  "+lbl))
 		}
 	}
@@ -927,9 +1050,15 @@ func (m SetupModel) renderModelCard(contentWidth int, label, focusLabel, active,
 	case providerOllama:
 		modelLines = append(modelLines, dim.Render("  Ollama local models (REST API)"))
 		modelLines = append(modelLines, m.viewOllamaModels(active, inactive, dim)...)
+	case providerMLX:
+		modelLines = append(modelLines, dim.Render("  oMLX local models (OpenAI-compatible API on :8000)"))
+		modelLines = append(modelLines, m.viewMLXModels(active, inactive, dim)...)
 	case providerCodex:
 		modelLines = append(modelLines, dim.Render("  Codex CLI (OpenAI)"))
 		modelLines = append(modelLines, m.viewCodexModels(active, inactive, dim)...)
+	case providerCopilot:
+		modelLines = append(modelLines, dim.Render("  GitHub Copilot CLI"))
+		modelLines = append(modelLines, m.viewCopilotModels(active, inactive, dim)...)
 	}
 
 	// Model validation status.
@@ -1058,9 +1187,21 @@ func (m SetupModel) renderAgentCard(contentWidth int, label, focusLabel, active,
 
 			var tabs []string
 			for i, lbl := range providerLabels {
-				if providerKind(i) == m.agentEditProv {
+				kind := providerKind(i)
+				unavailable := m.providerUnavailable(kind)
+				offline := lipgloss.NewStyle().Foreground(homePalette.dim).Strikethrough(true)
+				displayLbl := lbl
+				if unavailable {
+					displayLbl = lbl + " (offline)"
+				}
+				switch {
+				case kind == m.agentEditProv && unavailable:
+					tabs = append(tabs, focusLabel.Render("[ "+lbl+" ]")+" "+offline.Render("(offline)"))
+				case kind == m.agentEditProv:
 					tabs = append(tabs, focusLabel.Render("[ "+lbl+" ]"))
-				} else {
+				case unavailable:
+					tabs = append(tabs, offline.Render("  "+displayLbl))
+				default:
 					tabs = append(tabs, inactive.Render("  "+lbl))
 				}
 			}
@@ -1151,6 +1292,24 @@ func (m SetupModel) viewOllamaModels(active, inactive, dim lipgloss.Style) []str
 	return lines
 }
 
+func (m SetupModel) viewMLXModels(active, inactive, dim lipgloss.Style) []string {
+	isModelSection := m.section == sectionModel
+	var lines []string
+
+	if m.mlxModelsLoading {
+		lines = append(lines, dim.Render("  loading models…"))
+		return lines
+	}
+
+	if len(m.mlxModels) == 0 {
+		lines = append(lines, dim.Render("  no models found — install via LM Studio or `mlx_lm.convert`"))
+		return lines
+	}
+
+	lines = append(lines, renderWindowedList(m.mlxModels, m.modelIdx, isModelSection, active, inactive, dim)...)
+	return lines
+}
+
 func (m SetupModel) viewCodexModels(active, inactive, dim lipgloss.Style) []string {
 	isModelSection := m.section == sectionModel
 
@@ -1167,6 +1326,25 @@ func (m SetupModel) viewCodexModels(active, inactive, dim lipgloss.Style) []stri
 	}
 
 	lines = append(lines, renderWindowedList(m.codexModels, m.modelIdx, isModelSection, active, inactive, dim)...)
+	return lines
+}
+
+func (m SetupModel) viewCopilotModels(active, inactive, dim lipgloss.Style) []string {
+	isModelSection := m.section == sectionModel
+
+	var lines []string
+
+	if m.copilotModelsLoading {
+		lines = append(lines, dim.Render("  loading models…"))
+		return lines
+	}
+
+	if len(m.copilotModels) == 0 {
+		lines = append(lines, dim.Render("  copilot CLI did not return any models — pass --model manually"))
+		return lines
+	}
+
+	lines = append(lines, renderWindowedList(m.copilotModels, m.modelIdx, isModelSection, active, inactive, dim)...)
 	return lines
 }
 
@@ -1271,6 +1449,13 @@ func fetchOllamaModels() tea.Cmd {
 	}
 }
 
+func fetchMLXModels() tea.Cmd {
+	return func() tea.Msg {
+		installed, err := runner.MLXListInstalled()
+		return mlxModelsListMsg{models: installed, err: err}
+	}
+}
+
 func fetchCodexModels() tea.Cmd {
 	return func() tea.Msg {
 		models, err := runner.CodexListModels()
@@ -1283,6 +1468,30 @@ func fetchClaudeModels() tea.Cmd {
 		models, err := runner.ClaudeListModels()
 		return claudeModelsListMsg{models: models, err: err}
 	}
+}
+
+func fetchCopilotModels() tea.Cmd {
+	return func() tea.Msg {
+		models, err := runner.CopilotListModels()
+		return copilotModelsListMsg{models: models, err: err}
+	}
+}
+
+// checkProviderAvailability emits one providerAvailabilityMsg per provider
+// once each backend has been probed. Slow providers (HTTP timeouts) do not
+// block the others — each runs in its own goroutine via tea.Batch.
+func checkProviderAvailability() tea.Cmd {
+	cmds := make([]tea.Cmd, 0, len(providerLabels))
+	for i := range providerLabels {
+		kind := providerKind(i)
+		cmds = append(cmds, func() tea.Msg {
+			return providerAvailabilityMsg{
+				kind: kind,
+				err:  runner.ProviderReachable(providerToString(kind)),
+			}
+		})
+	}
+	return tea.Batch(cmds...)
 }
 
 // findModelIndex returns the index of name in models, or 0 if not found.
@@ -1300,7 +1509,7 @@ func findModelIndex(models []string, name string) int {
 
 // isLoadingModels returns true if any model list is still being fetched.
 func (m SetupModel) isLoadingModels() bool {
-	return m.modelsLoading || m.claudeModelsLoading || m.ollamaModelsLoading || m.codexModelsLoading
+	return m.modelsLoading || m.claudeModelsLoading || m.ollamaModelsLoading || m.mlxModelsLoading || m.codexModelsLoading || m.copilotModelsLoading
 }
 
 // ensureSectionVisible scrolls the viewport so the focused section is visible.
@@ -1323,8 +1532,16 @@ func (m *SetupModel) ensureSectionVisible() {
 			break
 		}
 		if m.agentEditing {
-			// When editing, scroll to the bottom to show the editing panel.
-			targetLine = totalLines - m.viewport.Height
+			// Anchor on the editing panel marker so the runner/model picker
+			// stays in view instead of scrolling past the top of the card.
+			marker := "Select runner for"
+			if m.agentEditStep == 1 {
+				marker = "Select model for"
+			}
+			targetLine = findLineContaining(lines, marker)
+			if targetLine < 0 {
+				targetLine = totalLines - m.viewport.Height
+			}
 		} else {
 			// Agent overrides is the first section in project setup — scroll to top.
 			m.viewport.SetYOffset(0)

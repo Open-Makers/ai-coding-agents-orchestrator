@@ -1,7 +1,9 @@
 package agent
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -68,5 +70,68 @@ func TestBuildCompactSourceContext_TruncatesLargeFiles(t *testing.T) {
 	result := buildCompactSourceContext(dir, []string{"huge.go"}, 0)
 	if !strings.Contains(result, "truncated") {
 		t.Error("expected truncation marker for large file")
+	}
+}
+
+func TestBuildCompactSourceContext_SeedExpandsImports(t *testing.T) {
+	dir := t.TempDir()
+	cmds := [][]string{
+		{"init"}, {"config", "user.email", "t@t.com"}, {"config", "user.name", "t"},
+	}
+	for _, args := range cmds {
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	mustWrite := func(rel, content string) {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("go.mod", "module example.com/s\n\ngo 1.22\n")
+	mustWrite("internal/foo/foo.go", "package foo\n\nfunc Helper() string { return \"hi\" }\n")
+	mustWrite("cmd/app/main.go", "package main\n\nimport \"example.com/s/internal/foo\"\n\nfunc main() { _ = foo.Helper() }\n")
+	mustWrite("unrelated/x.go", "package unrelated\n\nfunc X() {}\n")
+
+	out := buildCompactSourceContext(dir, []string{"unrelated/x.go"}, 0, "cmd/app/main.go")
+
+	mainIdx := strings.Index(out, "cmd/app/main.go")
+	fooIdx := strings.Index(out, "internal/foo/foo.go")
+	unrIdx := strings.Index(out, "unrelated/x.go")
+	if mainIdx < 0 || fooIdx < 0 || unrIdx < 0 {
+		t.Fatalf("missing one of the expected paths in output:\n%s", out)
+	}
+	if mainIdx >= fooIdx || fooIdx >= unrIdx {
+		t.Errorf("expected order seed → import → unrelated, got main=%d foo=%d unr=%d", mainIdx, fooIdx, unrIdx)
+	}
+}
+
+func TestBuildCompactSourceContext_ChunkBoundaries(t *testing.T) {
+	dir := t.TempDir()
+
+	// Build a Go file that exceeds maxReviewFileSize so chunking kicks in.
+	var src strings.Builder
+	src.WriteString("package big\n\n")
+	for i := 0; i < 200; i++ {
+		_, _ = fmt.Fprintf(&src, "func F%d() string { return \"%s\" }\n\n", i, strings.Repeat("x", 40))
+	}
+	if err := os.WriteFile(filepath.Join(dir, "big.go"), []byte(src.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out := buildCompactSourceContext(dir, []string{"big.go"}, 0)
+
+	// Output braces must balance — chunking never splits a function mid-body.
+	open := strings.Count(out, "{")
+	closeC := strings.Count(out, "}")
+	if open != closeC {
+		t.Errorf("unbalanced braces: { = %d, } = %d", open, closeC)
 	}
 }

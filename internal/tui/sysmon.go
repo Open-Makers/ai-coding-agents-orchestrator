@@ -14,12 +14,13 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/shirou/gopsutil/v4/cpu"
-	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/sensors"
 )
 
 const (
@@ -55,14 +56,13 @@ type sysmonTickMsg struct {
 	swapPercent float64
 	swapUsed    uint64
 	swapTotal   uint64
-	diskPercent float64
-	diskUsed    uint64
-	diskTotal   uint64
 	netRecv     uint64
 	netSent     uint64
 	goroutines  int
 	hostUptime  uint64
 	loadAvg     [3]float64
+	cpuTempAvg  float64
+	cpuTempMax  float64
 }
 
 type projectTreeEntry struct {
@@ -94,12 +94,11 @@ type SysmonModel struct {
 	swapPercent      float64
 	swapUsed         uint64
 	swapTotal        uint64
-	diskPercent      float64
-	diskUsed         uint64
-	diskTotal        uint64
 	goroutines       int
 	hostUptime       uint64
 	loadAvg          [3]float64
+	cpuTempAvg       float64
+	cpuTempMax       float64
 	recvRate         float64
 	sentRate         float64
 	prevNetRecv      uint64
@@ -109,6 +108,7 @@ type SysmonModel struct {
 	projectTree      []projectTreeEntry
 	treeScrollOffset int
 	activeFiles      map[string]fileActivity
+	agentUsage       map[bus.AgentRole]bus.AgentUsage
 
 	width  int
 	height int
@@ -123,6 +123,7 @@ func NewSysmon() SysmonModel {
 		netSentHist: make([]float64, graphHistoryPoints(width)),
 		startTime:   time.Now(),
 		activeFiles: make(map[string]fileActivity),
+		agentUsage:  make(map[bus.AgentRole]bus.AgentUsage),
 		width:       width,
 		height:      20,
 	}
@@ -165,16 +166,6 @@ func sysmonTick() tea.Cmd {
 			swapTotal = swapStat.Total
 		}
 
-		// Disk.
-		diskStat, _ := disk.Usage("/")
-		var diskPct float64
-		var diskUsed, diskTotal uint64
-		if diskStat != nil {
-			diskPct = diskStat.UsedPercent
-			diskUsed = diskStat.Used
-			diskTotal = diskStat.Total
-		}
-
 		// Network.
 		counters, _ := net.IOCounters(false)
 		var recv, sent uint64
@@ -192,6 +183,8 @@ func sysmonTick() tea.Cmd {
 			loadAvg = [3]float64{avg.Load1, avg.Load5, avg.Load15}
 		}
 
+		cpuTempAvg, cpuTempMax := readCPUTemperature()
+
 		return sysmonTickMsg{
 			cpuPercent:  cpuPct,
 			perCore:     perCore,
@@ -203,14 +196,13 @@ func sysmonTick() tea.Cmd {
 			swapPercent: swapPct,
 			swapUsed:    swapUsed,
 			swapTotal:   swapTotal,
-			diskPercent: diskPct,
-			diskUsed:    diskUsed,
-			diskTotal:   diskTotal,
 			netRecv:     recv,
 			netSent:     sent,
 			goroutines:  runtime.NumGoroutine(),
 			hostUptime:  uptime,
 			loadAvg:     loadAvg,
+			cpuTempAvg:  cpuTempAvg,
+			cpuTempMax:  cpuTempMax,
 		}
 	})
 }
@@ -233,12 +225,11 @@ func (m SysmonModel) Update(msg tea.Msg) (SysmonModel, tea.Cmd) {
 	m.swapPercent = tick.swapPercent
 	m.swapUsed = tick.swapUsed
 	m.swapTotal = tick.swapTotal
-	m.diskPercent = tick.diskPercent
-	m.diskUsed = tick.diskUsed
-	m.diskTotal = tick.diskTotal
 	m.goroutines = tick.goroutines
 	m.hostUptime = tick.hostUptime
 	m.loadAvg = tick.loadAvg
+	m.cpuTempAvg = tick.cpuTempAvg
+	m.cpuTempMax = tick.cpuTempMax
 
 	// Calculate network rates (bytes/s).
 	if m.prevNetRecv > 0 {
@@ -285,6 +276,24 @@ func (m *SysmonModel) SetSize(w, h int) {
 	m.width = w
 	m.height = h
 	m.ensureGraphHistoryCapacity()
+}
+
+// totalTokens returns the sum of input + output tokens across all agents.
+func (m SysmonModel) totalTokens() int {
+	total := 0
+	for _, u := range m.agentUsage {
+		total += u.InputTokens + u.OutputTokens
+	}
+	return total
+}
+
+// AgentUsage exposes the per-agent token accounting collected from the bus.
+// The returned map is the live internal map — callers must treat it as
+// read-only. This is the single source of truth shared between the system
+// monitor panel and the end-of-run summary table, so the two views can
+// never disagree.
+func (m SysmonModel) AgentUsage() map[bus.AgentRole]bus.AgentUsage {
+	return m.agentUsage
 }
 
 func (m *SysmonModel) ensureGraphHistoryCapacity() {
@@ -348,6 +357,16 @@ func (m *SysmonModel) ObserveBusMessage(msg bus.Message) {
 		}
 	case bus.MsgResponse:
 		m.clearRoleActivity(msg.From)
+	case bus.MsgUsage:
+		if u, ok := msg.Payload.(bus.AgentUsage); ok {
+			existing := m.agentUsage[msg.From]
+			existing.InputTokens += u.InputTokens
+			existing.OutputTokens += u.OutputTokens
+			if u.Estimated {
+				existing.Estimated = true
+			}
+			m.agentUsage[msg.From] = existing
+		}
 	}
 	m.pruneFileActivity(now)
 }
@@ -375,6 +394,13 @@ func (m SysmonModel) View() string {
 
 	addLine := func(content string) {
 		vis := lipgloss.Width(content)
+		if vis > contentW {
+			// Defensive: never let a row overflow the right border. Truncate the
+			// visible width while preserving ANSI escape sequences so colors are
+			// preserved up to the cut point.
+			content = ansi.Truncate(content, contentW, "…")
+			vis = lipgloss.Width(content)
+		}
 		pad := contentW - vis
 		if pad < 0 {
 			pad = 0
@@ -413,6 +439,14 @@ func (m SysmonModel) View() string {
 	addLine(cpuStyle.Render(fmt.Sprintf(" %5.1f%%", m.cpuPercent)) + loadStr)
 	addGraphLines(renderBrailleGraph(m.cpuHistory, contentW, brailleGraphRows, cpuColor, 100.0))
 	addLine(" " + renderSegmentedBar(m.cpuPercent, contentW))
+
+	if m.cpuTempAvg > 0 {
+		tempColor := tempPercentColor(m.cpuTempMax)
+		tempStyle := lipgloss.NewStyle().Foreground(tempColor).Bold(true)
+		addLine(labelStyle.Render(" Temp: ") +
+			tempStyle.Render(fmt.Sprintf("%.0f°C", m.cpuTempAvg)) +
+			dimStyle.Render(fmt.Sprintf("  max %.0f°C", m.cpuTempMax)))
+	}
 
 	// Per-core compact view with dot history: two cores per line.
 	if len(m.perCore) > 0 {
@@ -461,19 +495,6 @@ func (m SysmonModel) View() string {
 		addLine(" " + renderGradientBar(m.swapPercent, contentW))
 	}
 
-	// ── DSK ──
-	addSection("DSK")
-	diskColor := percentColor(m.diskPercent)
-	diskStyle := lipgloss.NewStyle().Foreground(diskColor).Bold(true)
-	addLine(diskStyle.Render(fmt.Sprintf(" %5.1f%%", m.diskPercent)) +
-		dimStyle.Render(fmt.Sprintf("  %s / %s", formatBytes(m.diskUsed), formatBytes(m.diskTotal))))
-	addLine(" " + renderGradientBar(m.diskPercent, contentW))
-	freeBytes := uint64(0)
-	if m.diskTotal > m.diskUsed {
-		freeBytes = m.diskTotal - m.diskUsed
-	}
-	addLine(labelStyle.Render(" Free: ") + valueStyle.Render(formatBytes(freeBytes)))
-
 	// ── NET ──
 	addSection("NET")
 	netDnColor := lipgloss.Color("#73daca")
@@ -485,22 +506,50 @@ func (m SysmonModel) View() string {
 	addGraphLines(renderBrailleGraph(m.netRecvHist, contentW, brailleGraphRows, netDnColor, 0))
 	addGraphLines(renderBrailleGraph(m.netSentHist, contentW, brailleGraphRows, netUpColor, 0))
 
-	// ── TREE ──
-	// footer = sep(1) + session(1) + bottom-border(1) = 3 lines.
-	// treeSection = sep+header(2).
-	// maxRows = space remaining after current lines, tree header, and footer.
-	treeMaxRows := m.height - len(lines) - 2 - 3
-	if treeMaxRows < 3 {
-		treeMaxRows = 3
+	// ── TOKENS ──
+	if total := m.totalTokens(); total > 0 {
+		addSection("TOKENS")
+		totalColor := lipgloss.Color("#e0af68")
+		totalStyle := lipgloss.NewStyle().Foreground(totalColor).Bold(true)
+		addLine(labelStyle.Render(" Total: ") + totalStyle.Render(formatTokens(total)))
+		for _, role := range agentOrder {
+			u, ok := m.agentUsage[role]
+			if !ok || u.InputTokens+u.OutputTokens == 0 {
+				continue
+			}
+			roleStyle := lipgloss.NewStyle().Foreground(roleColor(string(role))).Bold(true)
+			est := ""
+			if u.Estimated {
+				est = "~"
+			}
+			// In/out only — matches the end-of-run report exactly, so the two
+			// views never disagree due to per-agent rounding of (in+out).
+			label := fmt.Sprintf(" %-11s", string(role))
+			addLine(roleStyle.Render(label) +
+				dimStyle.Render(fmt.Sprintf("↓%s ↑%s%s",
+					formatTokensCompact(u.InputTokens),
+					formatTokensCompact(u.OutputTokens),
+					est)))
+		}
 	}
+
+	// ── TREE ── (fixed height: always 10 content rows)
+	const treeFixedRows = 10
 	addSection("TREE")
-	treeLines := m.renderProjectTree(contentW, treeMaxRows)
+	treeLines := m.renderProjectTree(contentW, treeFixedRows)
+	rendered := 0
 	if len(treeLines) == 0 {
 		addLine(dimStyle.Render(" (no project)"))
+		rendered = 1
 	} else {
 		for _, line := range treeLines {
 			addLine(line)
 		}
+		rendered = len(treeLines)
+	}
+	// Pad to the fixed height so the panel layout doesn't shift with content size.
+	for i := rendered; i < treeFixedRows; i++ {
+		addLine("")
 	}
 
 	// ── Info footer ──
@@ -716,16 +765,15 @@ func (m SysmonModel) pathsForRole(role bus.AgentRole, payload any) []string {
 		return append([]string{}, p.Files...)
 	case agent.UXReviewerPayload:
 		return append([]string{}, p.Files...)
-	case agent.QAPayload:
-		return append([]string{}, p.Files...)
 	}
 
 	switch role {
 	case bus.RolePM:
 		return []string{".orchestrator/vision.md", ".orchestrator/moscow.md"}
+	case bus.RoleArchitect:
+		return []string{".orchestrator/architecture.md"}
 	case bus.RolePlanner:
 		return []string{
-			".orchestrator/architecture.md",
 			".orchestrator/implementation_plan.md",
 			".orchestrator/prompts.md",
 		}
@@ -1086,6 +1134,21 @@ func percentColor(pct float64) lipgloss.Color {
 	}
 }
 
+// tempPercentColor maps a temperature in °C to a status color.
+// Thresholds match typical CPU thermal zones: green <60, orange <75, gold <90, red ≥90.
+func tempPercentColor(tempC float64) lipgloss.Color {
+	switch {
+	case tempC >= 90:
+		return lipgloss.Color("#f7768e")
+	case tempC >= 75:
+		return lipgloss.Color("#e0af68")
+	case tempC >= 60:
+		return lipgloss.Color("#ff9e64")
+	default:
+		return lipgloss.Color("#9ece6a")
+	}
+}
+
 // formatBytes formats bytes into human-readable form.
 func formatBytes(b uint64) string {
 	const (
@@ -1140,4 +1203,50 @@ func formatHostUptime(secs uint64) string {
 	default:
 		return fmt.Sprintf("up %dm", mins)
 	}
+}
+
+// readCPUTemperature returns (average, max) CPU/SoC temperature in °C.
+// Returns (0, 0) when no usable sensor data is available — common when the
+// process lacks SMC access (macOS without root) or no thermal_zone exists.
+// On Apple Silicon, PMU* sensors are filtered to focus on CPU/SoC dies.
+func readCPUTemperature() (float64, float64) {
+	stats, err := sensors.SensorsTemperatures()
+	if err != nil || len(stats) == 0 {
+		return 0, 0
+	}
+	var sum float64
+	var count int
+	var peak float64
+	for _, s := range stats {
+		if s.Temperature <= 0 || s.Temperature > 150 {
+			continue
+		}
+		if !isCPUTempSensor(s.SensorKey) {
+			continue
+		}
+		sum += s.Temperature
+		count++
+		if s.Temperature > peak {
+			peak = s.Temperature
+		}
+	}
+	if count == 0 {
+		return 0, 0
+	}
+	return sum / float64(count), peak
+}
+
+func isCPUTempSensor(key string) bool {
+	lower := strings.ToLower(key)
+	switch {
+	case strings.HasPrefix(lower, "pmu tdie"), strings.HasPrefix(lower, "pmu2 tdie"):
+		return true // Apple Silicon CPU/GPU dies
+	case strings.HasPrefix(lower, "coretemp"), strings.HasPrefix(lower, "k10temp"):
+		return true // Linux Intel/AMD CPU
+	case strings.HasPrefix(lower, "cpu_thermal"), strings.Contains(lower, "package"):
+		return true // generic CPU package
+	case strings.Contains(lower, "tctl"), strings.Contains(lower, "tdie"):
+		return true // AMD ryzen
+	}
+	return false
 }

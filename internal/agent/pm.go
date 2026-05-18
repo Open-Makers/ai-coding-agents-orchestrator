@@ -2,8 +2,12 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -517,10 +521,33 @@ type ExecutionPlan struct {
 	CoderInstructions string `json:"coder_instructions"`
 }
 
+// SubTask is one decomposed unit of work that becomes a Beads issue and a
+// single coder pass. `Key` is a local identifier (e.g. "T1") used to express
+// ordering between sub-tasks via DependsOn before they are persisted as beads.
+type SubTask struct {
+	Key         string   `json:"key"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Priority    int      `json:"priority"`
+	DependsOn   []string `json:"depends_on,omitempty"`
+}
+
 // NegotiateTask conducts a multi-turn conversation to formalize a TaskSpec.
 // PM emits questions via bus; human responses arrive through humanCh.
 // When PM is satisfied, it emits the final TaskSpec.
+//
+// Negotiation results are cached on disk keyed by sha256(initial input +
+// project context). When the same input is replayed (e.g. rerunning the
+// orchestrator with an unchanged task description) the cached TaskSpec is
+// returned without invoking the LLM. Cache is invalidated automatically when
+// either the user input or the project context changes by a single byte.
 func (a *PMAgent) NegotiateTask(ctx context.Context, input, projectCtx string, humanCh <-chan string) (TaskSpec, error) {
+	cacheKey := negotiateCacheKey(input, projectCtx)
+	if spec, ok := a.loadCachedTaskSpec(cacheKey); ok {
+		a.emit(bus.MsgEvent, fmt.Sprintf("reusing cached task spec (key=%s)", cacheKey[:8]))
+		return spec, nil
+	}
+
 	systemPrompt := fmt.Sprintf(prompts.MustLoad("pm-negotiate"), projectCtx)
 
 	messages := []runner.ConvMessage{}
@@ -560,6 +587,7 @@ func (a *PMAgent) NegotiateTask(ctx context.Context, input, projectCtx string, h
 
 		// Check if PM produced a TaskSpec.
 		if spec, ok := parseTaskSpec(output); ok {
+			a.storeCachedTaskSpec(cacheKey, spec)
 			return spec, nil
 		}
 
@@ -569,6 +597,7 @@ func (a *PMAgent) NegotiateTask(ctx context.Context, input, projectCtx string, h
 				return TaskSpec{}, fmt.Errorf("pm negotiate force taskspec: %w", err)
 			}
 			if ok {
+				a.storeCachedTaskSpec(cacheKey, spec)
 				return spec, nil
 			}
 		}
@@ -590,6 +619,63 @@ func (a *PMAgent) NegotiateTask(ctx context.Context, input, projectCtx string, h
 		case <-ctx.Done():
 			return TaskSpec{}, ctx.Err()
 		}
+	}
+}
+
+// taskSpecCacheDir is the workspace subdirectory holding cached negotiations.
+const taskSpecCacheDir = "taskspec_cache"
+
+// negotiateCacheKey returns a deterministic cache key for a negotiation
+// input + project context pair. Caller-provided inputs are hashed together
+// so any change in either invalidates the cache automatically.
+func negotiateCacheKey(input, projectCtx string) string {
+	h := sha256.New()
+	h.Write([]byte(strings.TrimSpace(input)))
+	h.Write([]byte{0})
+	h.Write([]byte(strings.TrimSpace(projectCtx)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// loadCachedTaskSpec returns the cached TaskSpec for the given key, if any.
+// Cache misses or read errors are treated as "no cache" — the negotiation
+// then runs as usual.
+func (a *PMAgent) loadCachedTaskSpec(key string) (TaskSpec, bool) {
+	if a.ws.Dir == "" {
+		return TaskSpec{}, false
+	}
+	path := filepath.Join(a.ws.Dir, taskSpecCacheDir, key+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return TaskSpec{}, false
+	}
+	var spec TaskSpec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return TaskSpec{}, false
+	}
+	if strings.TrimSpace(spec.Title) == "" {
+		return TaskSpec{}, false
+	}
+	return spec, true
+}
+
+// storeCachedTaskSpec persists a TaskSpec under the cache key. Failures are
+// logged via the bus but never propagated — caching is a best-effort
+// optimisation and must not break the negotiation flow.
+func (a *PMAgent) storeCachedTaskSpec(key string, spec TaskSpec) {
+	if a.ws.Dir == "" {
+		return
+	}
+	dir := filepath.Join(a.ws.Dir, taskSpecCacheDir)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		a.emit(bus.MsgEvent, fmt.Sprintf("warning: taskspec cache dir: %v", err))
+		return
+	}
+	data, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, key+".json"), data, 0o600); err != nil {
+		a.emit(bus.MsgEvent, fmt.Sprintf("warning: taskspec cache write: %v", err))
 	}
 }
 
@@ -706,6 +792,164 @@ func (a *PMAgent) PlanTask(ctx context.Context, spec TaskSpec, projectCtx string
 	}
 
 	return parseExecutionPlan(output), nil
+}
+
+// DecomposeTask asks the PM to break the approved TaskSpec into ordered,
+// dependency-aware sub-tasks. Each returned sub-task becomes a Beads issue and
+// drives one coder pass downstream. `architecture` is optional approved-design
+// context (empty for surgical changes that skip the architect step).
+func (a *PMAgent) DecomposeTask(ctx context.Context, spec TaskSpec, architecture, projectCtx string, brownfield bool) ([]SubTask, error) {
+	specText := buildDecomposeSpecText(spec, architecture, brownfield)
+	userContent := fmt.Sprintf(prompts.MustLoad("pm-decompose"), specText, projectCtx)
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: "You are a Project Manager decomposing a task into dependency-ordered sub-tasks.",
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pm decompose: runner: %w", err)
+	}
+
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return nil, fmt.Errorf("pm decompose: stream: %w", err)
+	}
+
+	tasks, err := parseSubTasks(output)
+	if err != nil {
+		return nil, fmt.Errorf("pm decompose: %w", err)
+	}
+	if len(tasks) == 0 {
+		return nil, fmt.Errorf("pm decompose: no sub-tasks produced")
+	}
+	return tasks, nil
+}
+
+// buildDecomposeSpecText renders a compact, human-readable view of the spec
+// (plus optional approved architecture) for the decomposition prompt.
+func buildDecomposeSpecText(spec TaskSpec, architecture string, brownfield bool) string {
+	var sb strings.Builder
+	_, _ = fmt.Fprintf(&sb, "Title: %s\nScope: %s\nBrownfield: %t\nDescription:\n%s\n",
+		spec.Title, spec.Scope, brownfield, spec.Description)
+	if len(spec.AcceptanceCriteria) > 0 {
+		sb.WriteString("Acceptance Criteria:\n")
+		for _, ac := range spec.AcceptanceCriteria {
+			sb.WriteString("- ")
+			sb.WriteString(ac)
+			sb.WriteString("\n")
+		}
+	}
+	if len(spec.Constraints) > 0 {
+		sb.WriteString("Constraints:\n")
+		for _, c := range spec.Constraints {
+			sb.WriteString("- ")
+			sb.WriteString(c)
+			sb.WriteString("\n")
+		}
+	}
+	if len(spec.FilesToModify) > 0 {
+		sb.WriteString("Files to modify:\n")
+		for _, f := range spec.FilesToModify {
+			sb.WriteString("- ")
+			sb.WriteString(f)
+			sb.WriteString("\n")
+		}
+	}
+	if strings.TrimSpace(architecture) != "" {
+		sb.WriteString("\nApproved Architecture:\n")
+		sb.WriteString(architecture)
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// parseSubTasks extracts the JSON sub-task array between the ===TASKS=== and
+// ===END=== markers emitted by the pm-decompose prompt. Lenient on surrounding
+// whitespace and on missing trailing markers. When the model omits the
+// ===TASKS=== marker entirely (e.g. emits the JSON array directly after the
+// TASKSPEC block), falls back to extracting the first top-level JSON array
+// found in the output.
+func parseSubTasks(output string) ([]SubTask, error) {
+	const startMarker = "===TASKS==="
+	const endMarker = "===END==="
+
+	var body string
+	if start := strings.Index(output, startMarker); start >= 0 {
+		body = output[start+len(startMarker):]
+		if end := strings.Index(body, endMarker); end >= 0 {
+			body = body[:end]
+		}
+	} else {
+		// Fallback: look for a bare top-level JSON array in the output.
+		// Some models drop the ===TASKS=== marker and emit the array
+		// directly after the TASKSPEC block.
+		extracted, ok := extractJSONArray(output)
+		if !ok {
+			return nil, fmt.Errorf("missing ===TASKS=== marker and no JSON array found in output")
+		}
+		body = extracted
+	}
+	body = strings.TrimSpace(body)
+
+	// Tolerate the model wrapping the array in a markdown code fence.
+	body = strings.TrimPrefix(body, "```json")
+	body = strings.TrimPrefix(body, "```")
+	body = strings.TrimSuffix(body, "```")
+	body = strings.TrimSpace(body)
+
+	var tasks []SubTask
+	if err := json.Unmarshal([]byte(body), &tasks); err != nil {
+		return nil, fmt.Errorf("invalid TASKS JSON: %w", err)
+	}
+	for i := range tasks {
+		if tasks[i].Priority == 0 {
+			tasks[i].Priority = 2
+		}
+	}
+	return tasks, nil
+}
+
+// extractJSONArray returns the substring spanning the first top-level JSON
+// array (`[ ... ]`) in s, respecting bracket nesting inside strings. Used as
+// a last-resort fallback for parseSubTasks when the start marker is missing.
+func extractJSONArray(s string) (string, bool) {
+	startIdx := strings.IndexByte(s, '[')
+	if startIdx < 0 {
+		return "", false
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for i := startIdx; i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if inString {
+			switch c {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return s[startIdx : i+1], true
+			}
+		}
+	}
+	return "", false
 }
 
 // parseTaskSpec extracts a TaskSpec from PM output. Returns (spec, true) if found.

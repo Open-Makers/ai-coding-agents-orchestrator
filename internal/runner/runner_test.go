@@ -61,6 +61,9 @@ var _ LLMRunner = OpenCodeRunner{}
 // Compile-time check: OllamaRunner implements LLMRunner.
 var _ LLMRunner = &OllamaRunner{}
 
+// Compile-time check: MLXRunner implements LLMRunner.
+var _ LLMRunner = &MLXRunner{}
+
 // Compile-time check: CodexRunner implements LLMRunner.
 var _ LLMRunner = CodexRunner{}
 

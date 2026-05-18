@@ -14,6 +14,7 @@ Commands to verify the fix, one per line.
 
 CRITICAL RULES:
 - Output ONLY files that need changes to fix the reported errors — do NOT re-output unchanged files
+- Re-outputting a file you did not need to modify is a BUG; an empty fix is preferable
 - Make the MINIMUM change needed to fix each failure
 - Do NOT reorganize, refactor, rename, or restructure code
 - Do NOT create new files with different paths — modify the EXISTING files
@@ -23,6 +24,8 @@ CRITICAL RULES:
 - If the error is in internal/core/game.go, fix internal/core/game.go — do NOT create a new file
 - Preserve ALL existing functionality that is NOT related to the reported failures
 - Each error/failure points to specific code — fix ONLY that code
+- Address one root cause per fix; if a reviewer raised multiple unrelated concerns,
+  fix the most blocking one and let the next iteration handle the rest
 
 %s
 

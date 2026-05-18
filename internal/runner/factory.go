@@ -10,8 +10,10 @@ import (
 
 // New creates an LLMRunner from agent config.
 // skillLoader may be nil — skills will be silently skipped.
-// promptLanguage controls response language (empty or "English" = no injection).
+// promptLanguage is accepted for backwards compatibility but ignored:
+// all agents always reply in English regardless of the user's language.
 func New(cfg config.AgentConfig, skillLoader *skills.Loader, promptLanguage string) (LLMRunner, error) {
+	_ = promptLanguage
 	var base LLMRunner
 	switch cfg.Runner {
 	case "opencode", "":
@@ -20,18 +22,24 @@ func New(cfg config.AgentConfig, skillLoader *skills.Loader, promptLanguage stri
 	case "ollama":
 		base = NewOllamaRunner(cfg.Model)
 
+	case "mlx":
+		base = NewMLXRunner(cfg.Model)
+
 	case "claude":
 		base = ClaudeRunner{Model: cfg.Model}
 
 	case "codex":
 		base = CodexRunner{Model: cfg.Model}
 
+	case "copilot":
+		base = CopilotRunner{Model: cfg.Model}
+
 	default:
-		return nil, fmt.Errorf("runner: unknown runner %q (supported: opencode, claude, ollama, codex)", cfg.Runner)
+		return nil, fmt.Errorf("runner: unknown runner %q (supported: opencode, claude, ollama, mlx, codex, copilot)", cfg.Runner)
 	}
 
-	if skillLoader != nil || (promptLanguage != "" && promptLanguage != "English") {
-		base = &SkillRunner{inner: base, loader: skillLoader, promptLanguage: promptLanguage}
+	if skillLoader != nil {
+		base = &SkillRunner{inner: base, loader: skillLoader}
 	}
 
 	// Wrap cloud runners with token budget enforcement when configured.
@@ -42,18 +50,15 @@ func New(cfg config.AgentConfig, skillLoader *skills.Loader, promptLanguage stri
 	return base, nil
 }
 
-// SkillRunner wraps an LLMRunner and injects skill content and language
-// instructions into system prompts.
+// SkillRunner wraps an LLMRunner and injects skill content into system
+// prompts. Agent responses are always English; the user-language directive
+// has been removed to keep agent output uniform across locales.
 type SkillRunner struct {
-	inner          LLMRunner
-	loader         *skills.Loader
-	promptLanguage string
+	inner  LLMRunner
+	loader *skills.Loader
 }
 
 func (r *SkillRunner) Complete(ctx context.Context, req CompletionRequest) (<-chan Token, error) {
-	if r.promptLanguage != "" && r.promptLanguage != "English" {
-		req.SystemPrompt = fmt.Sprintf("IMPORTANT: You MUST write ALL responses in %s. Do not use any other language.\n\n", r.promptLanguage) + req.SystemPrompt
-	}
 	req.SystemPrompt = ResolveSkills(req.SystemPrompt, req.Skills, r.loader)
 	return r.inner.Complete(ctx, req)
 }
@@ -64,6 +69,8 @@ func (r *SkillRunner) Complete(ctx context.Context, req CompletionRequest) (<-ch
 func IsLocalRunner(cfg config.AgentConfig) bool {
 	switch cfg.Runner {
 	case "ollama":
+		return true
+	case "mlx":
 		return true
 	case "opencode", "":
 		return cfg.Model == "" || !contains(cfg.Model, "/")

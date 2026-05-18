@@ -155,12 +155,20 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 	}
 
 	// Initial code generation must produce at least one file.
-	// If none found, retry once with a format-correction prompt so small models
-	// that output raw code without path/fence markers get a second chance.
+	// Two failure modes are recovered with different retry prompts:
+	//   1. Model emitted source code but skipped file-block markers → reformat retry.
+	//   2. Model claimed "no changes required" without implementing the sub-task
+	//      (common hallucination: it runs `go build && go test`, sees green, and
+	//      concludes the work is done — but green tests don't prove the requested
+	//      feature exists) → push back and demand actual implementation.
 	if _, isInitial := msg.Payload.(CoderPayload); isInitial && len(written) == 0 {
-		written, totalUsage, err = a.retryFormatCorrection(ctx, r, mdl, systemPrompt, fullOutput, totalUsage)
+		if isNoChangesDeclared(sections["CHANGES"]) {
+			written, totalUsage, err = a.retryDemandImplementation(ctx, r, mdl, systemPrompt, userContent, totalUsage)
+		} else {
+			written, totalUsage, err = a.retryFormatCorrection(ctx, r, mdl, systemPrompt, fullOutput, totalUsage)
+		}
 		if err != nil {
-			return bus.Message{}, fmt.Errorf("coder: format retry: %w", err)
+			return bus.Message{}, fmt.Errorf("coder: retry: %w", err)
 		}
 		if len(written) == 0 {
 			return bus.Message{}, fmt.Errorf("coder: no file blocks found in initial code generation output (raw output saved to %s)", artifacts.RawCoderOutputFile)
@@ -175,6 +183,31 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 	a.Bus.Publish(bus.NewMessage(bus.RoleCoder, "", bus.MsgEvent, "EventFilesWritten"))
 
 	return bus.NewMessage(bus.RoleCoder, "", bus.MsgResponse, CoderResult{Files: written}), nil
+}
+
+// isNoChangesDeclared reports whether the CHANGES section explicitly states
+// that no file modifications are needed (e.g. the codebase already satisfies
+// the stage requirements). Used to distinguish a legitimate no-op from a
+// formatting failure where the model emitted code without file blocks.
+func isNoChangesDeclared(changes string) bool {
+	c := strings.ToLower(strings.TrimSpace(changes))
+	if c == "" {
+		return false
+	}
+	phrases := []string{
+		"no changes required",
+		"no changes needed",
+		"no file changes",
+		"no changes necessary",
+		"no modifications required",
+		"no modifications needed",
+	}
+	for _, p := range phrases {
+		if strings.Contains(c, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // retryFormatCorrection sends the raw output back to the model and asks it to
@@ -194,6 +227,45 @@ func (a *CoderAgent) retryFormatCorrection(ctx context.Context, r runner.LLMRunn
 		SystemPrompt: systemPrompt,
 		Model:        mdl,
 		Messages:     []runner.ConvMessage{{Role: "user", Content: correctionPrompt}},
+	})
+	if err != nil {
+		return nil, prevUsage, err
+	}
+
+	written, retryOutput, retryUsage, err := a.streamAndWriteFiles(ch)
+	if err != nil {
+		return nil, prevUsage, err
+	}
+	_ = a.ws.WriteFile(artifacts.RawCoderOutputFile, []byte(retryOutput+"\n"))
+
+	total := runner.TokenUsage{
+		InputTokens:  prevUsage.InputTokens + retryUsage.InputTokens,
+		OutputTokens: prevUsage.OutputTokens + retryUsage.OutputTokens,
+	}
+	return written, total, nil
+}
+
+// retryDemandImplementation re-prompts the model after it claimed no changes
+// were needed. The original user prompt is replayed with a prefix that rejects
+// the "tests pass, nothing to do" shortcut: a green `go build && go test` does
+// not prove the requested feature exists — only file blocks do.
+func (a *CoderAgent) retryDemandImplementation(ctx context.Context, r runner.LLMRunner, mdl, systemPrompt, originalUserContent string, prevUsage runner.TokenUsage) ([]string, runner.TokenUsage, error) {
+	a.emitToken("\n[retrying: coder claimed no changes needed — demanding actual implementation]\n", false)
+
+	pushback := "You previously responded with \"no changes required\" without writing any files. " +
+		"That answer is REJECTED. A passing `go build` / `go test` does NOT prove the requested " +
+		"feature is implemented — it only proves the existing code compiles. You MUST produce " +
+		"file blocks that implement the work described below.\n\n" +
+		"If a file already exists and needs no edits, do not emit it. But you MUST emit at least " +
+		"one file block containing the source code that satisfies the task. Do NOT respond with " +
+		"explanations only. Do NOT claim the work is already done.\n\n" +
+		"Original task:\n\n" + originalUserContent
+
+	ch, err := r.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        mdl,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: pushback}},
 	})
 	if err != nil {
 		return nil, prevUsage, err
@@ -252,7 +324,11 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 				if currentPath != "" {
 					content := strings.Join(contentLines, "\n") + "\n"
 					if err := a.writeOneFile(currentPath, content); err != nil {
-						a.emitToken(fmt.Sprintf("error writing %s: %v\n", currentPath, err), false)
+						if errors.Is(err, errNoOpRewrite) {
+							a.emitToken(fmt.Sprintf("skipped no-op rewrite: %s\n", currentPath), false)
+						} else {
+							a.emitToken(fmt.Sprintf("error writing %s: %v\n", currentPath, err), false)
+						}
 					} else {
 						written = append(written, currentPath)
 						a.emitToken(fmt.Sprintf("wrote: %s\n", currentPath), false)
@@ -321,6 +397,9 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 }
 
 // writeOneFile writes a single file to disk under the project root.
+// Returns ("", nil) when the new content is byte-identical to what is already
+// on disk — that is treated as a no-op rewrite and silently skipped to avoid
+// inflating the "files changed" list during fix iterations.
 func (a *CoderAgent) writeOneFile(path, content string) error {
 	path = sanitizeFilePath(path, a.root)
 	if path == "" {
@@ -333,11 +412,19 @@ func (a *CoderAgent) writeOneFile(path, content string) error {
 		content = fixInvalidGoPackage(content)
 	}
 	target := filepath.Join(a.root, path)
+	if existing, err := os.ReadFile(target); err == nil && string(existing) == content {
+		return errNoOpRewrite
+	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 		return fmt.Errorf("mkdir for %s: %w", path, err)
 	}
 	return os.WriteFile(target, []byte(content), 0o600)
 }
+
+// errNoOpRewrite signals that a file write was suppressed because the content
+// was identical to the existing file. Used to short-circuit reporting in the
+// streaming writer without surfacing it as a real error to the user.
+var errNoOpRewrite = errors.New("no-op rewrite skipped")
 
 // findPathInRecent scans recent non-fence lines (newest first) for a file path.
 func findPathInRecent(lines []string) string {
@@ -441,11 +528,13 @@ Without it the file will NOT be saved. No descriptions, no prose — only file b
 	case CoderFixPayload:
 		changes, _ := a.ws.ReadFile(artifacts.ChangesFile)
 
-		// Build source context from actual files on disk.
-		sourceContext := a.buildSourceContext(payload.Files)
-
 		// Extract files mentioned in the failure for targeted fixing.
+		// They drive both the prompt hint and the seed-based context expansion
+		// (their imports + callers get pulled into the source context).
 		errorFiles := extractFilesFromErrors(payload.Failure)
+
+		sourceContext := a.buildSourceContextWithSeeds(payload.Files, errorFiles)
+
 		errorFileList := ""
 		if len(errorFiles) > 0 {
 			errorFileList = "\n\nFiles referenced in errors:\n- " + strings.Join(errorFiles, "\n- ")
@@ -465,39 +554,29 @@ Without it the file will NOT be saved. No descriptions, no prose — only file b
 // maxCoderSourceContext caps total source context size sent to the coder during fixes.
 const maxCoderSourceContext = 60000
 
+// maxCoderPerFileSize caps per-file size when rendering coder source context.
+// Larger than the review per-file budget — coders need full visibility into
+// the files they may modify.
+const maxCoderPerFileSize = 8000
+
 // buildSourceContext reads files from disk and formats them for the LLM prompt.
 // Applies size limits to prevent unbounded context growth in large projects.
+// Falls back to RawCoderOutputFile when no files are known (initial generation).
 func (a *CoderAgent) buildSourceContext(files []string) string {
-	if len(files) == 0 {
-		// Fallback to raw coder output if no file list available.
+	return a.buildSourceContextWithSeeds(files, nil)
+}
+
+// buildSourceContextWithSeeds is the seed-aware variant used by fix paths.
+// Seeds (e.g. files extracted from compiler/test errors) get prepended along
+// with their imports and callers of their primary exported symbol.
+func (a *CoderAgent) buildSourceContextWithSeeds(files, seeds []string) string {
+	if len(files) == 0 && len(seeds) == 0 {
+		// Fallback to raw coder output when nothing else is available
+		// (used during initial generation before any files are written).
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		return string(raw)
 	}
-	var sb strings.Builder
-	totalSize := 0
-	for _, path := range files {
-		if totalSize >= maxCoderSourceContext {
-			sb.WriteString("... (remaining files omitted to fit context budget)\n")
-			break
-		}
-		content, err := safefile.ReadFile(a.root, path)
-		if err != nil {
-			continue
-		}
-		// Skip files with binary content to avoid corrupting LLM context.
-		if isBinaryContent(content) {
-			continue
-		}
-		fileContent := string(content)
-		// Truncate very large individual files.
-		if len(fileContent) > 8000 {
-			fileContent = fileContent[:8000] + "\n... (truncated)"
-		}
-		entry := fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, fileContent)
-		sb.WriteString(entry)
-		totalSize += len(entry)
-	}
-	return sb.String()
+	return buildSourceContextSized(a.root, files, seeds, maxCoderSourceContext, maxCoderPerFileSize, 0)
 }
 
 // collectExistingSourceFiles walks the project root and returns relative paths
@@ -537,17 +616,18 @@ func isExistingSourceFile(path string) bool {
 	return sourceExts[ext]
 }
 
-// hardMaxBuildAttempts prevents infinite loops even when MaxFixAttempts is 0 (unlimited).
+// hardMaxBuildAttempts is a safety net against unbounded loops when errors keep
+// shifting just enough to dodge same-error detection.
 const hardMaxBuildAttempts = 50
 
-// maxRepeatedBuildErrors is the number of identical consecutive build errors
-// before the loop bails out — the LLM is stuck and won't self-correct.
-const maxRepeatedBuildErrors = 5
+// defaultSameErrorLimit is used when MaxFixAttempts is 0 (unlimited config).
+const defaultSameErrorLimit = 5
 
-// BuildAndFix compiles the project and iteratively fixes build errors.
-// When MaxFixAttempts is 0 (default), it keeps retrying until the build succeeds
-// (capped at hardMaxBuildAttempts). If the same error repeats
-// maxRepeatedBuildErrors times, it stops early to avoid infinite loops.
+// BuildAndFix compiles the project and iteratively fixes build/test errors.
+// MaxFixAttempts is the number of attempts allowed at the SAME error before
+// giving up — a different error resets the counter. This way the LLM gets the
+// configured number of tries to repair each distinct problem rather than burning
+// the budget across unrelated failures.
 // Returns the updated file list after all fixes.
 // Token usage across all fix iterations is accumulated and emitted at the end.
 func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string, error) {
@@ -560,24 +640,17 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 		return files, nil
 	}
 
-	maxAttempts := a.cfg.Project.MaxFixAttempts
-	unlimited := maxAttempts <= 0
-	if unlimited {
-		maxAttempts = hardMaxBuildAttempts
+	sameErrorLimit := a.cfg.Project.MaxFixAttempts
+	if sameErrorLimit <= 0 {
+		sameErrorLimit = defaultSameErrorLimit
 	}
 
 	prevBuildErr := ""
-	repeatCount := 0
+	sameErrorAttempt := 0
 	var totalUsage runner.TokenUsage
 	testContext := a.buildSourceContext(a.collectRelatedTestFiles(files))
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		if unlimited {
-			a.emitToken(fmt.Sprintf("validation check (%d)\n", attempt), false)
-		} else {
-			a.emitToken(fmt.Sprintf("validation check (%d/%d)\n", attempt, maxAttempts), false)
-		}
-
+	for total := 1; total <= hardMaxBuildAttempts; total++ {
 		failureKind := "build"
 		failureOutput := ""
 
@@ -606,35 +679,36 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 			return files, nil
 		}
 
-		a.emit(bus.MsgEvent, "fixing")
-		a.emitToken(fmt.Sprintf("%s failed:\n%s\n", failureKind, failureOutput), false)
-
-		// Detect repeated identical errors — LLM is stuck in a loop.
+		// Compare current failure with previous to track same-error attempts.
 		normalizedErr := normalizeBuildError(failureOutput)
 		if normalizedErr == prevBuildErr {
-			repeatCount++
+			sameErrorAttempt++
 		} else {
-			repeatCount = 1
+			sameErrorAttempt = 1
 			prevBuildErr = normalizedErr
 		}
-		if repeatCount >= maxRepeatedBuildErrors {
-			a.emitToken(fmt.Sprintf("same build error repeated %d times — aborting fix loop\n", repeatCount), false)
+
+		a.emit(bus.MsgEvent, "coder_fixer")
+		a.emitToken(fmt.Sprintf("validation check (%d/%d for this error)\n",
+			sameErrorAttempt, sameErrorLimit), false)
+		a.emitToken(fmt.Sprintf("%s failed:\n%s\n", failureKind, failureOutput), false)
+
+		if sameErrorAttempt >= sameErrorLimit {
+			a.emitToken(fmt.Sprintf("same %s error repeated %d times — aborting fix loop\n",
+				failureKind, sameErrorAttempt), false)
 			// Attempt auto-repair for known patterns before giving up.
 			if autoFixed := a.autoFixKnownBuildErrors(failureOutput, files); autoFixed {
 				a.emitToken("applied automatic fixes for known error patterns, retrying…\n", false)
-				repeatCount = 0
+				sameErrorAttempt = 0
 				prevBuildErr = ""
 				continue
 			}
 			a.emitUsage(totalUsage)
-			return files, BuildFixStuckError{RepeatCount: repeatCount}
+			return files, BuildFixStuckError{RepeatCount: sameErrorAttempt}
 		}
 
-		if attempt == maxAttempts {
-			break
-		}
-
-		a.emitToken(fmt.Sprintf("fixing %s issues (attempt %d)…\n", failureKind, attempt), false)
+		a.emitToken(fmt.Sprintf("fixing %s issues (attempt %d/%d)…\n",
+			failureKind, sameErrorAttempt, sameErrorLimit), false)
 
 		// Extract files mentioned in errors to focus the fix.
 		errorFiles := extractFilesFromErrors(failureOutput)
@@ -643,7 +717,7 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 			errorFileList = "\n\nFiles with errors:\n- " + strings.Join(errorFiles, "\n- ")
 		}
 
-		sourceContext := a.buildSourceContext(files)
+		sourceContext := a.buildSourceContextWithSeeds(files, errorFiles)
 		readOnlyTests := ""
 		if testContext != "" {
 			readOnlyTests = "\n\nRead-only test files (DO NOT MODIFY):\n" + testContext
@@ -673,7 +747,7 @@ func (a *CoderAgent) BuildAndFix(ctx context.Context, files []string) ([]string,
 	}
 
 	a.emitUsage(totalUsage)
-	return files, fmt.Errorf("project still does not compile after %d attempts", maxAttempts)
+	return files, fmt.Errorf("project still does not compile after %d attempts", hardMaxBuildAttempts)
 }
 
 // extractFilesFromErrors parses build/test error output and returns unique
@@ -840,7 +914,7 @@ func (a *CoderAgent) testCmds() []string {
 func (a *CoderAgent) defaultTestCmds() []string {
 	switch a.detectLanguage() {
 	case "go":
-		return []string{"go test ./..."}
+		return []string{"go test -count=1 ./..."}
 	case "node", "javascript", "typescript":
 		return []string{"npm test"}
 	case "python":

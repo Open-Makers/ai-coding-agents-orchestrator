@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -17,8 +16,6 @@ type StatusBarModel struct {
 	stageInfo     string // e.g. "Stage 2/5: Must Have — Auth"
 	runner        string
 	model         string
-	agentUsage    map[bus.AgentRole]bus.AgentUsage
-	totalTokens   int // cached sum of input+output across all agents
 	width         int
 	scrollOffset  int       // marquee scroll position for stageInfo
 	codingStarted time.Time // timestamp of first coder handoff for elapsed timer
@@ -46,17 +43,6 @@ func (m StatusBarModel) WithRunnerModel(r, mdl string) StatusBarModel {
 	return m
 }
 
-// WithAgentUsage updates the per-agent usage map and recomputes the total token count.
-func (m StatusBarModel) WithAgentUsage(usage map[bus.AgentRole]bus.AgentUsage) StatusBarModel {
-	m.agentUsage = usage
-	total := 0
-	for _, u := range usage {
-		total += u.InputTokens + u.OutputTokens
-	}
-	m.totalTokens = total
-	return m
-}
-
 // AdvanceScroll moves the marquee scroll position forward by one.
 func (m StatusBarModel) AdvanceScroll() StatusBarModel {
 	m.scrollOffset++
@@ -72,6 +58,19 @@ func formatTokens(tokens int) string {
 		return fmt.Sprintf("%.1fk tok", float64(tokens)/1_000)
 	default:
 		return fmt.Sprintf("%d tok", tokens)
+	}
+}
+
+// formatTokensCompact is formatTokens without the " tok" suffix, used in
+// space-constrained panels where the unit is implied by the section title.
+func formatTokensCompact(tokens int) string {
+	switch {
+	case tokens >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
+	case tokens >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(tokens)/1_000)
+	default:
+		return fmt.Sprintf("%d", tokens)
 	}
 }
 
@@ -148,9 +147,6 @@ func (m StatusBarModel) View() string {
 			info += "/" + m.model
 		}
 		suffix += "  " + styleStatusKey.Render(info)
-	}
-	if m.totalTokens > 0 {
-		suffix += "  " + styleStatusKey.Render("⚡ "+formatTokens(m.totalTokens))
 	}
 	if !m.codingStarted.IsZero() {
 		elapsed := time.Since(m.codingStarted).Round(time.Second)

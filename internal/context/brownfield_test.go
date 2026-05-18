@@ -91,7 +91,7 @@ func TestRankSourceFiles(t *testing.T) {
 		"config/config.go",
 	}
 
-	ranked := rankSourceFiles(files)
+	ranked := rankSourceFiles("", files, nil)
 
 	if len(ranked) == 0 {
 		t.Fatal("expected ranked files, got none")

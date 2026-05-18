@@ -1,6 +1,11 @@
 package agent
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestFixInvalidGoPackage(t *testing.T) {
 	tests := []struct {
@@ -110,5 +115,69 @@ func TestExtractFilesFromErrors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCoderBuildSourceContextWithSeeds_ExpandsImports(t *testing.T) {
+	dir := t.TempDir()
+	mustWrite := func(rel, content string) {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustWrite("go.mod", "module example.com/s\n\ngo 1.22\n")
+	mustWrite("internal/foo/foo.go", "package foo\n\nfunc Helper() string { return \"hi\" }\n")
+	mustWrite("internal/bar/bar.go", "package bar\n\nimport \"example.com/s/internal/foo\"\n\nfunc Use() string { return foo.Helper() }\n")
+	mustWrite("unrelated/x.go", "package unrelated\n\nfunc X() {}\n")
+
+	a := &CoderAgent{root: dir}
+
+	// Seed = file referenced in error output. Importers and imports of
+	// the seed must end up in the rendered context, before unrelated files.
+	out := a.buildSourceContextWithSeeds(
+		[]string{"unrelated/x.go"},
+		[]string{"internal/bar/bar.go"},
+	)
+
+	barIdx := strings.Index(out, "internal/bar/bar.go")
+	fooIdx := strings.Index(out, "internal/foo/foo.go")
+	unrIdx := strings.Index(out, "unrelated/x.go")
+	if barIdx < 0 || fooIdx < 0 || unrIdx < 0 {
+		t.Fatalf("missing one of the expected paths in output:\n%s", out)
+	}
+	if barIdx >= fooIdx || fooIdx >= unrIdx {
+		t.Errorf("expected order seed → import → unrelated, got bar=%d foo=%d unr=%d",
+			barIdx, fooIdx, unrIdx)
+	}
+}
+
+func TestWriteOneFile_NoOpRewriteSkipped(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "pkg", "x.go")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	original := "package x\n\nfunc Foo() {}\n"
+	if err := os.WriteFile(target, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &CoderAgent{root: root}
+	err := a.writeOneFile("pkg/x.go", original)
+	if err != errNoOpRewrite {
+		t.Fatalf("expected errNoOpRewrite for identical content, got %v", err)
+	}
+
+	// Modified content must still be written.
+	if err := a.writeOneFile("pkg/x.go", "package x\n\nfunc Foo() { _ = 1 }\n"); err != nil {
+		t.Fatalf("unexpected error on real change: %v", err)
+	}
+	out, _ := os.ReadFile(target)
+	if !strings.Contains(string(out), "_ = 1") {
+		t.Errorf("expected real change persisted, got %q", string(out))
 	}
 }

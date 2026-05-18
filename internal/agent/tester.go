@@ -25,6 +25,17 @@ type TesterPayload struct {
 	StageName      string
 }
 
+// TesterUpdatePayload asks the tester to update existing test files to match
+// the current production contract. Used by the quality gate when a reviewer
+// flags the tests-vs-implementation disagreement and the coder is forbidden
+// from writing _test.go files itself.
+type TesterUpdatePayload struct {
+	Failure        string
+	Files          []string // production source files (read-only context)
+	TestFiles      []string // existing test files the tester may modify
+	ProjectContext string
+}
+
 // TestReport is the structured result written to test_report.json.
 type TestReport struct {
 	Success  bool              `json:"success"`
@@ -65,6 +76,66 @@ func (a *TesterAgent) GenerateTests(ctx context.Context, payload TesterPayload) 
 		return nil
 	}
 	return a.generateTests(ctx, payload)
+}
+
+// UpdateTests rewrites existing test files so they match the latest
+// production contract. Returns the list of test files that were updated.
+//
+// The tester is the sole owner of *_test.go files (the coder is blocked from
+// writing them by writeOneFile). Without this method, every reviewer-driven
+// contract change would either fail the build silently or burn fix attempts.
+func (a *TesterAgent) UpdateTests(ctx context.Context, payload TesterUpdatePayload) ([]string, error) {
+	if len(payload.TestFiles) == 0 || strings.TrimSpace(payload.Failure) == "" {
+		return nil, nil
+	}
+
+	systemPrompt := prompts.MustLoad("tester-update")
+	if strings.TrimSpace(payload.ProjectContext) != "" {
+		systemPrompt = fmt.Sprintf("%s\n\nProject context:\n%s", systemPrompt, payload.ProjectContext)
+	}
+
+	var b strings.Builder
+	_, _ = fmt.Fprintf(&b, "Failure / reviewer feedback:\n%s\n\n", payload.Failure)
+
+	if len(payload.Files) > 0 {
+		b.WriteString("Production source files (READ-ONLY — source of truth):\n\n")
+		for _, p := range payload.Files {
+			if strings.HasSuffix(p, "_test.go") {
+				continue
+			}
+			content, err := safefile.ReadFile(a.root, p)
+			if err != nil {
+				continue
+			}
+			_, _ = fmt.Fprintf(&b, "**%s**\n```\n%s\n```\n\n", p, string(content))
+		}
+	}
+
+	b.WriteString("Existing test files (UPDATE THESE):\n\n")
+	for _, p := range payload.TestFiles {
+		content, err := safefile.ReadFile(a.root, p)
+		if err != nil {
+			continue
+		}
+		_, _ = fmt.Fprintf(&b, "**%s**\n```\n%s\n```\n\n", p, string(content))
+	}
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: b.String()}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tester update: runner: %w", err)
+	}
+
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return nil, fmt.Errorf("tester update: stream: %w", err)
+	}
+
+	return a.writeTestBlocks(output), nil
 }
 
 func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error) {
@@ -191,18 +262,29 @@ func (a *TesterAgent) generateTests(ctx context.Context, payload TesterPayload) 
 
 	testFiles := a.writeTestBlocks(output)
 	if len(testFiles) == 0 {
+		a.emitToken("tester produced 0 test files — saving raw output for inspection\n", false)
+		if err := a.ws.WriteFile(artifacts.TesterRawOutputFile, []byte(output)); err != nil {
+			a.emitToken(fmt.Sprintf("warning: failed to save tester raw output: %v\n", err), false)
+		} else {
+			a.emitToken(fmt.Sprintf("raw tester output saved to %s\n", artifacts.TesterRawOutputFile), false)
+		}
 		return nil
 	}
-
+	a.emitToken(fmt.Sprintf("tester wrote %d test file(s)\n", len(testFiles)), false)
 	return nil
 }
 
 // writeTestBlocks extracts file blocks from LLM output and writes them to disk.
-// Returns the list of written file paths.
+// Returns the list of written file paths. Non-test paths are rejected so a
+// confused tester cannot overwrite production source files.
 func (a *TesterAgent) writeTestBlocks(output string) []string {
 	blocks := ExtractFileBlocks(output)
 	var written []string
 	for _, f := range blocks {
+		if !strings.HasSuffix(f.Path, "_test.go") {
+			a.emitToken(fmt.Sprintf("warning: refusing non-test path from tester: %s\n", f.Path), false)
+			continue
+		}
 		target := filepath.Join(a.root, f.Path)
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			a.emitToken(fmt.Sprintf("warning: mkdir for test %s: %v\n", f.Path, err), false)
@@ -287,7 +369,7 @@ func (a *TesterAgent) fallbackTestCmds() []string {
 	lang := a.detectLanguage()
 	switch lang {
 	case "go":
-		return []string{"go build ./...", "go test ./..."}
+		return []string{"go build ./...", "go test -count=1 ./..."}
 	case "node", "javascript", "typescript":
 		return []string{"npm test"}
 	case "python":

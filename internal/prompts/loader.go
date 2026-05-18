@@ -36,6 +36,11 @@ func SetOverrideDir(dir string) {
 	defaultLoader.mu.Unlock()
 }
 
+// SetUserLanguage is retained as a no-op for backwards compatibility. The
+// project policy is that all agents reply exclusively in English regardless
+// of the configured user language.
+func SetUserLanguage(_ string) {}
+
 // Load returns the content of a prompt template by name.
 // It checks project-level overrides first, then falls back to embedded.
 func (l *Loader) Load(name string) (string, error) {
@@ -102,7 +107,7 @@ func (l *Loader) Available() []string {
 
 // agentPromptMap maps agent roles to their primary prompt template names.
 var agentPromptMap = map[string][]string{
-	"pm":          {"pm-system", "pm-negotiate", "pm-plan-task"},
+	"pm":          {"pm-system", "pm-negotiate", "pm-plan-task", "pm-decompose"},
 	"planner":     {"planner-system"},
 	"coder":       {"coder-initial", "coder-fix", "coder-build-fix"},
 	"coder_fixer": {"coder-fix", "coder-build-fix"},
@@ -110,7 +115,6 @@ var agentPromptMap = map[string][]string{
 	"reviewer":    {"reviewer-system"},
 	"ux_reviewer": {"ux-reviewer-system"},
 	"security":    {"security-system"},
-	"qa":          {"qa-system"},
 }
 
 // PromptsForRole returns the prompt template names used by a given agent role.

@@ -38,6 +38,7 @@ var crt = themeAmber
 // Role colors — each agent gets a distinct accent while keeping CRT aesthetics.
 var roleColors = map[string]lipgloss.Color{
 	"pm":          lipgloss.Color("#e0af68"), // gold — project manager
+	"architect":   lipgloss.Color("#2ac3de"), // cyan — software architect
 	"planner":     lipgloss.Color("#7aa2f7"), // soft blue
 	"coder":       lipgloss.Color("#9ece6a"), // green
 	"coder_fixer": lipgloss.Color("#73b34d"), // darker green — fixer variant
@@ -45,7 +46,6 @@ var roleColors = map[string]lipgloss.Color{
 	"reviewer":    lipgloss.Color("#f7768e"), // coral pink
 	"ux_reviewer": lipgloss.Color("#ff9e64"), // orange
 	"security":    lipgloss.Color("#e0af68"), // gold
-	"qa":          lipgloss.Color("#2ac3de"), // cyan
 	"pr":          lipgloss.Color("#73daca"), // teal
 	"system":      crt.dim,
 }
@@ -60,8 +60,9 @@ func roleColor(role string) lipgloss.Color {
 // pipelineColors maps pipeline step labels to distinct colors for the phase bar.
 var pipelineColors = map[string]lipgloss.Color{
 	"PM":           roleColors["pm"],
+	"ARCHITECT":    roleColors["architect"],
+	"ARCHITECTURE": roleColors["architect"],
 	"PLAN":         roleColors["planner"],
-	"ARCHITECTURE": roleColors["planner"],
 	"PROMPTS":      roleColors["planner"],
 	"CODE":         roleColors["coder"],
 	"CODING":       roleColors["coder"],
@@ -73,7 +74,6 @@ var pipelineColors = map[string]lipgloss.Color{
 	"UX_REVIEWING": roleColors["ux_reviewer"],
 	"SEC":          roleColors["security"],
 	"SECURITY":     roleColors["security"],
-	"QA":           roleColors["qa"],
 	"FIXING":       lipgloss.Color("#ff9e64"), // orange — fix cycle
 	"DONE":         lipgloss.Color("#73daca"),
 }

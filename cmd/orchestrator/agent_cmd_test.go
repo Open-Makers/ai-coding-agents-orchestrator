@@ -28,7 +28,7 @@ func TestVisibleInAgentPane(t *testing.T) {
 		{
 			name: "hides broadcast system message",
 			role: bus.RoleCoder,
-			msg:  bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, "planning"),
+			msg:  bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, "planner"),
 			want: false,
 		},
 		{
