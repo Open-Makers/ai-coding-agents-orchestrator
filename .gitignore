@@ -36,3 +36,14 @@ bin
 orchestrator
 
 /tmp/
+
+# Orchestrator memory cache (SQLite index; memory/*.md files are committed)
+.orchestrator/memory.db
+.orchestrator/memory.db-journal
+.orchestrator/memory.db-wal
+.orchestrator/memory.db-shm
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

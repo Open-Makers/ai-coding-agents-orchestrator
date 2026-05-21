@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ai_coding_agents_orchestrator",
+  "project_id": "eb6f7d99-61a4-452e-ba9a-e8ba844d3de8"
+}
