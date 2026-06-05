@@ -16,6 +16,7 @@ import (
 type Chunk struct {
 	Kind      string // "function", "method", "type", "var", "const", "file"
 	Name      string // identifier (may be "" for "file" kind)
+	Recv      string // receiver type name for methods (e.g. "Foo"), else ""
 	Exported  bool   // true if the identifier is exported (Go convention)
 	StartLine int
 	EndLine   int
@@ -67,7 +68,7 @@ func wholeFile(content []byte) Chunk {
 
 func chunkGo(path string, content []byte) ([]Chunk, error) {
 	fset := token.NewFileSet()
-	parsed, err := parser.ParseFile(fset, path, content, parser.SkipObjectResolution)
+	parsed, err := parser.ParseFile(fset, path, content, parser.SkipObjectResolution|parser.ParseComments)
 	if err != nil {
 		// Unparseable Go — caller gets a single whole-file chunk to fall back on.
 		return []Chunk{wholeFile(content)}, nil
@@ -76,6 +77,11 @@ func chunkGo(path string, content []byte) ([]Chunk, error) {
 	var chunks []Chunk
 	for _, decl := range parsed.Decls {
 		startPos := fset.Position(decl.Pos())
+		// Start the chunk at the doc comment so a declaration's contract travels
+		// with it (and is not stranded in the file header).
+		if doc := declDoc(decl); doc != nil {
+			startPos = fset.Position(doc.Pos())
+		}
 		endPos := fset.Position(decl.End())
 		body := substringByOffset(content, startPos.Offset, endPos.Offset)
 
@@ -83,8 +89,14 @@ func chunkGo(path string, content []byte) ([]Chunk, error) {
 		if kind == "" {
 			continue
 		}
+		recv := ""
+		if kind == "method" {
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				recv = recvTypeName(fn.Recv)
+			}
+		}
 		chunks = append(chunks, Chunk{
-			Kind: kind, Name: name, Exported: isExported(name),
+			Kind: kind, Name: name, Recv: recv, Exported: isExported(name),
 			StartLine: startPos.Line, EndLine: endPos.Line, Body: body,
 		})
 	}
@@ -93,6 +105,18 @@ func chunkGo(path string, content []byte) ([]Chunk, error) {
 		return []Chunk{wholeFile(content)}, nil
 	}
 	return chunks, nil
+}
+
+// declDoc returns the doc comment group attached to a top-level declaration,
+// or nil when there is none.
+func declDoc(decl ast.Decl) *ast.CommentGroup {
+	switch d := decl.(type) {
+	case *ast.FuncDecl:
+		return d.Doc
+	case *ast.GenDecl:
+		return d.Doc
+	}
+	return nil
 }
 
 func classifyGoDecl(decl ast.Decl) (kind, name string) {
@@ -147,6 +171,30 @@ func substringByOffset(src []byte, start, end int) string {
 		return ""
 	}
 	return string(src[start:end])
+}
+
+// recvTypeName returns the base type name of a method receiver, unwrapping
+// pointer and generic type parameters (e.g. *Foo, Foo[T] → "Foo"). Returns ""
+// when the receiver type cannot be reduced to a single identifier.
+func recvTypeName(fl *ast.FieldList) string {
+	if fl == nil || len(fl.List) == 0 {
+		return ""
+	}
+	expr := fl.List[0].Type
+	for {
+		switch e := expr.(type) {
+		case *ast.StarExpr:
+			expr = e.X
+		case *ast.IndexExpr:
+			expr = e.X
+		case *ast.IndexListExpr:
+			expr = e.X
+		case *ast.Ident:
+			return e.Name
+		default:
+			return ""
+		}
+	}
 }
 
 func isExported(name string) bool {

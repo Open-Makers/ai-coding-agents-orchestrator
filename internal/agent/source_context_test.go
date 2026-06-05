@@ -155,6 +155,121 @@ func TestExpandWithGraph_NoSeeds_AllFiles(t *testing.T) {
 	}
 }
 
+func TestRenderSymbolChunks_SelectsNamedAndEnclosingType(t *testing.T) {
+	src := `package svc
+
+import "fmt"
+
+type Server struct {
+	port int
+}
+
+func (s *Server) Start() error { return nil }
+
+func (s *Server) Stop() error { return nil }
+
+func Unrelated() { fmt.Println("x") }
+
+func Helper() string { return "h" }
+`
+	out, omitted := renderSymbolChunks("svc.go", []byte(src), []string{"Start"}, 100000)
+	if omitted {
+		t.Error("did not expect budget omission")
+	}
+	// Header (package + import) is present.
+	if !strings.Contains(out, "package svc") || !strings.Contains(out, `import "fmt"`) {
+		t.Errorf("expected package/import header in output:\n%s", out)
+	}
+	// Selected method present.
+	if !strings.Contains(out, "func (s *Server) Start()") {
+		t.Errorf("expected Start method:\n%s", out)
+	}
+	// Enclosing type pulled in.
+	if !strings.Contains(out, "type Server struct") {
+		t.Errorf("expected enclosing Server type:\n%s", out)
+	}
+	// Unrelated declarations excluded.
+	if strings.Contains(out, "func Unrelated()") || strings.Contains(out, "func Helper()") {
+		t.Errorf("did not expect unrelated decls:\n%s", out)
+	}
+	if strings.Contains(out, "func (s *Server) Stop()") {
+		t.Errorf("did not expect unselected Stop method:\n%s", out)
+	}
+}
+
+func TestRenderSymbolChunks_TypeIncludesMethods(t *testing.T) {
+	src := `package svc
+
+type Server struct{ port int }
+
+func (s *Server) Start() error { return nil }
+
+func Other() {}
+`
+	out, _ := renderSymbolChunks("svc.go", []byte(src), []string{"Server"}, 100000)
+	if !strings.Contains(out, "type Server struct") {
+		t.Errorf("expected Server type:\n%s", out)
+	}
+	if !strings.Contains(out, "func (s *Server) Start()") {
+		t.Errorf("expected Server's method when type requested:\n%s", out)
+	}
+	if strings.Contains(out, "func Other()") {
+		t.Errorf("did not expect unrelated Other:\n%s", out)
+	}
+}
+
+func TestRenderSymbolChunks_NoMatchFallsBackToWholeFile(t *testing.T) {
+	src := "package svc\n\nfunc A() {}\n\nfunc B() {}\n"
+	out, _ := renderSymbolChunks("svc.go", []byte(src), []string{"DoesNotExist"}, 100000)
+	if !strings.Contains(out, "func A()") || !strings.Contains(out, "func B()") {
+		t.Errorf("expected whole-file fallback when no symbol matches:\n%s", out)
+	}
+}
+
+func TestBuildScopedSourceContext_ScopesTargetedFile(t *testing.T) {
+	dir := t.TempDir()
+	src := `package svc
+
+type Server struct{ port int }
+
+func (s *Server) Start() error { return nil }
+
+func HugeUnrelated() string { return "` + strings.Repeat("x", 5000) + `" }
+`
+	if err := os.WriteFile(filepath.Join(dir, "svc.go"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	targets := map[string][]string{"svc.go": {"Start"}}
+	out := buildScopedSourceContext("test", dir, []string{"svc.go"}, nil, targets, 100000, 100000, 0)
+
+	if !strings.Contains(out, "func (s *Server) Start()") {
+		t.Errorf("expected targeted symbol:\n%s", out)
+	}
+	if strings.Contains(out, "HugeUnrelated") {
+		t.Errorf("scoped render should exclude unrelated decl:\n%s", out)
+	}
+}
+
+func TestRenderSymbolChunks_KeepsDocCommentWithDecl(t *testing.T) {
+	src := `package svc
+
+// Config controls retries.
+type Config struct{ retries int }
+
+// Start begins serving.
+func Start() error { return nil }
+`
+	// Selecting only Start must carry Start's own doc comment and must NOT
+	// drag in Config's doc comment via the header.
+	out, _ := renderSymbolChunks("svc.go", []byte(src), []string{"Start"}, 100000)
+	if !strings.Contains(out, "// Start begins serving.") {
+		t.Errorf("expected Start's doc comment to travel with it:\n%s", out)
+	}
+	if strings.Contains(out, "Config controls retries") {
+		t.Errorf("did not expect Config's doc comment to leak into header:\n%s", out)
+	}
+}
+
 func TestBuildCompactSourceContext_ChunkBoundaries(t *testing.T) {
 	dir := t.TempDir()
 

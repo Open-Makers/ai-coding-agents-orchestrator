@@ -47,6 +47,17 @@ func buildCompactSourceContext(label, root string, files []string, maxTokens int
 // perFileBudget is applied per file via chunk-boundary truncation.
 // label identifies the calling agent for instrumentation.
 func buildSourceContextSized(label, root string, files, seeds []string, totalBudget, perFileBudget, maxTokens int) string {
+	return buildScopedSourceContext(label, root, files, seeds, nil, totalBudget, perFileBudget, maxTokens)
+}
+
+// buildScopedSourceContext renders source context with optional symbol-level
+// scoping. When targets[path] lists symbol names, only the matching
+// declarations (plus the file's package/import header and the enclosing type
+// of any selected method) are rendered for that file instead of the whole
+// file — cutting tokens while keeping the snippet self-describing. Files
+// without targets fall back to whole-file chunk-boundary truncation, so
+// existing callers (targets == nil) are unaffected.
+func buildScopedSourceContext(label, root string, files, seeds []string, targets map[string][]string, totalBudget, perFileBudget, maxTokens int) string {
 	if root == "" {
 		return ""
 	}
@@ -83,11 +94,23 @@ func buildSourceContextSized(label, root string, files, seeds []string, totalBud
 			continue
 		}
 
-		truncated := len(content) > perFileBudget
-		fileContent := truncateByChunks(path, content, perFileBudget)
+		var fileContent string
+		var truncated bool
+		targeted := len(targets[path]) > 0
+		if targeted {
+			fileContent, truncated = renderSymbolChunks(path, content, targets[path], perFileBudget)
+		} else {
+			truncated = len(content) > perFileBudget
+			fileContent = truncateByChunks(path, content, perFileBudget)
+		}
 
 		entry := fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, fileContent)
 		if totalSize+len(entry) > budget {
+			// Targeted (symbol-scoped) snippets must stay whole — never cut a
+			// scoped declaration mid-body, so skip the file rather than truncate.
+			if targeted {
+				continue
+			}
 			remaining := budget - totalSize
 			if remaining > 200 {
 				fileContent = tokenutil.Truncate(fileContent, remaining/4)
@@ -138,6 +161,109 @@ func logSourceContext(label string, considered, included, truncated, chars, toke
 		slog.Int("file", reasons[reasonFile]),
 		slog.Int64("build_ms", dur.Milliseconds()),
 	)
+}
+
+// renderSymbolChunks renders only the declarations in content that match the
+// requested symbol names, prefixed by the file's package/import header. For a
+// requested type, its methods are included; for a requested or included
+// method, its enclosing type declaration is included too. Selected chunks are
+// emitted in source order. Falls back to whole-file chunk truncation when the
+// file is unsupported/unparseable or no symbol matches. The bool return is
+// true when budget forced some matched chunks to be omitted.
+func renderSymbolChunks(path string, content []byte, symbols []string, budget int) (string, bool) {
+	chunks, err := chunker.Split(path, content)
+	if err != nil || len(chunks) <= 1 {
+		return truncateByChunks(path, content, budget), len(content) > budget
+	}
+
+	want := make(map[string]bool, len(symbols))
+	for _, s := range symbols {
+		if s != "" {
+			want[s] = true
+		}
+	}
+
+	selected := selectSymbolChunks(chunks, want)
+	if len(selected) == 0 {
+		return truncateByChunks(path, content, budget), len(content) > budget
+	}
+
+	var sb strings.Builder
+	header := fileHeader(content, chunks)
+	sb.WriteString(header)
+	used := len(header)
+	omitted := false
+	for _, c := range selected {
+		body := c.Body
+		if !strings.HasSuffix(body, "\n") {
+			body += "\n"
+		}
+		if used+len(body)+1 > budget && used > len(header) {
+			omitted = true
+			break
+		}
+		sb.WriteString(body)
+		sb.WriteString("\n")
+		used += len(body) + 1
+	}
+	if omitted {
+		sb.WriteString("// ... chunks omitted")
+	}
+	return sb.String(), omitted
+}
+
+// selectSymbolChunks returns the chunks matching want, in source order:
+// direct name matches, methods whose receiver type is wanted, and the
+// enclosing type declaration of any included method.
+func selectSymbolChunks(chunks []chunker.Chunk, want map[string]bool) []chunker.Chunk {
+	included := make([]bool, len(chunks))
+	wantType := make(map[string]bool)
+
+	for i, c := range chunks {
+		if c.Name != "" && want[c.Name] {
+			included[i] = true
+		}
+		if c.Kind == "method" && c.Recv != "" && want[c.Recv] {
+			included[i] = true
+		}
+	}
+	for i, c := range chunks {
+		if included[i] && c.Kind == "method" && c.Recv != "" {
+			wantType[c.Recv] = true
+		}
+	}
+	for i, c := range chunks {
+		if c.Kind == "type" && wantType[c.Name] {
+			included[i] = true
+		}
+	}
+
+	var out []chunker.Chunk
+	for i, c := range chunks {
+		if included[i] {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// fileHeader returns the bytes preceding the first declaration — the package
+// clause and import block — so a symbol-scoped snippet remains self-describing.
+func fileHeader(content []byte, chunks []chunker.Chunk) string {
+	minStart := 0
+	for _, c := range chunks {
+		if c.StartLine > 0 && (minStart == 0 || c.StartLine < minStart) {
+			minStart = c.StartLine
+		}
+	}
+	if minStart <= 1 {
+		return ""
+	}
+	lines := strings.SplitAfter(string(content), "\n")
+	if minStart-1 >= len(lines) {
+		return string(content)
+	}
+	return strings.Join(lines[:minStart-1], "")
 }
 
 // truncateByChunks returns a string that fits within budget by selecting whole
