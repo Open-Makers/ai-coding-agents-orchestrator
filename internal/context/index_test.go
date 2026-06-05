@@ -130,6 +130,46 @@ func TestCollect_SemanticIndexIncremental(t *testing.T) {
 	}
 }
 
+func TestCollect_SemanticSearchSymbols(t *testing.T) {
+	fake := &fakeEmbedder{}
+	dir, cfg := setupSemanticRepo(t, fake)
+
+	pc, err := Collect(dir, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := pc.SemanticSearchSymbols(context.Background(),
+		"func Authenticate(user, pass string) bool { return true }", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syms, ok := targets["auth/login.go"]
+	if !ok {
+		t.Fatalf("expected auth/login.go in symbol targets, got %v", targets)
+	}
+	found := false
+	for _, s := range syms {
+		if s == "Authenticate" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected Authenticate symbol for auth/login.go, got %v", syms)
+	}
+}
+
+func TestCollect_SemanticSearchSymbolsDisabled(t *testing.T) {
+	dir := initGitRepo(t)
+	pc, err := Collect(dir, config.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := pc.SemanticSearchSymbols(context.Background(), "anything", 5)
+	if err != nil || targets != nil {
+		t.Errorf("expected nil targets with index disabled, got %v %v", targets, err)
+	}
+}
+
 func TestCollect_SemanticSearchDisabled(t *testing.T) {
 	dir := initGitRepo(t)
 	pc, err := Collect(dir, config.Config{})

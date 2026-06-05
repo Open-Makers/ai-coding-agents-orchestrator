@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/chunker"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/embedder"
@@ -39,6 +40,41 @@ func (p ProjectContext) SemanticSearch(ctx context.Context, query string, k int)
 		out = append(out, h.Path)
 	}
 	return out, nil
+}
+
+// SemanticSearchSymbols returns the top-K chunk hits grouped as a
+// file → declaration-name map, suitable as symbol targets for scoped source
+// rendering. Whole-file chunks (empty name) are skipped because they carry no
+// symbol to scope to. Names are deduplicated per file while preserving
+// score order. Returns (nil, nil) when the index is disabled or unavailable.
+func (p ProjectContext) SemanticSearchSymbols(ctx context.Context, query string, k int) (map[string][]string, error) {
+	if p.idx == nil || k <= 0 {
+		return nil, nil
+	}
+	hits, err := p.idx.Search(ctx, query, k)
+	if err != nil {
+		return nil, err
+	}
+	targets := make(map[string][]string)
+	seen := make(map[string]map[string]bool)
+	for _, h := range hits {
+		name := strings.TrimSpace(h.ChunkName)
+		if name == "" {
+			continue
+		}
+		if seen[h.Path] == nil {
+			seen[h.Path] = make(map[string]bool)
+		}
+		if seen[h.Path][name] {
+			continue
+		}
+		seen[h.Path][name] = true
+		targets[h.Path] = append(targets[h.Path], name)
+	}
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	return targets, nil
 }
 
 // buildOrRefreshIndex creates/updates a persistent semantic index over the
