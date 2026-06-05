@@ -541,7 +541,7 @@ func computeSeedBoosts(root string, seeds []string) map[string]int {
 		if sym == "" {
 			continue
 		}
-		if callers, err := CallersOf(root, sym); err == nil {
+		if callers, err := CallersOf(root, seed, sym); err == nil {
 			for _, p := range callers {
 				if p == seed {
 					continue

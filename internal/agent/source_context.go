@@ -343,7 +343,7 @@ func expandWithGraph(root string, files, seeds []string) ([]string, map[string]s
 		if sym == "" {
 			continue
 		}
-		if callers, err := pkgcontext.CallersOf(root, sym); err == nil {
+		if callers, err := pkgcontext.CallersOf(root, s, sym); err == nil {
 			ordered = append(ordered, callers...)
 			record(callers, reasonCaller)
 		}
