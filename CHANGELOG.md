@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-06-05
+
+### Added
+- **Claude Opus 4.8**: added `claude-opus-4.8` to the curated GitHub Copilot
+  model list (`internal/runner/copilot.go`), available in project and global
+  setup.
+- **Project Memory**: new `internal/memory` package that persists project
+  facts and decisions as Markdown and indexes them in a local SQLite store
+  (FTS5/BM25) so new tasks automatically recall relevant past context.
+  Documented in `doc/memory.md`.
+- **Embedder backends**: new `internal/embedder` package with an
+  OpenAI-compatible backend (`openai.go`) and a local backend
+  (`cybertron.go`) for optional hybrid semantic memory search.
+- **TUI reference docs**: new `doc/tui.md` documenting every panel, status
+  indicator, keyboard shortcut, and token notation (`↓` input / `↑` output /
+  `~` estimated) with examples.
+- **Beads integration**: durable, multi-session task tracking (`.beads/`).
+
+### Changed
+- **PM/QA chat-based workflow**: replaced the rigid linear pipeline and the
+  standalone `internal/orchestrator` package with a conversational flow. The
+  **PM** agent now owns planning, decomposition, negotiation, and arbitration;
+  the **QA** agent owns test generation, test verification, and review.
+- **Agent roster** is now PM, Coder, QA, Security, and UX Reviewer. The
+  Planner, Architect, Reviewer, and standalone Tester agents were removed and
+  their responsibilities merged into PM and QA (deleted `architect.go`,
+  `planner.go`, `reviewer.go`, and the `internal/orchestrator` package).
+
+### Fixed
+- **Go module path prompt**: entering a module path no longer returns to the
+  main menu — it now resumes the originally chosen action (e.g. proceeds
+  straight into the PM chat for a new task) (`internal/tui/startup.go`).
+
 ## [0.5.0] - 2026-05-18
 
 ### Added
