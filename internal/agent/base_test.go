@@ -12,13 +12,13 @@ func TestBaseAgent_Emit(t *testing.T) {
 	b := bus.New()
 	ch := b.Subscribe()
 
-	a := NewBase(bus.RolePlanner, b)
+	a := NewBase(bus.RoleQA, b)
 	a.emit(bus.MsgEvent, "test-payload")
 
 	select {
 	case msg := <-ch:
-		if msg.From != bus.RolePlanner {
-			t.Errorf("expected from=planner, got %q", msg.From)
+		if msg.From != bus.RoleQA {
+			t.Errorf("expected from=qa, got %q", msg.From)
 		}
 		if msg.Type != bus.MsgEvent {
 			t.Errorf("expected type=event, got %q", msg.Type)
@@ -56,7 +56,7 @@ func TestBaseAgent_EmitUsage(t *testing.T) {
 	b := bus.New()
 	ch := b.Subscribe()
 
-	a := NewBase(bus.RolePlanner, b)
+	a := NewBase(bus.RoleQA, b)
 	a.emitUsage(runner.TokenUsage{InputTokens: 200, OutputTokens: 80, Estimated: false})
 
 	select {

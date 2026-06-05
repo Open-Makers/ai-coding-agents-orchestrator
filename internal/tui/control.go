@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"log/slog"
 	"strings"
 
@@ -10,7 +9,6 @@ import (
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
-	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
 
@@ -22,7 +20,6 @@ type ControlModel struct {
 	statusbar    StatusBarModel
 	agentConfigs map[string]config.AgentConfig // per-agent runner/model config
 	events       <-chan bus.Message
-	pipeline     *orchestrator.Pipeline
 	llm          runner.LLMRunner
 	root         string
 	wsPath       string
@@ -71,19 +68,13 @@ func (m ControlModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					slog.String("label", gateLabel(s)),
 				)
 				var reviseFn func(string, string) error
-				if m.pipeline != nil {
-					pipeline := m.pipeline
-					reviseFn = func(artifact, feedback string) error {
-						return pipeline.ReviseArtifact(context.Background(), artifact, feedback)
-					}
-				}
 				m.overlayArtifact = newArtifactViewer(m.wsPath, s, m.width, m.height-2, reviseFn)
 				m.overlay = overlayArtifact
 				m.statusbar = m.statusbar.WithState("⏸ " + gateLabel(s) + " — waiting for approval")
 			}
 		case bus.MsgEvent:
 			if s, ok := bm.Payload.(string); ok {
-				for _, ps := range []string{"planner", "coder", "tester", "reviewer", "coder_fixer", "done"} {
+				for _, ps := range []string{"planner", "coder", "qa_tests", "qa_review", "tester", "reviewer", "coder_fixer", "done"} {
 					if strings.Contains(s, ps) {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
@@ -125,18 +116,6 @@ func (m ControlModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "Q":
 			m.quitting = true
 			return m, tea.Quit
-		case "ctrl+a":
-			if m.pipeline != nil && m.gateArtifact != "" {
-				m.approvedGates[m.gateArtifact] = true
-				m.log.Info("gate approved (shortcut)",
-					slog.String("artifact", m.gateArtifact),
-				)
-				m.pipeline.Approve()
-				m.statusbar = m.statusbar.WithState("✓ " + gateLabel(m.gateArtifact) + " approved")
-				m.gateMsg = ""
-				m.gateArtifact = ""
-				m.overlay = overlayNone
-			}
 		case "ctrl+r":
 			picker := NewPicker(m.root, m.wsPath)
 			picker.SetSize(m.width, m.height)
@@ -157,9 +136,6 @@ func (m ControlModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.overlay = overlayChat
 			}
 		}
-
-	case pipelineReadyMsg:
-		m.pipeline = msg.p
 	}
 
 	return m, nil
@@ -215,26 +191,6 @@ func (m ControlModel) updateOverlay(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg := msg.(type) {
 		case artifactViewerClosedMsg:
 			m.overlay = overlayNone
-			if msg.regenerate && m.pipeline != nil {
-				m.log.Info("regeneration requested",
-					slog.String("artifact", m.gateArtifact),
-				)
-				m.pipeline.Regenerate()
-				m.gateMsg = ""
-				m.gateArtifact = ""
-				m.statusbar = m.statusbar.WithState("regenerating…")
-			} else if msg.approved && m.pipeline != nil {
-				approved := m.gateArtifact
-				m.approvedGates[approved] = true
-				m.log.Info("gate approved",
-					slog.String("artifact", approved),
-					slog.String("label", gateLabel(approved)),
-				)
-				m.pipeline.Approve()
-				m.gateMsg = ""
-				m.gateArtifact = ""
-				m.statusbar = m.statusbar.WithState("✓ " + gateLabel(approved) + " approved")
-			}
 		case tea.WindowSizeMsg:
 			msg.Height -= 2
 			var cmd tea.Cmd
@@ -361,7 +317,7 @@ func (m ControlModel) renderPhaseBar() string {
 		}
 	}
 
-	postPhases := []string{"coder", "tester", "reviewer", "coder_fixer", "done"}
+	postPhases := []string{"coder", "qa_tests", "qa_review", "ux_reviewer", "security", "done"}
 	for _, ph := range postPhases {
 		label := strings.ToUpper(ph)
 		if strings.Contains(m.phase, ph) {
@@ -378,8 +334,8 @@ func (m ControlModel) renderPhaseBar() string {
 func (m ControlModel) renderAgentSummary() string {
 	var cells []string
 	for _, role := range []bus.AgentRole{
-		bus.RoleArchitect, bus.RolePlanner, bus.RoleCoder, bus.RoleTester,
-		bus.RoleReviewer, bus.RoleSecurity,
+		bus.RolePM, bus.RoleCoder, bus.RoleQA,
+		bus.RoleUXReviewer, bus.RoleSecurity,
 	} {
 		cells = append(cells, renderAgentPill(role, m.agentStates[role]))
 	}

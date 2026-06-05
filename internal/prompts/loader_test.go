@@ -67,10 +67,9 @@ func TestPromptsForRole(t *testing.T) {
 		minCount int
 	}{
 		{"pm", 1},
-		{"planner", 1},
+		{"qa", 2},
 		{"coder", 3},
-		{"tester", 1},
-		{"reviewer", 1},
+
 		{"ux_reviewer", 1},
 		{"security", 1},
 	}

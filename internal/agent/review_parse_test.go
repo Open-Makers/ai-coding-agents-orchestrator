@@ -277,14 +277,14 @@ MUST FIX
 	}
 }
 
-func TestParseReview_Delegates(t *testing.T) {
+func TestParseQAReview_Delegates(t *testing.T) {
 	input := `MUST FIX
 - Issue one
 NICE TO HAVE
 - Suggestion
 Approve?: NO`
 
-	r := parseReview(input)
+	r := parseQAReview(input)
 	if r.Unparsed {
 		t.Error("expected Unparsed=false for valid format")
 	}
@@ -296,18 +296,18 @@ Approve?: NO`
 	}
 }
 
-func TestParseReview_UnparsedOutput(t *testing.T) {
+func TestParseQAReview_UnparsedOutput(t *testing.T) {
 	// Truly ambiguous text should remain unparsed.
 	input := "The architecture follows standard patterns. Let me describe the design choices."
-	r := parseReview(input)
+	r := parseQAReview(input)
 	if !r.Unparsed {
 		t.Error("expected Unparsed=true for ambiguous freeform text")
 	}
 }
 
-func TestParseReview_FreeformApproval(t *testing.T) {
+func TestParseQAReview_FreeformApproval(t *testing.T) {
 	input := "Everything looks fine, great job!"
-	r := parseReview(input)
+	r := parseQAReview(input)
 	if r.Unparsed {
 		t.Error("expected Unparsed=false for clearly positive text")
 	}

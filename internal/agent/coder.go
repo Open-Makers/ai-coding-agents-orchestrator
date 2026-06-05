@@ -325,6 +325,15 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 					content := strings.Join(contentLines, "\n") + "\n"
 					if err := a.writeOneFile(currentPath, content); err != nil {
 						if errors.Is(err, errNoOpRewrite) {
+							// A no-op rewrite means the model emitted a valid
+							// file block whose content happens to be identical
+							// to what's already on disk. The block was still
+							// correctly recognised — count it so the empty-
+							// output retry path is not triggered (otherwise
+							// the model retries, produces the same identical
+							// content, and the pipeline aborts with
+							// "no file blocks found").
+							written = append(written, currentPath)
 							a.emitToken(fmt.Sprintf("skipped no-op rewrite: %s\n", currentPath), false)
 						} else {
 							a.emitToken(fmt.Sprintf("error writing %s: %v\n", currentPath, err), false)

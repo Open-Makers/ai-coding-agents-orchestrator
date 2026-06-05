@@ -90,6 +90,7 @@ type ContextConfig struct {
 	AlwaysInclude   []string            `yaml:"always_include,omitempty"`
 	ExcludePatterns []string            `yaml:"exclude_patterns,omitempty"`
 	SemanticIndex   SemanticIndexConfig `yaml:"semantic_index,omitempty"`
+	Memory          MemoryConfig        `yaml:"memory,omitempty"`
 }
 
 // SemanticIndexConfig controls the optional embeddings-based file index.
@@ -100,6 +101,27 @@ type SemanticIndexConfig struct {
 	Model    string `yaml:"model,omitempty"`    // e.g. "nomic-embed-text"
 	BaseURL  string `yaml:"base_url,omitempty"` // optional override for embedder endpoint
 	TopK     int    `yaml:"top_k,omitempty"`    // default 20
+}
+
+// MemoryConfig controls OpenClaw-style persistent project memory.
+// Memory is stored as Markdown files under .orchestrator/memory and indexed
+// by SQLite FTS5/BM25. When UseEmbeddings is true an embedder backend
+// computes dense vectors for hybrid retrieval.
+type MemoryConfig struct {
+	Enabled         bool    `yaml:"enabled,omitempty"`           // default true
+	TopK            int     `yaml:"top_k,omitempty"`             // default 8
+	ChunkTokens     int     `yaml:"chunk_tokens,omitempty"`      // default 400
+	OverlapTokens   int     `yaml:"overlap_tokens,omitempty"`    // default 80
+	HybridAlpha     float64 `yaml:"hybrid_alpha,omitempty"`      // default 0.5; 1.0 = pure BM25
+	MaxRecallChars  int     `yaml:"max_recall_chars,omitempty"`  // default 6000
+	MaxPinnedChars  int     `yaml:"max_pinned_chars,omitempty"`  // default 4000
+	UseEmbeddings   bool    `yaml:"use_embeddings,omitempty"`    // default false
+	Embedder        string  `yaml:"embedder,omitempty"`          // "openai" | "ollama" | "cybertron"
+	EmbedderModel   string  `yaml:"embedder_model,omitempty"`    // default per backend
+	EmbedderBaseURL   string  `yaml:"embedder_base_url,omitempty"`   // for openai/ollama
+	EmbedderAPIKey    string  `yaml:"embedder_api_key,omitempty"`    // env var indirection acceptable
+	EmbedderModelsDir string  `yaml:"embedder_models_dir,omitempty"` // cybertron model cache; default ~/.orchestrator/cybertron-models
+	AutoPromote       bool    `yaml:"auto_promote,omitempty"`        // default true; promote decisions to MEMORY.md
 }
 
 type AgentConfig struct {
@@ -221,7 +243,56 @@ func loadFile(dir, filename string) (Config, error) {
 	return loaded, nil
 }
 
-// merge fills dst with non-zero values from src.
+// mergeMemory copies non-zero fields from src into dst. A few fields (Enabled,
+// UseEmbeddings, AutoPromote) are booleans, so the convention is "src=true
+// overrides", "src=false leaves dst untouched". To explicitly disable, set
+// the field at the level where you want it disabled and rely on layered load.
+func mergeMemory(dst *MemoryConfig, src MemoryConfig) {
+	if src.Enabled {
+		dst.Enabled = true
+	}
+	if src.TopK > 0 {
+		dst.TopK = src.TopK
+	}
+	if src.ChunkTokens > 0 {
+		dst.ChunkTokens = src.ChunkTokens
+	}
+	if src.OverlapTokens > 0 {
+		dst.OverlapTokens = src.OverlapTokens
+	}
+	if src.HybridAlpha > 0 {
+		dst.HybridAlpha = src.HybridAlpha
+	}
+	if src.MaxRecallChars > 0 {
+		dst.MaxRecallChars = src.MaxRecallChars
+	}
+	if src.MaxPinnedChars > 0 {
+		dst.MaxPinnedChars = src.MaxPinnedChars
+	}
+	if src.UseEmbeddings {
+		dst.UseEmbeddings = true
+	}
+	if src.Embedder != "" {
+		dst.Embedder = src.Embedder
+	}
+	if src.EmbedderModel != "" {
+		dst.EmbedderModel = src.EmbedderModel
+	}
+	if src.EmbedderBaseURL != "" {
+		dst.EmbedderBaseURL = src.EmbedderBaseURL
+	}
+	if src.EmbedderAPIKey != "" {
+		dst.EmbedderAPIKey = src.EmbedderAPIKey
+	}
+	if src.EmbedderModelsDir != "" {
+		dst.EmbedderModelsDir = src.EmbedderModelsDir
+	}
+	if src.AutoPromote {
+		dst.AutoPromote = true
+	}
+}
+
+
 func merge(dst *Config, src Config) {
 	if src.Project.Name != "" {
 		dst.Project.Name = src.Project.Name
@@ -268,6 +339,7 @@ func merge(dst *Config, src Config) {
 	if src.Project.Context.SemanticIndex.TopK > 0 {
 		dst.Project.Context.SemanticIndex.TopK = src.Project.Context.SemanticIndex.TopK
 	}
+	mergeMemory(&dst.Project.Context.Memory, src.Project.Context.Memory)
 	if src.PromptLanguage != "" {
 		dst.PromptLanguage = src.PromptLanguage
 	}

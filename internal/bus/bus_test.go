@@ -12,13 +12,13 @@ func TestPublishSubscribe(t *testing.T) {
 	b := New()
 	ch := b.Subscribe()
 
-	msg := NewMessage(RolePlanner, RoleCoder, MsgRequest, "hello")
+	msg := NewMessage(RoleQA, RoleCoder, MsgRequest, "hello")
 	b.Publish(msg)
 
 	select {
 	case got := <-ch:
-		if got.From != RolePlanner {
-			t.Errorf("expected from=planner, got %q", got.From)
+		if got.From != RoleQA {
+			t.Errorf("expected from=qa, got %q", got.From)
 		}
 		if got.Payload != "hello" {
 			t.Errorf("unexpected payload: %v", got.Payload)
@@ -82,7 +82,7 @@ func TestLogFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b.Publish(NewMessage(RolePlanner, "", MsgEvent, "logged"))
+	b.Publish(NewMessage(RoleQA, "", MsgEvent, "logged"))
 	b.Close()
 
 	fi, err := os.Stat(logPath)
@@ -98,7 +98,7 @@ func TestBus_UsageMessageType(t *testing.T) {
 	b := New()
 	ch := b.Subscribe()
 
-	b.Publish(NewMessage(RolePlanner, "", MsgUsage, AgentUsage{
+	b.Publish(NewMessage(RoleQA, "", MsgUsage, AgentUsage{
 		InputTokens:  100,
 		OutputTokens: 50,
 	}))

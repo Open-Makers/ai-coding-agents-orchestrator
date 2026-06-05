@@ -107,12 +107,10 @@ func (l *Loader) Available() []string {
 
 // agentPromptMap maps agent roles to their primary prompt template names.
 var agentPromptMap = map[string][]string{
-	"pm":          {"pm-system", "pm-negotiate", "pm-plan-task", "pm-decompose"},
-	"planner":     {"planner-system"},
+	"pm":          {"pm-system", "pm-negotiate", "pm-plan-task", "pm-decompose", "pm-arbitrate", "pm-arbitrate-all"},
 	"coder":       {"coder-initial", "coder-fix", "coder-build-fix"},
 	"coder_fixer": {"coder-fix", "coder-build-fix"},
-	"tester":      {"tester-generate"},
-	"reviewer":    {"reviewer-system"},
+	"qa":          {"qa-tests", "qa-verify-tests", "qa-review"},
 	"ux_reviewer": {"ux-reviewer-system"},
 	"security":    {"security-system"},
 }

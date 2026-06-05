@@ -1,17 +1,20 @@
 package context
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/chunker"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/embedder"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/index"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/memory"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
@@ -35,6 +38,10 @@ type ProjectContext struct {
 	ProjectType         string            // detected project type (go, node, rust, etc.)
 	TreeStructure       string            // directory tree summary
 	ProgrammingLanguage string            // explicit language setting from project config
+
+	// Memory holds OpenClaw-style recalled project memory. Populated by
+	// CollectMemory; SystemPromptFragment renders it.
+	Memory memory.Recalled
 
 	// idx is the optional semantic index (nil when disabled or unavailable).
 	idx index.Index
@@ -101,6 +108,70 @@ func Collect(root string, cfg config.Config) (ProjectContext, error) {
 	return pc, nil
 }
 
+// CollectMemory loads OpenClaw-style project memory: pinned MEMORY.md plus
+// search hits relevant to query (typically the task title or description).
+// Returns a zero Recalled if memory is disabled or unavailable; errors are
+// non-fatal and reported separately for logging.
+func CollectMemory(ctx context.Context, root string, cfg config.Config, query string) (memory.Recalled, error) {
+	mc := cfg.Project.Context.Memory
+	if !mc.Enabled {
+		return memory.Recalled{}, nil
+	}
+	ws, err := artifacts.EnsureWorkspace(root)
+	if err != nil {
+		return memory.Recalled{}, err
+	}
+	opts := memory.Options{
+		ChunkTokens:   mc.ChunkTokens,
+		OverlapTokens: mc.OverlapTokens,
+	}
+	if mc.UseEmbeddings {
+		if emb, eErr := memoryEmbedderFactory(mc); eErr == nil {
+			opts.Embedder = emb
+		}
+	}
+	mem, mErr := memory.OpenMemory(ctx, ws.MemoryDir(), ws.MemoryDBPath(), opts)
+	if mem == nil {
+		return memory.Recalled{}, mErr
+	}
+	defer func() { _ = mem.Close() }()
+
+	alpha := mc.HybridAlpha
+	if opts.Embedder == nil {
+		alpha = 1.0 // force pure BM25 if embedder unavailable
+	}
+	sopts := memory.SearchOptions{
+		K:           mc.TopK,
+		HybridAlpha: alpha,
+		MaxChars:    mc.MaxRecallChars,
+	}
+	r, rErr := mem.Recall(ctx, query, sopts, mc.MaxPinnedChars)
+	if mErr != nil {
+		// surface the reindex warning if recall itself succeeded
+		if rErr == nil {
+			return r, mErr
+		}
+	}
+	return r, rErr
+}
+
+// memoryEmbedderFactory is overridable in tests. It defers to the regular
+// embedder factory when MemoryConfig.UseEmbeddings is true. The mapping from
+// MemoryConfig to embedder.Embedder is intentionally simple and lives close
+// to the call site so adding a new backend touches one switch.
+var memoryEmbedderFactory = func(mc config.MemoryConfig) (embedder.Embedder, error) {
+	return embedder.NewMemoryEmbedder(mc)
+}
+
+// SetMemoryEmbedderFactory swaps the constructor used to build the embedder
+// for memory recall. Test-only.
+func SetMemoryEmbedderFactory(f func(config.MemoryConfig) (embedder.Embedder, error)) func(config.MemoryConfig) (embedder.Embedder, error) {
+	prev := memoryEmbedderFactory
+	memoryEmbedderFactory = f
+	return prev
+}
+
+
 // embedderFactory is overridable in tests to inject a fake embedder.
 var embedderFactory = func(cfg config.SemanticIndexConfig) (embedder.Embedder, error) {
 	return embedder.New(cfg)
@@ -140,6 +211,13 @@ func (p ProjectContext) SystemPromptFragment(profile ...ContextProfile) string {
 	}
 
 	var sb strings.Builder
+
+	// Project memory comes first: pinned facts and recalled fragments from
+	// previous tasks. Empty when memory is disabled or the project has no
+	// recorded history yet.
+	if frag := p.Memory.PromptFragment(); frag != "" {
+		sb.WriteString(frag)
+	}
 
 	sb.WriteString("## Repository Context\n\n")
 

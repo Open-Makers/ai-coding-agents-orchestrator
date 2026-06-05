@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
 
 func TestFixInvalidGoPackage(t *testing.T) {
@@ -180,4 +183,49 @@ func TestWriteOneFile_NoOpRewriteSkipped(t *testing.T) {
 	if !strings.Contains(string(out), "_ = 1") {
 		t.Errorf("expected real change persisted, got %q", string(out))
 	}
+}
+
+// TestStreamAndWriteFiles_NoOpCountsAsRecognised guards against a regression
+// where a coder run that reformatted files into proper file blocks (but did
+// not actually change byte content) was treated as "no file blocks found",
+// triggering a wasted retry that produced the same identical output and then
+// aborted the pipeline with `coder: no file blocks found in initial code
+// generation output`.
+//
+// A no-op rewrite must still count as a recognised file block so the empty-
+// output retry path does not fire.
+func TestStreamAndWriteFiles_NoOpCountsAsRecognised(t *testing.T) {
+root := t.TempDir()
+target := filepath.Join(root, "pkg", "x.go")
+if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+t.Fatal(err)
+}
+existing := "package x\n\nfunc Foo() {}\n"
+if err := os.WriteFile(target, []byte(existing), 0o644); err != nil {
+t.Fatal(err)
+}
+
+a := &CoderAgent{root: root, BaseAgent: NewBase("coder", bus.New())}
+
+ch := make(chan runner.Token, 16)
+for _, line := range []string{
+"**pkg/x.go**\n",
+"```go\n",
+"package x\n",
+"\n",
+"func Foo() {}\n",
+"```\n",
+} {
+ch <- runner.Token{Text: line}
+}
+ch <- runner.Token{Done: true}
+close(ch)
+
+written, _, _, err := a.streamAndWriteFiles(ch)
+if err != nil {
+t.Fatalf("streamAndWriteFiles: %v", err)
+}
+if len(written) != 1 || written[0] != "pkg/x.go" {
+t.Errorf("expected pkg/x.go recognised as no-op write, got written=%v", written)
+}
 }

@@ -25,11 +25,8 @@ import (
 
 var agentOrder = []bus.AgentRole{
 	bus.RolePM,
-	bus.RoleArchitect,
-	bus.RolePlanner,
 	bus.RoleCoder,
-	bus.RoleTester,
-	bus.RoleReviewer,
+	bus.RoleQA,
 	bus.RoleUXReviewer,
 	bus.RoleSecurity,
 }
@@ -122,7 +119,6 @@ type Model struct {
 	showSysmon       bool                          // toggle for sysmon visibility
 	agentConfigs     map[string]config.AgentConfig // per-agent runner/model config
 	events           <-chan bus.Message
-	pipeline         *orchestrator.Pipeline
 	cancelFunc       context.CancelFunc // cancels the pipeline context
 	llm              runner.LLMRunner
 	root             string
@@ -159,13 +155,8 @@ type Model struct {
 	overlayArtifact  ArtifactViewerModel
 	overlayNegotiate NegotiateModel
 
-	// taskRunner is used for the unified task flow (may be nil for legacy pipeline).
+	// taskRunner is used for the unified task flow and may be nil until ready.
 	taskRunner *orchestrator.TaskRunner
-}
-
-// PipelineReadyWithCancelMsg returns a tea.Msg with pipeline and cancel func.
-func PipelineReadyWithCancelMsg(p *orchestrator.Pipeline, cancel context.CancelFunc) tea.Msg {
-	return pipelineReadyMsg{p: p, cancel: cancel}
 }
 
 // ReturnToMenu returns true if the user chose to go back to the main menu
@@ -174,15 +165,11 @@ func (m Model) ReturnToMenu() bool {
 	return m.returnToMenu
 }
 
-// buildResumeFn picks the available runner (TaskRunner preferred over Pipeline)
-// and returns a closure that re-runs the coder's build-and-fix loop.
+// buildResumeFn returns a closure that re-runs the coder's build-and-fix loop.
 // Returns nil when no runner is available (nothing to resume).
 func (m Model) buildResumeFn() func(context.Context) error {
 	if tr := m.taskRunner; tr != nil {
 		return func(ctx context.Context) error { return tr.ResumeBuildFix(ctx) }
-	}
-	if p := m.pipeline; p != nil {
-		return func(ctx context.Context) error { return p.ResumeBuildFix(ctx) }
 	}
 	return nil
 }
@@ -196,9 +183,8 @@ func runResumeCmd(fn func(context.Context) error) tea.Cmd {
 }
 
 // New creates the root TUI model.
-// pipeline may be nil initially; send PipelineReadyWithCancelMsg once it is ready.
 // llm is used for the chat overlay (may be nil).
-func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPath string, llm runner.LLMRunner, cfg config.Config) Model {
+func New(events <-chan bus.Message, root, wsPath string, llm runner.LLMRunner, cfg config.Config) Model {
 	panels := make(map[bus.AgentRole]AgentPanelModel)
 	projectLang := resolveLanguageFromRoot(root, cfg)
 	for _, role := range agentOrder {
@@ -222,7 +208,6 @@ func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPat
 		showSysmon:    true,
 		agentConfigs:  cfg.Agents,
 		events:        events,
-		pipeline:      pipeline,
 		llm:           llm,
 		root:          root,
 		wsPath:        wsPath,
@@ -233,9 +218,9 @@ func New(events <-chan bus.Message, pipeline *orchestrator.Pipeline, root, wsPat
 	}
 }
 
-// runnerModelFromConfig extracts the runner name and model from the planner agent config.
+// runnerModelFromConfig extracts the runner name and model from the QA agent config.
 func runnerModelFromConfig(cfg config.Config) (string, string) {
-	if ac, ok := cfg.Agents["planner"]; ok {
+	if ac, ok := cfg.Agents["qa"]; ok {
 		r := ac.Runner
 		if r == "" {
 			r = "opencode"
@@ -308,12 +293,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.overlay = overlayNone
 				}
 				var reviseFn func(string, string) error
-				if m.pipeline != nil {
-					pipeline := m.pipeline
-					reviseFn = func(artifact, feedback string) error {
-						return pipeline.ReviseArtifact(context.Background(), artifact, feedback)
-					}
-				}
 				m.overlayArtifact = newArtifactViewer(m.wsPath, s, m.contentWidth(), m.height-2, reviseFn)
 				m.overlay = overlayArtifact
 				m.statusbar = m.statusbar.WithState("⏸ " + gateLabel(s) + " — waiting for approval")
@@ -339,15 +318,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					r, mdl := runnerModelForRole(m.agentConfigs, role)
 					m.statusbar = m.statusbar.WithRunnerModel(r, mdl)
 				}
-				for _, ps := range []string{"negotiating", "pm", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security", "done"} {
+				for _, ps := range []string{"negotiating", "pm", "planner", "coder", "coder_fixer", "qa_tests", "qa_review", "tester", "reviewer", "ux_reviewer", "security", "done"} {
 					if s == ps {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
 						if s == "negotiating" && m.overlay != overlayNegotiate {
 							sendFn := func(msg string) {
-								if m.pipeline != nil {
-									m.pipeline.SendHumanReply(msg)
-								}
 								if m.taskRunner != nil {
 									m.taskRunner.SendHumanReply(msg)
 								}
@@ -365,8 +341,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.overlay = overlayNone
 						}
 						// Start elapsed timer on first coding handoff.
-						if s == "coder" && m.pipeline != nil && m.statusbar.codingStarted.IsZero() {
-							codingStart := m.pipeline.CodingStarted()
+						if s == "coder" && m.taskRunner != nil && m.statusbar.codingStarted.IsZero() {
+							codingStart := m.taskRunner.CodingStarted()
 							if !codingStart.IsZero() {
 								m.statusbar = m.statusbar.WithCodingStarted(codingStart)
 							}
@@ -392,9 +368,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Open negotiate overlay if not already open.
 				if m.overlay != overlayNegotiate {
 					sendFn := func(msg string) {
-						if m.pipeline != nil {
-							m.pipeline.SendHumanReply(msg)
-						}
 						if m.taskRunner != nil {
 							m.taskRunner.SendHumanReply(msg)
 						}
@@ -536,12 +509,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.llm != nil {
 				systemPrompt := m.buildPMChatPrompt()
 				chat := NewChat(m.llm, systemPrompt)
-				if m.pipeline != nil {
-					pipeline := m.pipeline
-					chat = chat.WithReviseFn(func(artifact, feedback string) error {
-						return pipeline.ReviseArtifact(context.Background(), artifact, feedback)
-					})
-				}
 				chat.SetSize(m.contentWidth(), m.height)
 				m.overlayChat = chat
 				m.overlay = overlayChat
@@ -553,12 +520,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.panels[m.activeRole] = updated
 				cmds = append(cmds, cmd)
 			}
-		}
-
-	case pipelineReadyMsg:
-		m.pipeline = msg.p
-		if msg.cancel != nil {
-			m.cancelFunc = msg.cancel
 		}
 
 	case TaskRunnerReadyMsg:
@@ -863,7 +824,7 @@ func (m *Model) approveCurrentGate(source string) {
 	if m.gateArtifact == "" {
 		return
 	}
-	if m.pipeline == nil && m.taskRunner == nil {
+	if m.taskRunner == nil {
 		return
 	}
 
@@ -874,12 +835,7 @@ func (m *Model) approveCurrentGate(source string) {
 		slog.String("label", gateLabel(approved)),
 		slog.String("source", source),
 	)
-	if m.pipeline != nil {
-		m.pipeline.Approve()
-	}
-	if m.taskRunner != nil {
-		m.taskRunner.Approve()
-	}
+	m.taskRunner.Approve()
 	m.statusbar = m.statusbar.WithState("✓ " + gateLabel(approved) + " approved")
 	m.gateMsg = ""
 	m.gateArtifact = ""
@@ -890,19 +846,14 @@ func (m *Model) regenerateCurrentGate() {
 	if m.gateArtifact == "" {
 		return
 	}
-	if m.pipeline == nil && m.taskRunner == nil {
+	if m.taskRunner == nil {
 		return
 	}
 
 	m.log.Info("regeneration requested",
 		slog.String("artifact", m.gateArtifact),
 	)
-	if m.pipeline != nil {
-		m.pipeline.Regenerate()
-	}
-	if m.taskRunner != nil {
-		m.taskRunner.Regenerate()
-	}
+	m.taskRunner.Regenerate()
 	m.gateMsg = ""
 	m.gateArtifact = ""
 	m.statusbar = m.statusbar.WithState("regenerating…")
@@ -974,7 +925,7 @@ func (m Model) renderPhaseBar() string {
 	}
 
 	// Post-planning phases.
-	postPhases := []string{"coder", "tester", "reviewer", "ux_reviewer", "security", "done"}
+	postPhases := []string{"coder", "qa_tests", "qa_review", "ux_reviewer", "security", "done"}
 	for _, ph := range postPhases {
 		label := strings.ToUpper(ph)
 		isCodingActive := (ph == "coder" && strings.Contains(m.phase, "coder")) ||
@@ -1333,16 +1284,10 @@ func stateToRole(state string) bus.AgentRole {
 	switch state {
 	case "pm", "negotiating":
 		return bus.RolePM
-	case "architect":
-		return bus.RoleArchitect
-	case "planner":
-		return bus.RolePlanner
 	case "coder", "coder_fixer":
 		return bus.RoleCoder
-	case "tester":
-		return bus.RoleTester
-	case "reviewer":
-		return bus.RoleReviewer
+	case "qa_tests", "qa_review":
+		return bus.RoleQA
 	case "ux_reviewer":
 		return bus.RoleUXReviewer
 	case "security":

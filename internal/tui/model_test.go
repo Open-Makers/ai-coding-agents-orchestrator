@@ -13,10 +13,10 @@ import (
 
 func TestRunnerModelForRole_ExplicitConfig(t *testing.T) {
 	agents := map[string]config.AgentConfig{
-		"pm":       {Runner: "codex", Model: "gpt-5.4"},
-		"planner":  {Runner: "codex", Model: "gpt-5.4"},
-		"coder":    {Runner: "claude", Model: "sonnet"},
-		"tester":   {Runner: "codex", Model: "gpt-5.3-codex"},
+		"pm":    {Runner: "codex", Model: "gpt-5.4"},
+		"qa":    {Runner: "codex", Model: "gpt-5.4"},
+		"coder": {Runner: "claude", Model: "sonnet"},
+
 		"security": {Runner: "claude", Model: "opus"},
 	}
 
@@ -26,8 +26,8 @@ func TestRunnerModelForRole_ExplicitConfig(t *testing.T) {
 		expectedModel  string
 	}{
 		{bus.RoleCoder, "claude", "sonnet"},
-		{bus.RolePlanner, "codex", "gpt-5.4"},
-		{"tester", "codex", "gpt-5.3-codex"},
+		{bus.RoleQA, "codex", "gpt-5.4"},
+
 		{"security", "claude", "opus"},
 		{bus.RolePM, "codex", "gpt-5.4"},
 	}
@@ -47,13 +47,12 @@ func TestRunnerModelForRole_ExplicitConfig(t *testing.T) {
 
 func TestRunnerModelForRole_FallsBackToDefault(t *testing.T) {
 	agents := map[string]config.AgentConfig{
-		"pm":      {Runner: "codex", Model: "gpt-5"},
-		"planner": {Runner: "codex", Model: "gpt-5"},
-		"coder":   {Runner: "codex", Model: "gpt-5"},
+		"pm":    {Runner: "codex", Model: "gpt-5"},
+		"coder": {Runner: "codex", Model: "gpt-5"},
 	}
 
-	// "reviewer" not in config — should fall back to default (codex/gpt-5).
-	r, mdl := runnerModelForRole(agents, "reviewer")
+	// "qa" not in config — should fall back to default (codex/gpt-5).
+	r, mdl := runnerModelForRole(agents, "qa")
 	if r != "codex" || mdl != "gpt-5" {
 		t.Errorf("expected codex/gpt-5 fallback, got %s/%s", r, mdl)
 	}
@@ -61,9 +60,9 @@ func TestRunnerModelForRole_FallsBackToDefault(t *testing.T) {
 
 func TestRunnerModelForRole_PartialConfig_RunnerOnly(t *testing.T) {
 	agents := map[string]config.AgentConfig{
-		"pm":      {Runner: "codex", Model: "gpt-5"},
-		"planner": {Runner: "codex", Model: "gpt-5"},
-		"coder":   {Runner: "claude", Model: ""},
+		"pm":    {Runner: "codex", Model: "gpt-5"},
+		"qa":    {Runner: "codex", Model: "gpt-5"},
+		"coder": {Runner: "claude", Model: ""},
 	}
 
 	r, mdl := runnerModelForRole(agents, "coder")
@@ -77,9 +76,9 @@ func TestRunnerModelForRole_PartialConfig_RunnerOnly(t *testing.T) {
 
 func TestRunnerModelForRole_PartialConfig_ModelOnly(t *testing.T) {
 	agents := map[string]config.AgentConfig{
-		"pm":      {Runner: "codex", Model: "gpt-5"},
-		"planner": {Runner: "codex", Model: "gpt-5"},
-		"coder":   {Runner: "", Model: "sonnet"},
+		"pm":    {Runner: "codex", Model: "gpt-5"},
+		"qa":    {Runner: "codex", Model: "gpt-5"},
+		"coder": {Runner: "", Model: "sonnet"},
 	}
 
 	r, mdl := runnerModelForRole(agents, "coder")
@@ -93,9 +92,9 @@ func TestRunnerModelForRole_PartialConfig_ModelOnly(t *testing.T) {
 
 func TestRunnerModelForRole_EmptyAgentConfig(t *testing.T) {
 	agents := map[string]config.AgentConfig{
-		"pm":      {Runner: "codex", Model: "gpt-5"},
-		"planner": {Runner: "codex", Model: "gpt-5"},
-		"coder":   {Runner: "", Model: ""},
+		"pm":    {Runner: "codex", Model: "gpt-5"},
+		"qa":    {Runner: "codex", Model: "gpt-5"},
+		"coder": {Runner: "", Model: ""},
 	}
 
 	// Both empty — should use global default.
@@ -108,7 +107,7 @@ func TestRunnerModelForRole_EmptyAgentConfig(t *testing.T) {
 func TestRunnerModelFromConfig(t *testing.T) {
 	cfg := config.Config{
 		Agents: map[string]config.AgentConfig{
-			"planner": {Runner: "claude", Model: "opus"},
+			"qa": {Runner: "claude", Model: "opus"},
 		},
 	}
 
@@ -121,7 +120,7 @@ func TestRunnerModelFromConfig(t *testing.T) {
 func TestRunnerModelFromConfig_DefaultRunner(t *testing.T) {
 	cfg := config.Config{
 		Agents: map[string]config.AgentConfig{
-			"planner": {Runner: "", Model: "gpt-5"},
+			"qa": {Runner: "", Model: "gpt-5"},
 		},
 	}
 
@@ -131,7 +130,7 @@ func TestRunnerModelFromConfig_DefaultRunner(t *testing.T) {
 	}
 }
 
-func TestRunnerModelFromConfig_NoPlanner(t *testing.T) {
+func TestRunnerModelFromConfig_NoQA(t *testing.T) {
 	cfg := config.Config{
 		Agents: map[string]config.AgentConfig{
 			"coder": {Runner: "claude", Model: "sonnet"},
@@ -176,7 +175,7 @@ func TestStatusBar_StageInfo(t *testing.T) {
 }
 
 func TestModel_EscDuringPipelineOpensCancelConfirm(t *testing.T) {
-	m := New(nil, nil, "", "", nil, config.Config{})
+	m := New(nil, "", "", nil, config.Config{})
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
 	if cmd != nil {
@@ -196,7 +195,7 @@ func TestModel_EscDuringPipelineOpensCancelConfirm(t *testing.T) {
 }
 
 func TestModel_EscAfterPipelineReturnsToMenu(t *testing.T) {
-	m := New(nil, nil, "", "", nil, config.Config{})
+	m := New(nil, "", "", nil, config.Config{})
 	m.pipelineDone = true
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
@@ -214,7 +213,7 @@ func TestModel_EscAfterPipelineReturnsToMenu(t *testing.T) {
 }
 
 func TestModel_CtrlEIsNoopWithoutRunner(t *testing.T) {
-	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	m.pipelineDone = true
 	m.pipelineFailed = true
 	m.pipelineErr = "build fix stuck"
@@ -230,7 +229,7 @@ func TestModel_CtrlEIsNoopWithoutRunner(t *testing.T) {
 }
 
 func TestModel_NegotiateEscReturnsToMenuInTaskFlow(t *testing.T) {
-	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	m.overlay = overlayNegotiate
 	m.taskRunner = orchestrator.NewTaskRunner(nil, nil, config.Config{}, artifacts.Workspace{}, "")
 
@@ -255,7 +254,7 @@ func TestModel_NegotiateEscReturnsToMenuInTaskFlow(t *testing.T) {
 }
 
 func TestModel_NegotiateEscReturnsToMenuBeforePMStarts(t *testing.T) {
-	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	m.overlay = overlayNegotiate
 	m.phase = "negotiating"
 	m.overlayNegotiate = NewNegotiate(nil)
@@ -281,7 +280,7 @@ func TestModel_NegotiateEscReturnsToMenuBeforePMStarts(t *testing.T) {
 }
 
 func TestModel_NegotiateEscReturnsToMenuDuringPipelineNegotiation(t *testing.T) {
-	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	m.overlay = overlayNegotiate
 	m.phase = "negotiating"
 	m.overlayNegotiate = NewNegotiate(nil)
@@ -308,7 +307,7 @@ func TestModel_NegotiateEscReturnsToMenuDuringPipelineNegotiation(t *testing.T) 
 }
 
 func TestModel_CtrlAApprovesTaskRunnerGate(t *testing.T) {
-	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	tr := orchestrator.NewTaskRunner(nil, nil, config.Config{}, artifacts.Workspace{}, "")
 	m.taskRunner = tr
 	m.gateArtifact = "task_spec.json"
@@ -325,7 +324,7 @@ func TestModel_CtrlAApprovesTaskRunnerGate(t *testing.T) {
 }
 
 func TestModel_ArtifactViewerApproveUsesTaskRunner(t *testing.T) {
-	m := New(nil, nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
+	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	tr := orchestrator.NewTaskRunner(nil, nil, config.Config{}, artifacts.Workspace{}, "")
 	m.taskRunner = tr
 	m.overlay = overlayArtifact

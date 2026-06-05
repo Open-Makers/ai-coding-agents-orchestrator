@@ -56,6 +56,8 @@ func main() {
 		approveCmd(os.Args[2:])
 	case "clean":
 		cleanCmd(os.Args[2:])
+	case "memory":
+		memoryCmd(os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -76,7 +78,8 @@ func usage() {
 	  report                              Summarize last run artifacts
 	  monitor                             Open the control TUI against a running bus
 	  approve                             Create approval marker
-	  clean                               Remove .orchestrator workspace`)
+	  clean                               Remove .orchestrator workspace
+	  memory <subcommand>                 Inspect/manage project memory (show|search|reindex|add|stats)`)
 
 }
 
@@ -199,94 +202,12 @@ func runCmd(args []string) {
 		return
 	}
 
-	resolvedUI := resolveUIMode(*ui)
-
-	ctx := context.Background()
-
-	if resolvedUI == "plain" {
-		b := bus.New()
-		if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
-			slog.Warn("could not open bus log", slog.String("error", err.Error()))
-		}
-		defer b.Close()
-		agents := buildAgents(b, cfg, ws, root)
-		pipeline := orchestrator.NewPipeline(b, agents, cfg, ws, root)
-		events := b.Subscribe()
-		go plainLogger(events)
-		if err := pipeline.Run(ctx, *reqPath); err != nil {
-			fatal(err)
-		}
-		return
+	// Read requirements file and route through TaskRunner.
+	reqs, err := os.ReadFile(*reqPath)
+	if err != nil {
+		fatal(fmt.Errorf("read requirements: %w", err))
 	}
-
-	// TUI mode (default) — loop supports returning to main menu after pipeline.
-	for {
-		b := bus.New()
-		if err := b.SetLogPath(ws.Dir, "runlog.jsonl"); err != nil {
-			slog.Warn("could not open bus log", slog.String("error", err.Error()))
-		}
-		events := b.Subscribe()
-		wsPath := ws.Path("")
-		chatLLM := runner.OpenCodeRunner{}
-		tuiModel := tui.New(events, nil, root, wsPath, chatLLM, cfg)
-		p := tea.NewProgram(tuiModel, tea.WithAltScreen())
-
-		pipelineCtx, pipelineCancel := context.WithCancel(ctx)
-
-		go func() {
-			agents := buildAgents(b, cfg, ws, root)
-			pipeline := orchestrator.NewPipeline(b, agents, cfg, ws, root)
-			p.Send(tui.PipelineReadyWithCancelMsg(pipeline, pipelineCancel))
-			err := pipeline.Run(pipelineCtx, *reqPath)
-			if pipelineCtx.Err() != nil {
-				err = fmt.Errorf("pipeline cancelled by user")
-			}
-			p.Send(tui.PipelineDoneMsg{Err: err})
-		}()
-
-		result, err := p.Run()
-		b.Close()
-		if err != nil {
-			fatal(err)
-		}
-
-		// Check if user wants to return to main menu.
-		final, ok := result.(tui.Model)
-		if !ok || !final.ReturnToMenu() {
-			break
-		}
-
-		// Re-open the startup picker to choose new requirements.
-		startupResult, startupErr := tui.RunStartup(root, ws.Path(artifacts.RequirementsFile), cfg)
-		if startupErr != nil {
-			fatal(fmt.Errorf("picker: %w", startupErr))
-		}
-		cfg = startupResult.Cfg
-
-		// Refresh root if project changed.
-		newRoot, rootErr := os.Getwd()
-		if rootErr == nil && newRoot != root {
-			root = newRoot
-			if reloadedCfg, loadErr := config.Load(root); loadErr == nil {
-				cfg = reloadedCfg
-			}
-			ws, err = artifacts.EnsureWorkspace(root)
-			if err != nil {
-				fatal(err)
-			}
-		}
-
-		if startupResult.ReqPath != "" {
-			*reqPath = startupResult.ReqPath
-		} else if startupResult.ChatMode {
-			// "New Task" from the menu — route to TaskRunner instead of the
-			// greenfield Pipeline so existing code is treated as brownfield.
-			runTaskFlow(root, "", *branch, *ui, cfg, ws)
-			return
-		} else {
-			break // user quit from menu
-		}
-	}
+	runTaskFlow(root, string(reqs), *branch, *ui, cfg, ws)
 }
 
 // runTaskFlow launches the task runner with the given description.
@@ -326,7 +247,7 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 	events := b.Subscribe()
 	wsPath := ws.Path("")
 	chatLLM := runner.OpenCodeRunner{}
-	tuiModel := tui.New(events, nil, root, wsPath, chatLLM, cfg)
+	tuiModel := tui.New(events, root, wsPath, chatLLM, cfg)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
@@ -478,14 +399,6 @@ func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root str
 	agents[bus.RolePM] = agent.NewPMAgent(b, makeRunner("pm"), ws,
 		pmCfg.Skills, pmCfg.Model)
 
-	architectCfg := cfg.Agents["architect"]
-	agents[bus.RoleArchitect] = agent.NewArchitectAgent(b, makeRunner("architect"), ws,
-		architectCfg.Skills, architectCfg.Model)
-
-	plannerCfg := cfg.Agents["planner"]
-	agents[bus.RolePlanner] = agent.NewPlannerAgent(b, makeRunner("planner"), ws,
-		plannerCfg.Skills, plannerCfg.Model)
-
 	coderCfg := cfg.Agents["coder"]
 	coderAgent := agent.NewCoderAgent(b, makeRunner("coder"), ws, root, cfg,
 		coderCfg.Skills, coderCfg.Model)
@@ -494,15 +407,11 @@ func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root str
 	}
 	agents[bus.RoleCoder] = coderAgent
 
-	testerCfg := cfg.Agents["tester"]
-	agents[bus.RoleTester] = agent.NewTesterAgent(b, makeRunner("tester"), ws, root, cfg,
-		testerCfg.Skills, testerCfg.Model)
-
-	reviewerCfg := cfg.Agents["reviewer"]
-	reviewerAgent := agent.NewReviewerAgent(b, makeRunner("reviewer"), ws,
-		reviewerCfg.Skills, reviewerCfg.Model)
-	reviewerAgent.SetMaxContextTokens(reviewerCfg.MaxContextTokens)
-	agents[bus.RoleReviewer] = reviewerAgent
+	qaCfg := cfg.Agents["qa"]
+	qaAgent := agent.NewQAAgent(b, makeRunner("qa"), ws, root, cfg,
+		qaCfg.Skills, qaCfg.Model)
+	qaAgent.SetMaxContextTokens(qaCfg.MaxContextTokens)
+	agents[bus.RoleQA] = qaAgent
 
 	uxCfg := cfg.Agents["ux_reviewer"]
 	uxAgent := agent.NewUXReviewerAgent(b, makeRunner("ux_reviewer"), ws,

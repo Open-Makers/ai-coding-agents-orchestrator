@@ -38,16 +38,18 @@ var crt = themeAmber
 // Role colors — each agent gets a distinct accent while keeping CRT aesthetics.
 var roleColors = map[string]lipgloss.Color{
 	"pm":          lipgloss.Color("#e0af68"), // gold — project manager
-	"architect":   lipgloss.Color("#2ac3de"), // cyan — software architect
-	"planner":     lipgloss.Color("#7aa2f7"), // soft blue
 	"coder":       lipgloss.Color("#9ece6a"), // green
 	"coder_fixer": lipgloss.Color("#73b34d"), // darker green — fixer variant
-	"tester":      lipgloss.Color("#bb9af7"), // lavender
-	"reviewer":    lipgloss.Color("#f7768e"), // coral pink
+	"qa":          lipgloss.Color("#bb9af7"), // lavender — QA (tests + review)
 	"ux_reviewer": lipgloss.Color("#ff9e64"), // orange
 	"security":    lipgloss.Color("#e0af68"), // gold
 	"pr":          lipgloss.Color("#73daca"), // teal
 	"system":      crt.dim,
+	// Deprecated roles — kept for legacy Pipeline.
+	"architect": lipgloss.Color("#2ac3de"),
+	"planner":   lipgloss.Color("#7aa2f7"),
+	"tester":    lipgloss.Color("#bb9af7"),
+	"reviewer":  lipgloss.Color("#f7768e"),
 }
 
 func roleColor(role string) lipgloss.Color {
@@ -60,22 +62,28 @@ func roleColor(role string) lipgloss.Color {
 // pipelineColors maps pipeline step labels to distinct colors for the phase bar.
 var pipelineColors = map[string]lipgloss.Color{
 	"PM":           roleColors["pm"],
+	"CODE":         roleColors["coder"],
+	"CODING":       roleColors["coder"],
+	"CODER":        roleColors["coder"],
+	"QA_TESTS":     roleColors["qa"],
+	"QA_REVIEW":    roleColors["qa"],
+	"QA":           roleColors["qa"],
+	"UX":           roleColors["ux_reviewer"],
+	"UX_REVIEWING": roleColors["ux_reviewer"],
+	"UX_REVIEWER":  roleColors["ux_reviewer"],
+	"SEC":          roleColors["security"],
+	"SECURITY":     roleColors["security"],
+	"FIXING":       lipgloss.Color("#ff9e64"),
+	"DONE":         lipgloss.Color("#73daca"),
+	// Legacy entries.
 	"ARCHITECT":    roleColors["architect"],
 	"ARCHITECTURE": roleColors["architect"],
 	"PLAN":         roleColors["planner"],
 	"PROMPTS":      roleColors["planner"],
-	"CODE":         roleColors["coder"],
-	"CODING":       roleColors["coder"],
 	"TEST":         roleColors["tester"],
 	"TESTING":      roleColors["tester"],
 	"REVIEW":       roleColors["reviewer"],
 	"REVIEWING":    roleColors["reviewer"],
-	"UX":           roleColors["ux_reviewer"],
-	"UX_REVIEWING": roleColors["ux_reviewer"],
-	"SEC":          roleColors["security"],
-	"SECURITY":     roleColors["security"],
-	"FIXING":       lipgloss.Color("#ff9e64"), // orange — fix cycle
-	"DONE":         lipgloss.Color("#73daca"),
 }
 
 // Panel state styles — phosphor monochrome.

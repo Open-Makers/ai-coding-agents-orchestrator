@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"strings"
+
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 )
@@ -45,4 +47,25 @@ func (a *BaseAgent) emitOutput(text string) {
 // Gate publishes a human_gate event (exported so orchestrator can call it if needed).
 func (a *BaseAgent) Gate(msg string) {
 	a.emit(bus.MsgHumanGate, msg)
+}
+
+// collectStream reads all tokens from a completion stream, publishing each
+// token via the bus and returning the full concatenated text.
+func (a *BaseAgent) collectStream(ch <-chan runner.Token) (string, error) {
+	var sb strings.Builder
+	for tok := range ch {
+		if tok.Error != nil {
+			return sb.String(), tok.Error
+		}
+		if tok.Done {
+			if tok.Usage != nil {
+				a.emitUsage(*tok.Usage)
+			}
+			break
+		}
+		a.emitToken(tok.Text, false)
+		sb.WriteString(tok.Text)
+	}
+	a.emitToken("", true)
+	return sb.String(), nil
 }

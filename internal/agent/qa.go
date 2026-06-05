@@ -15,48 +15,66 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
-// TesterPayload carries the implementation plan and/or source files for test generation.
-type TesterPayload struct {
+// QATestPayload carries inputs for TDD test generation.
+type QATestPayload struct {
 	Files          []string
 	Plan           string
 	ProjectContext string
 	StageName      string
 }
 
-// TesterUpdatePayload asks the tester to update existing test files to match
-// the current production contract. Used by the quality gate when a reviewer
-// flags the tests-vs-implementation disagreement and the coder is forbidden
-// from writing _test.go files itself.
-type TesterUpdatePayload struct {
+// QAVerifyTestsPayload asks QA to check whether existing tests are correct
+// after the coder has failed multiple attempts.
+type QAVerifyTestsPayload struct {
 	Failure        string
 	Files          []string // production source files (read-only context)
-	TestFiles      []string // existing test files the tester may modify
+	TestFiles      []string // existing test files QA may modify
 	ProjectContext string
 }
 
-// TestReport is the structured result written to test_report.json.
-type TestReport struct {
-	Success  bool              `json:"success"`
-	Commands []executil.Result `json:"commands"`
+// QAVerifyResult is the outcome of a test verification.
+type QAVerifyResult struct {
+	TestsOK      bool     // true = tests are correct, coder must try harder
+	UpdatedFiles []string // test files that were rewritten (empty when TestsOK)
+	Explanation  string   // brief reason for the verdict
 }
 
-// TesterAgent generates unit tests via LLM, writes them to disk, and runs them.
-type TesterAgent struct {
+// QAReviewPayload carries inputs for quality review.
+type QAReviewPayload struct {
+	Files          []string
+	Root           string
+	ProjectContext string
+	Seeds          []string
+}
+
+// QAReviewResult is the structured outcome of a quality review.
+type QAReviewResult struct {
+	Approved   bool
+	MustFix    []string
+	NiceToHave []string
+	Unparsed   bool
+	RawOutput  string
+}
+
+// QAAgent combines test writing (TDD), test verification, and quality review.
+type QAAgent struct {
 	BaseAgent
-	runner runner.LLMRunner
-	ws     artifacts.Workspace
-	root   string
-	cfg    config.Config
-	exec   *executil.Runner
-	skills []string
-	model  string
+	runner           runner.LLMRunner
+	ws               artifacts.Workspace
+	root             string
+	cfg              config.Config
+	exec             *executil.Runner
+	skills           []string
+	model            string
+	maxContextTokens int
 }
 
-func NewTesterAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, root string, cfg config.Config, skills []string, model string) *TesterAgent {
-	return &TesterAgent{
-		BaseAgent: NewBase(bus.RoleTester, b),
+func NewQAAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, root string, cfg config.Config, skills []string, model string) *QAAgent {
+	return &QAAgent{
+		BaseAgent: NewBase(bus.RoleQA, b),
 		runner:    r,
 		ws:        ws,
 		root:      root,
@@ -67,35 +85,33 @@ func NewTesterAgent(b *bus.Bus, r runner.LLMRunner, ws artifacts.Workspace, root
 	}
 }
 
-func (a *TesterAgent) Role() bus.AgentRole { return bus.RoleTester }
+// SetMaxContextTokens configures the token budget for review mode.
+func (a *QAAgent) SetMaxContextTokens(n int) { a.maxContextTokens = n }
 
-// GenerateTests creates test files via LLM without running them.
-// Used in TDD mode where tests are written before or alongside implementation.
-func (a *TesterAgent) GenerateTests(ctx context.Context, payload TesterPayload) error {
+func (a *QAAgent) Role() bus.AgentRole { return bus.RoleQA }
+
+// GenerateTests creates test files via LLM in TDD mode (tests before implementation).
+func (a *QAAgent) GenerateTests(ctx context.Context, payload QATestPayload) error {
 	if len(payload.Files) == 0 && strings.TrimSpace(payload.Plan) == "" {
 		return nil
 	}
 	return a.generateTests(ctx, payload)
 }
 
-// UpdateTests rewrites existing test files so they match the latest
-// production contract. Returns the list of test files that were updated.
-//
-// The tester is the sole owner of *_test.go files (the coder is blocked from
-// writing them by writeOneFile). Without this method, every reviewer-driven
-// contract change would either fail the build silently or burn fix attempts.
-func (a *TesterAgent) UpdateTests(ctx context.Context, payload TesterUpdatePayload) ([]string, error) {
+// VerifyTests checks whether existing tests are correct after repeated coder failures.
+// Returns a verdict: either tests are OK (coder's problem) or updated test files.
+func (a *QAAgent) VerifyTests(ctx context.Context, payload QAVerifyTestsPayload) (QAVerifyResult, error) {
 	if len(payload.TestFiles) == 0 || strings.TrimSpace(payload.Failure) == "" {
-		return nil, nil
+		return QAVerifyResult{TestsOK: true, Explanation: "no tests to verify"}, nil
 	}
 
-	systemPrompt := prompts.MustLoad("tester-update")
+	systemPrompt := prompts.MustLoad("qa-verify-tests")
 	if strings.TrimSpace(payload.ProjectContext) != "" {
 		systemPrompt = fmt.Sprintf("%s\n\nProject context:\n%s", systemPrompt, payload.ProjectContext)
 	}
 
 	var b strings.Builder
-	_, _ = fmt.Fprintf(&b, "Failure / reviewer feedback:\n%s\n\n", payload.Failure)
+	fmt.Fprintf(&b, "Failure / coder feedback:\n%s\n\n", payload.Failure)
 
 	if len(payload.Files) > 0 {
 		b.WriteString("Production source files (READ-ONLY — source of truth):\n\n")
@@ -107,17 +123,17 @@ func (a *TesterAgent) UpdateTests(ctx context.Context, payload TesterUpdatePaylo
 			if err != nil {
 				continue
 			}
-			_, _ = fmt.Fprintf(&b, "**%s**\n```\n%s\n```\n\n", p, string(content))
+			fmt.Fprintf(&b, "**%s**\n```\n%s\n```\n\n", p, string(content))
 		}
 	}
 
-	b.WriteString("Existing test files (UPDATE THESE):\n\n")
+	b.WriteString("Existing test files (VERIFY / UPDATE THESE):\n\n")
 	for _, p := range payload.TestFiles {
 		content, err := safefile.ReadFile(a.root, p)
 		if err != nil {
 			continue
 		}
-		_, _ = fmt.Fprintf(&b, "**%s**\n```\n%s\n```\n\n", p, string(content))
+		fmt.Fprintf(&b, "**%s**\n```\n%s\n```\n\n", p, string(content))
 	}
 
 	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
@@ -127,32 +143,98 @@ func (a *TesterAgent) UpdateTests(ctx context.Context, payload TesterUpdatePaylo
 		Messages:     []runner.ConvMessage{{Role: "user", Content: b.String()}},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("tester update: runner: %w", err)
+		return QAVerifyResult{}, fmt.Errorf("qa verify: runner: %w", err)
 	}
 
 	output, err := a.collectStream(ch)
 	if err != nil {
-		return nil, fmt.Errorf("tester update: stream: %w", err)
+		return QAVerifyResult{}, fmt.Errorf("qa verify: stream: %w", err)
 	}
 
-	return a.writeTestBlocks(output), nil
+	if strings.Contains(output, "===VERDICT: TESTS_OK===") {
+		return QAVerifyResult{
+			TestsOK:     true,
+			Explanation: extractAfterMarker(output, "===VERDICT: TESTS_OK==="),
+		}, nil
+	}
+
+	updated := a.writeTestBlocks(output)
+	return QAVerifyResult{
+		TestsOK:      false,
+		UpdatedFiles: updated,
+		Explanation:  "tests updated",
+	}, nil
 }
 
-func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error) {
+// Run executes a quality review (code quality, logic, corner cases).
+func (a *QAAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, error) {
+	switch p := msg.Payload.(type) {
+	case QAReviewPayload:
+		return a.runReview(ctx, p)
+	case QATestPayload:
+		return a.runTests(ctx)
+	default:
+		return bus.Message{}, fmt.Errorf("qa: unexpected payload type %T", msg.Payload)
+	}
+}
 
+func (a *QAAgent) runReview(ctx context.Context, payload QAReviewPayload) (bus.Message, error) {
+	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
+	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
+
+	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
+	if sourceContext == "" {
+		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
+		sourceContext = string(raw)
+	}
+
+	systemPrompt := prompts.MustLoad("qa-review")
+	if strings.TrimSpace(payload.ProjectContext) != "" {
+		systemPrompt = fmt.Sprintf("%s\n\nProject context:\n%s", systemPrompt, payload.ProjectContext)
+	}
+
+	userContent := fmt.Sprintf("Plan:\n%s\n\nCode:\n%s\n\nTest results:\n%s",
+		string(plan), sourceContext, string(report))
+
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
+	})
+	if err != nil {
+		return bus.Message{}, fmt.Errorf("qa review: runner: %w", err)
+	}
+
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return bus.Message{}, fmt.Errorf("qa review: stream: %w", err)
+	}
+
+	if err := a.ws.WriteFile(artifacts.ReviewFile, []byte(output+"\n")); err != nil {
+		return bus.Message{}, err
+	}
+
+	result := parseQAReview(output)
+	return bus.NewMessage(bus.RoleQA, "", bus.MsgResponse, result), nil
+}
+
+func (a *QAAgent) runTests(ctx context.Context) (bus.Message, error) {
 	report := TestReport{Success: true}
 
-	// Install dependencies before running tests.
 	depResult := a.installDeps()
 	if depResult != nil && depResult.ExitCode != 0 {
 		report.Success = false
 		report.Commands = append(report.Commands, *depResult)
-		// Dependency install failed — no point running tests.
 		if err := a.ws.WriteJSON(artifacts.TestReportFile, report); err != nil {
 			return bus.Message{}, err
 		}
 		a.emitToken("", true)
-		return bus.NewMessage(bus.RoleTester, "", bus.MsgResponse, report), nil
+		return bus.NewMessage(bus.RoleQA, "", bus.MsgResponse, report), nil
 	}
 
 	data, err := a.ws.ReadFile(artifacts.TestCmdsFile)
@@ -163,7 +245,7 @@ func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error)
 	cmds := parseCmds(string(data))
 	if len(cmds) == 0 {
 		cmds = a.fallbackTestCmds()
-		a.emitToken(fmt.Sprintf("no test commands from coder, using defaults: %v\n", cmds), false)
+		a.emitToken(fmt.Sprintf("no test commands, using defaults: %v\n", cmds), false)
 	}
 
 	for _, c := range cmds {
@@ -183,20 +265,17 @@ func (a *TesterAgent) Run(_ context.Context, _ bus.Message) (bus.Message, error)
 			return bus.Message{}, err
 		}
 
-		// Stop on build failure but continue for test failures to collect all results.
 		if !report.Success && strings.Contains(c, "build") {
 			break
 		}
 	}
 	a.emitToken("", true)
-	return bus.NewMessage(bus.RoleTester, "", bus.MsgResponse, report), nil
+	return bus.NewMessage(bus.RoleQA, "", bus.MsgResponse, report), nil
 }
 
-// generateTests uses the LLM to create unit test files from the plan and/or source files.
-func (a *TesterAgent) generateTests(ctx context.Context, payload TesterPayload) error {
+func (a *QAAgent) generateTests(ctx context.Context, payload QATestPayload) error {
 	var promptParts []string
 
-	// Include go.mod so LLM knows the module path and available dependencies.
 	if gomod, err := safefile.ReadFile(a.root, "go.mod"); err == nil {
 		promptParts = append(promptParts, fmt.Sprintf("**go.mod**\n```\n%s\n```", string(gomod)))
 	}
@@ -210,10 +289,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, payload TesterPayload) 
 		if err != nil {
 			continue
 		}
-		_, err = fmt.Fprintf(&sourceContext, "**%s**\n```\n%s\n```\n\n", path, string(content))
-		if err != nil {
-			return err
-		}
+		fmt.Fprintf(&sourceContext, "**%s**\n```\n%s\n```\n\n", path, string(content))
 	}
 
 	if strings.TrimSpace(payload.Plan) != "" {
@@ -232,7 +308,7 @@ func (a *TesterAgent) generateTests(ctx context.Context, payload TesterPayload) 
 		return nil
 	}
 
-	systemPrompt := prompts.MustLoad("tester-generate")
+	systemPrompt := prompts.MustLoad("qa-tests")
 	if strings.TrimSpace(payload.ProjectContext) != "" {
 		systemPrompt = fmt.Sprintf("%s\n\nProject context:\n%s", systemPrompt, payload.ProjectContext)
 	}
@@ -245,12 +321,12 @@ func (a *TesterAgent) generateTests(ctx context.Context, payload TesterPayload) 
 		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
 	})
 	if err != nil {
-		return fmt.Errorf("tester: runner: %w", err)
+		return fmt.Errorf("qa tests: runner: %w", err)
 	}
 
 	output, err := a.collectStream(ch)
 	if err != nil {
-		return fmt.Errorf("tester: stream: %w", err)
+		return fmt.Errorf("qa tests: stream: %w", err)
 	}
 
 	sections := parseSections(output, "TEST_CMDS")
@@ -262,27 +338,22 @@ func (a *TesterAgent) generateTests(ctx context.Context, payload TesterPayload) 
 
 	testFiles := a.writeTestBlocks(output)
 	if len(testFiles) == 0 {
-		a.emitToken("tester produced 0 test files — saving raw output for inspection\n", false)
+		a.emitToken("QA produced 0 test files — saving raw output for inspection\n", false)
 		if err := a.ws.WriteFile(artifacts.TesterRawOutputFile, []byte(output)); err != nil {
-			a.emitToken(fmt.Sprintf("warning: failed to save tester raw output: %v\n", err), false)
-		} else {
-			a.emitToken(fmt.Sprintf("raw tester output saved to %s\n", artifacts.TesterRawOutputFile), false)
+			a.emitToken(fmt.Sprintf("warning: failed to save QA raw output: %v\n", err), false)
 		}
 		return nil
 	}
-	a.emitToken(fmt.Sprintf("tester wrote %d test file(s)\n", len(testFiles)), false)
+	a.emitToken(fmt.Sprintf("QA wrote %d test file(s)\n", len(testFiles)), false)
 	return nil
 }
 
-// writeTestBlocks extracts file blocks from LLM output and writes them to disk.
-// Returns the list of written file paths. Non-test paths are rejected so a
-// confused tester cannot overwrite production source files.
-func (a *TesterAgent) writeTestBlocks(output string) []string {
+func (a *QAAgent) writeTestBlocks(output string) []string {
 	blocks := ExtractFileBlocks(output)
 	var written []string
 	for _, f := range blocks {
 		if !strings.HasSuffix(f.Path, "_test.go") {
-			a.emitToken(fmt.Sprintf("warning: refusing non-test path from tester: %s\n", f.Path), false)
+			a.emitToken(fmt.Sprintf("warning: refusing non-test path from QA: %s\n", f.Path), false)
 			continue
 		}
 		target := filepath.Join(a.root, f.Path)
@@ -300,9 +371,7 @@ func (a *TesterAgent) writeTestBlocks(output string) []string {
 	return written
 }
 
-// installDeps detects the project language and runs the appropriate
-// dependency install command before tests. Returns the result if a command was run.
-func (a *TesterAgent) installDeps() *executil.Result {
+func (a *QAAgent) installDeps() *executil.Result {
 	lang := a.detectLanguage()
 	var depCmd string
 	switch lang {
@@ -338,8 +407,7 @@ func (a *TesterAgent) installDeps() *executil.Result {
 	return &res
 }
 
-// detectLanguage determines the project language from config or project files.
-func (a *TesterAgent) detectLanguage() string {
+func (a *QAAgent) detectLanguage() string {
 	if a.cfg.Project.Language != "" {
 		return a.cfg.Project.Language
 	}
@@ -361,8 +429,7 @@ func (a *TesterAgent) detectLanguage() string {
 	return ""
 }
 
-// fallbackTestCmds returns default test commands based on config or language.
-func (a *TesterAgent) fallbackTestCmds() []string {
+func (a *QAAgent) fallbackTestCmds() []string {
 	if a.cfg.Project.TestCmd != "" {
 		return []string{"go build ./...", a.cfg.Project.TestCmd}
 	}
@@ -381,89 +448,31 @@ func (a *TesterAgent) fallbackTestCmds() []string {
 	}
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+func parseQAReview(text string) QAReviewResult {
+	s := parseReviewSections(text, "NICE TO HAVE", "RECOMMENDATION")
+	return QAReviewResult{
+		Approved:   s.Approved,
+		MustFix:    s.MustFix,
+		NiceToHave: s.NiceToHave,
+		Unparsed:   !s.Parsed,
+		RawOutput:  text,
+	}
 }
 
-func parseCmds(input string) []string {
-	var cmds []string
-	scanner := bufio.NewScanner(strings.NewReader(input))
+// extractAfterMarker returns text following a marker line, trimmed.
+func extractAfterMarker(text, marker string) string {
+	idx := strings.Index(text, marker)
+	if idx < 0 {
+		return ""
+	}
+	rest := text[idx+len(marker):]
+	// Take first non-empty line after the marker.
+	scanner := bufio.NewScanner(strings.NewReader(rest))
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "```") {
-			continue
-		}
-		cleaned := stripListMarker(line)
-		cleaned = strings.Trim(cleaned, "`")
-		cleaned = strings.TrimSpace(cleaned)
-		if cleaned == "" {
-			continue
-		}
-		if !looksLikeCommand(cleaned) {
-			continue
-		}
-		cmds = append(cmds, cleaned)
-	}
-	return cmds
-}
-
-func stripListMarker(s string) string {
-	if len(s) > 2 && (s[0] == '-' || s[0] == '*') && s[1] == ' ' {
-		return strings.TrimSpace(s[2:])
-	}
-	for i, c := range s {
-		if c >= '0' && c <= '9' {
-			continue
-		}
-		if i > 0 && (c == '.' || c == ')') && i+1 < len(s) && s[i+1] == ' ' {
-			return strings.TrimSpace(s[i+2:])
-		}
-		break
-	}
-	return s
-}
-
-func looksLikeCommand(line string) bool {
-	cmdPrefixes := []string{
-		"go ", "make", "npm ", "yarn ", "pnpm ", "cargo ", "python ", "pip ",
-		"pytest", "ruby ", "bundle ", "mvn ", "gradle ", "docker ", "kubectl ",
-		"curl ", "wget ", "cat ", "echo ", "ls ", "cd ", "mkdir ", "rm ",
-		"cp ", "mv ", "chmod ", "sh ", "bash ", "test ", "./", "set ",
-	}
-	lower := strings.ToLower(line)
-	for _, p := range cmdPrefixes {
-		if strings.HasPrefix(lower, p) {
-			return true
+		if line != "" {
+			return line
 		}
 	}
-	return strings.HasPrefix(line, "$ ")
-}
-
-// isInteractiveCommand returns true for commands that may require user input
-// or run indefinitely (e.g. go run, servers, REPLs).
-func isInteractiveCommand(cmd string) bool {
-	lower := strings.ToLower(strings.TrimSpace(cmd))
-
-	interactivePrefixes := []string{
-		"go run ",
-		"python -c ",
-		"node -e ",
-		"npm start",
-		"yarn start",
-		"npm run dev",
-		"yarn dev",
-	}
-	for _, prefix := range interactivePrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-
-	// Piped go run is also interactive (stdin closes but program may not exit).
-	if strings.Contains(lower, "| go run") || strings.Contains(lower, "|go run") {
-		return true
-	}
-
-	return false
+	return ""
 }

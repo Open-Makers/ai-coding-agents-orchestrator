@@ -13,6 +13,8 @@ import (
 
 const (
 	DirName                  = ".orchestrator"
+	MemoryDirName            = "memory"      // .orchestrator/memory/
+	MemoryDBFile             = "memory.db"   // .orchestrator/memory.db (sqlite cache, gitignored)
 	ProjectConfigFile        = "project.yaml"
 	ModulePathFile           = "module_path"
 	RequirementsFile         = "requirements.md"
@@ -111,6 +113,16 @@ func (w Workspace) ReadJSON(name string, v any) error {
 		return fmt.Errorf("unmarshal %s: %w", name, err)
 	}
 	return nil
+}
+
+// MemoryDir returns the absolute path of the workspace memory directory.
+func (w Workspace) MemoryDir() string {
+	return filepath.Join(w.Dir, MemoryDirName)
+}
+
+// MemoryDBPath returns the absolute path of the SQLite memory index.
+func (w Workspace) MemoryDBPath() string {
+	return filepath.Join(w.Dir, MemoryDBFile)
 }
 
 // generatedArtifacts lists all files produced by PM, planner, and pipeline phases.

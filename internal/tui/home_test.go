@@ -18,11 +18,10 @@ func newTestConfig() config.Config {
 			Language: "go",
 		},
 		Agents: map[string]config.AgentConfig{
-			"pm":          {Runner: "codex", Model: "gpt-5.4"},
-			"planner":     {Runner: "codex", Model: "gpt-5.4"},
-			"coder":       {Runner: "claude", Model: "sonnet"},
-			"tester":      {Runner: "codex", Model: "gpt-5.3-codex"},
-			"reviewer":    {Runner: "codex", Model: "gpt-5.3-codex"},
+			"pm":    {Runner: "codex", Model: "gpt-5.4"},
+			"qa":    {Runner: "codex", Model: "gpt-5.3-codex"},
+			"coder": {Runner: "claude", Model: "sonnet"},
+
 			"ux_reviewer": {Runner: "codex", Model: "gpt-5.4"},
 			"security":    {Runner: "claude", Model: "opus"},
 		},
@@ -161,7 +160,7 @@ func TestResolveOverrides_AllAgents(t *testing.T) {
 
 	overrides := resolveOverrides(cfg.Agents, "codex", "gpt-5.3-codex")
 
-	expectedRoles := []string{"pm", "planner", "coder", "tester", "reviewer", "ux_reviewer", "security"}
+	expectedRoles := []string{"pm", "coder", "qa", "ux_reviewer", "security"}
 	if len(overrides) != len(expectedRoles) {
 		t.Fatalf("expected %d overrides, got %d", len(expectedRoles), len(overrides))
 	}
@@ -177,7 +176,7 @@ func TestResolveOverrides_PreservesExplicitValues(t *testing.T) {
 	agents := map[string]config.AgentConfig{
 		"pm":       {Runner: "codex", Model: "gpt-5.4"},
 		"coder":    {Runner: "claude", Model: "sonnet"},
-		"tester":   {Runner: "codex", Model: "gpt-5.3-codex"},
+		"qa":       {Runner: "codex", Model: "gpt-5.3-codex"},
 		"security": {Runner: "claude", Model: "opus"},
 	}
 
@@ -186,7 +185,7 @@ func TestResolveOverrides_PreservesExplicitValues(t *testing.T) {
 	expected := map[string]struct{ runner, model string }{
 		"pm":       {"codex", "gpt-5.4"},
 		"coder":    {"claude", "sonnet"},
-		"tester":   {"codex", "gpt-5.3-codex"},
+		"qa":       {"codex", "gpt-5.3-codex"},
 		"security": {"claude", "opus"},
 	}
 
@@ -440,10 +439,9 @@ func TestHomeModel_RenderInfoCard_ShowsAllOverrides(t *testing.T) {
 		model  string
 	}{
 		{"pm", "codex", "gpt-5.4"},
-		{"planner", "codex", "gpt-5.4"},
+		{"qa", "codex", "gpt-5.3-codex"},
 		{"coder", "claude", "sonnet"},
-		{"tester", "codex", "gpt-5.3-codex"},
-		{"reviewer", "codex", "gpt-5.3-codex"},
+
 		{"ux_reviewer", "codex", "gpt-5.4"},
 		{"security", "claude", "opus"},
 	}

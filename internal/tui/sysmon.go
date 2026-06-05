@@ -105,10 +105,11 @@ type SysmonModel struct {
 	prevNetSent      uint64
 	startTime        time.Time
 	projectRoot      string
-	projectTree      []projectTreeEntry
-	treeScrollOffset int
-	activeFiles      map[string]fileActivity
-	agentUsage       map[bus.AgentRole]bus.AgentUsage
+	projectTree       []projectTreeEntry
+	treeScrollOffset  int
+	activeFiles       map[string]fileActivity
+	agentUsage        map[bus.AgentRole]bus.AgentUsage
+	agentScrollOffset int
 
 	width  int
 	height int
@@ -263,6 +264,17 @@ func (m SysmonModel) Update(msg tea.Msg) (SysmonModel, tea.Cmd) {
 	// Auto-advance tree scroll on each tick.
 	if len(m.projectTree) > 0 {
 		m.treeScrollOffset = (m.treeScrollOffset + 1) % len(m.projectTree)
+	}
+
+	// Auto-advance agent token-list scroll on each tick.
+	activeAgents := 0
+	for _, u := range m.agentUsage {
+		if u.InputTokens+u.OutputTokens > 0 {
+			activeAgents++
+		}
+	}
+	if activeAgents > 0 {
+		m.agentScrollOffset = (m.agentScrollOffset + 1) % activeAgents
 	}
 
 	return m, sysmonTick()
@@ -506,30 +518,55 @@ func (m SysmonModel) View() string {
 	addGraphLines(renderBrailleGraph(m.netRecvHist, contentW, brailleGraphRows, netDnColor, 0))
 	addGraphLines(renderBrailleGraph(m.netSentHist, contentW, brailleGraphRows, netUpColor, 0))
 
-	// ── TOKENS ──
+	// ── TOKENS ── (agent list fixed at tokenAgentRows rows, auto-scrolling)
+	const tokenAgentRows = 5
 	if total := m.totalTokens(); total > 0 {
 		addSection("TOKENS")
 		totalColor := lipgloss.Color("#e0af68")
 		totalStyle := lipgloss.NewStyle().Foreground(totalColor).Bold(true)
 		addLine(labelStyle.Render(" Total: ") + totalStyle.Render(formatTokens(total)))
-		for _, role := range agentOrder {
-			u, ok := m.agentUsage[role]
-			if !ok || u.InputTokens+u.OutputTokens == 0 {
-				continue
-			}
+
+		renderAgentLine := func(role bus.AgentRole) string {
+			u := m.agentUsage[role]
 			roleStyle := lipgloss.NewStyle().Foreground(roleColor(string(role))).Bold(true)
 			est := ""
 			if u.Estimated {
 				est = "~"
 			}
-			// In/out only — matches the end-of-run report exactly, so the two
-			// views never disagree due to per-agent rounding of (in+out).
 			label := fmt.Sprintf(" %-11s", string(role))
-			addLine(roleStyle.Render(label) +
+			return roleStyle.Render(label) +
 				dimStyle.Render(fmt.Sprintf("↓%s ↑%s%s",
 					formatTokensCompact(u.InputTokens),
 					formatTokensCompact(u.OutputTokens),
-					est)))
+					est))
+		}
+
+		var visibleAgents []bus.AgentRole
+		for _, role := range agentOrder {
+			if u, ok := m.agentUsage[role]; ok && u.InputTokens+u.OutputTokens > 0 {
+				visibleAgents = append(visibleAgents, role)
+			}
+		}
+
+		totalAgents := len(visibleAgents)
+		if totalAgents <= tokenAgentRows {
+			for _, role := range visibleAgents {
+				addLine(renderAgentLine(role))
+			}
+			for i := totalAgents; i < tokenAgentRows; i++ {
+				addLine("")
+			}
+		} else {
+			offset := m.agentScrollOffset % totalAgents
+			rows := make([]string, tokenAgentRows)
+			for i := 0; i < tokenAgentRows; i++ {
+				idx := (offset + i) % totalAgents
+				rows[i] = renderAgentLine(visibleAgents[idx])
+			}
+			rows[tokenAgentRows-1] = dimStyle.Render(fmt.Sprintf("  ↕ %d/%d", offset+1, totalAgents))
+			for _, r := range rows {
+				addLine(r)
+			}
 		}
 	}
 
@@ -757,9 +794,9 @@ func (m SysmonModel) pathsForRole(role bus.AgentRole, payload any) []string {
 		return append([]string{}, p.PriorFiles...)
 	case agent.CoderFixPayload:
 		return append([]string{}, p.Files...)
-	case agent.TesterPayload:
+	case agent.QATestPayload:
 		return append([]string{}, p.Files...)
-	case agent.ReviewerPayload:
+	case agent.QAReviewPayload:
 		return append([]string{}, p.Files...)
 	case agent.SecurityPayload:
 		return append([]string{}, p.Files...)
@@ -770,13 +807,6 @@ func (m SysmonModel) pathsForRole(role bus.AgentRole, payload any) []string {
 	switch role {
 	case bus.RolePM:
 		return []string{".orchestrator/vision.md", ".orchestrator/moscow.md"}
-	case bus.RoleArchitect:
-		return []string{".orchestrator/architecture.md"}
-	case bus.RolePlanner:
-		return []string{
-			".orchestrator/implementation_plan.md",
-			".orchestrator/prompts.md",
-		}
 	}
 	return nil
 }

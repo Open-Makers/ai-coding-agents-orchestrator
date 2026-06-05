@@ -59,13 +59,6 @@ type FileRejectedMsg struct{ Path string }
 type GitPanelClosedMsg struct{}
 type GitRefreshMsg struct{}
 
-// pipelineReadyMsg is sent after buildAgents completes so that log output
-// from agent construction appears inside the TUI, not between TUI sessions.
-type pipelineReadyMsg struct {
-	p      *orchestrator.Pipeline
-	cancel context.CancelFunc
-}
-
 // Chat messages.
 type ChatTokenMsg struct {
 	Text string

@@ -8,7 +8,7 @@ import (
 )
 
 func TestRenderPhaseBar_ShowsPMApprovalGates(t *testing.T) {
-	m := New(nil, nil, "", "", nil, config.Config{})
+	m := New(nil, "", "", nil, config.Config{})
 	m.gateArtifact = "vision.md"
 
 	bar := m.renderPhaseBar()
@@ -21,7 +21,7 @@ func TestRenderPhaseBar_ShowsPMApprovalGates(t *testing.T) {
 }
 
 func TestView_ShowsApprovalBannerWhenGatePending(t *testing.T) {
-	m := New(nil, nil, "", "", nil, config.Config{})
+	m := New(nil, "", "", nil, config.Config{})
 	m.width = 120
 	m.height = 30
 	m.gateArtifact = "vision.md"

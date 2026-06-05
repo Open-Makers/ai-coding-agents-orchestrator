@@ -15,25 +15,25 @@ func TestVisibleInAgentPane(t *testing.T) {
 	}{
 		{
 			name: "shows tokens from same role",
-			role: bus.RolePlanner,
-			msg:  bus.NewMessage(bus.RolePlanner, "", bus.MsgEvent, bus.TokenPayload{Text: "x"}),
+			role: bus.RoleQA,
+			msg:  bus.NewMessage(bus.RoleQA, "", bus.MsgEvent, bus.TokenPayload{Text: "x"}),
 			want: true,
 		},
 		{
 			name: "shows targeted system message",
-			role: bus.RoleTester,
-			msg:  bus.NewMessage(bus.RoleSystem, bus.RoleTester, bus.MsgEvent, "starting tester"),
+			role: bus.RoleQA,
+			msg:  bus.NewMessage(bus.RoleSystem, bus.RoleQA, bus.MsgEvent, "starting qa"),
 			want: true,
 		},
 		{
 			name: "hides broadcast system message",
 			role: bus.RoleCoder,
-			msg:  bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, "planner"),
+			msg:  bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, "qa"),
 			want: false,
 		},
 		{
 			name: "hides other agent output",
-			role: bus.RoleReviewer,
+			role: bus.RoleQA,
 			msg:  bus.NewMessage(bus.RoleCoder, "", bus.MsgEvent, bus.TokenPayload{Text: "patch"}),
 			want: false,
 		},

@@ -47,6 +47,61 @@ func New(cfg config.SemanticIndexConfig) (Embedder, error) {
 	}
 }
 
+// NewMemoryEmbedder constructs the embedder used by the project-memory
+// subsystem. Backends:
+//
+//   - "openai"     — OpenAI-compatible HTTP POST /v1/embeddings (also works
+//     against Voyage, Together, vLLM, llama.cpp `--server`, LM Studio…).
+//   - "ollama"     — local Ollama server at base_url.
+//   - "cybertron"  — placeholder: pure-Go transformers (planned; returns
+//     ErrEmbedderUnavailable so callers fall back to BM25 cleanly).
+//   - ""           — defaults to "openai" if a base_url is set, otherwise
+//     "ollama" (preserving existing behaviour for users with Ollama).
+func NewMemoryEmbedder(mc config.MemoryConfig) (Embedder, error) {
+	backend := strings.ToLower(mc.Embedder)
+	if backend == "" {
+		if mc.EmbedderBaseURL != "" {
+			backend = "openai"
+		} else {
+			backend = "ollama"
+		}
+	}
+	switch backend {
+	case "openai":
+		base := mc.EmbedderBaseURL
+		if base == "" {
+			base = "https://api.openai.com"
+		}
+		model := mc.EmbedderModel
+		if model == "" {
+			model = "text-embedding-3-small"
+		}
+		return &openaiEmbedder{
+			baseURL: strings.TrimRight(base, "/"),
+			model:   model,
+			apiKey:  mc.EmbedderAPIKey,
+			http:    &http.Client{Timeout: 30 * time.Second},
+		}, nil
+	case "ollama":
+		base := mc.EmbedderBaseURL
+		if base == "" {
+			base = "http://127.0.0.1:11434"
+		}
+		model := mc.EmbedderModel
+		if model == "" {
+			model = "nomic-embed-text"
+		}
+		return &ollamaEmbedder{baseURL: base, model: model, http: &http.Client{Timeout: 30 * time.Second}}, nil
+	case "cybertron":
+		// Pure-Go transformers via github.com/nlpodyssey/cybertron.
+		// First call downloads the model into mc.EmbedderModelsDir (default
+		// ~/.orchestrator/cybertron-models); subsequent runs are offline.
+		return newCybertronEmbedder(mc.EmbedderModel, mc.EmbedderModelsDir)
+	default:
+		return nil, fmt.Errorf("%w: unknown memory embedder %q", ErrEmbedderUnavailable, mc.Embedder)
+	}
+}
+
 type ollamaEmbedder struct {
 	baseURL string
 	model   string

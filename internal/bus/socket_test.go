@@ -41,7 +41,7 @@ func TestServeDialUnix_RoundTrip(t *testing.T) {
 	incoming := client.Subscribe()
 	time.Sleep(10 * time.Millisecond) // let subscription be registered
 
-	want := NewMessage(RolePlanner, RoleCoder, MsgEvent, "hello")
+	want := NewMessage(RoleQA, RoleCoder, MsgEvent, "hello")
 	b.Publish(want)
 
 	select {
@@ -70,7 +70,7 @@ func TestDialPublish_ForwardsToServerBus(t *testing.T) {
 
 	time.Sleep(10 * time.Millisecond) // let connection establish
 
-	want := NewMessage(RoleCoder, RoleTester, MsgEvent, "from-client")
+	want := NewMessage(RoleCoder, RoleQA, MsgEvent, "from-client")
 	if err := client.Publish(want); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}

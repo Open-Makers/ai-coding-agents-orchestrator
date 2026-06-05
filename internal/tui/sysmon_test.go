@@ -214,7 +214,7 @@ func TestSysmon_AgentUsageIsSingleSourceOfTruth(t *testing.T) {
 		InputTokens:  100,
 		OutputTokens: 50,
 	}))
-	sm.ObserveBusMessage(bus.NewMessage(bus.RolePlanner, "", bus.MsgUsage, bus.AgentUsage{
+	sm.ObserveBusMessage(bus.NewMessage(bus.RoleQA, "", bus.MsgUsage, bus.AgentUsage{
 		InputTokens:  200,
 		OutputTokens: 75,
 	}))
@@ -223,8 +223,8 @@ func TestSysmon_AgentUsageIsSingleSourceOfTruth(t *testing.T) {
 	if got := exported[bus.RoleCoder]; got.InputTokens != 100 || got.OutputTokens != 50 {
 		t.Errorf("AgentUsage()[coder]: got %+v", got)
 	}
-	if got := exported[bus.RolePlanner]; got.InputTokens != 200 || got.OutputTokens != 75 {
-		t.Errorf("AgentUsage()[planner]: got %+v", got)
+	if got := exported[bus.RoleQA]; got.InputTokens != 200 || got.OutputTokens != 75 {
+		t.Errorf("AgentUsage()[qa]: got %+v", got)
 	}
 	// Sysmon's own total must equal what summary consumers would compute.
 	var summaryTotal int

@@ -9,11 +9,8 @@ type AgentRole string
 
 const (
 	RolePM         AgentRole = "pm"
-	RoleArchitect  AgentRole = "architect"
-	RolePlanner    AgentRole = "planner"
 	RoleCoder      AgentRole = "coder"
-	RoleTester     AgentRole = "tester"
-	RoleReviewer   AgentRole = "reviewer"
+	RoleQA         AgentRole = "qa"
 	RoleUXReviewer AgentRole = "ux_reviewer"
 	RoleSecurity   AgentRole = "security"
 	RoleSystem     AgentRole = "system"

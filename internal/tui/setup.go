@@ -206,7 +206,7 @@ type SetupModel struct {
 	height int
 }
 
-var setupAgentRoles = []string{"pm", "architect", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security"}
+var setupAgentRoles = []string{"pm", "coder", "coder_fixer", "qa", "ux_reviewer", "security"}
 
 func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfgs map[string]config.AgentConfig) SetupModel {
 	sp := spinner.New()

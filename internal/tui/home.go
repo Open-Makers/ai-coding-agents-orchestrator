@@ -145,7 +145,7 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 			{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
 			{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
 			{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
-			{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports, keep code and config", action: homeActionClean, key: "c"},
+			{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports — keeps code, config, and project memory", action: homeActionClean, key: "c"},
 			{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
 		},
 		width:  80,
@@ -857,7 +857,7 @@ func resolveLanguageFromRoot(root string, cfg config.Config) string {
 // resolveOverrides returns all agents with their effective runner/model.
 func resolveOverrides(agents map[string]config.AgentConfig, defaultRunner, defaultModel string) []agentOverride {
 	var overrides []agentOverride
-	roles := []string{"pm", "architect", "planner", "coder", "coder_fixer", "tester", "reviewer", "ux_reviewer", "security"}
+	roles := []string{"pm", "coder", "coder_fixer", "qa", "ux_reviewer", "security"}
 	for _, role := range roles {
 		if ac, ok := agents[role]; ok {
 			r := ac.Runner

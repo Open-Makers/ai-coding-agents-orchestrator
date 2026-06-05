@@ -44,8 +44,9 @@ type startupModel struct {
 	wsDir         string // .orchestrator directory path
 	wsReqPath     string // absolute path to write new requirements
 	cfg           config.Config
-	reqPath       string // result — non-empty when resolved (legacy pipeline)
-	chatMode      bool   // result — true when PM chat-based requirements gathering was selected
+	reqPath       string     // result — non-empty when resolved (legacy pipeline)
+	chatMode      bool       // result — true when PM chat-based requirements gathering was selected
+	pendingAction homeAction // action to resume after module path input
 	width         int
 	height        int
 }
@@ -104,6 +105,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case homeActionNewTask:
 				// PM chat-based requirements gathering — skip file picker.
 				if m.needsModulePath() {
+					m.pendingAction = homeActionNewTask
 					return m, m.showModulePathInput()
 				}
 				cleanWorkspace(m.wsDir, false)
@@ -112,6 +114,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case homeActionRunPipeline:
 				// Legacy pipeline flow: choose or create requirements.md first.
 				if m.needsModulePath() {
+					m.pendingAction = homeActionRunPipeline
 					return m, m.showModulePathInput()
 				}
 				return m, m.showPicker()
@@ -253,7 +256,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					projectCfg := config.LoadProject(m.root)
 					projectCfg.Project.ModulePath = val
 					_ = config.Save(m.root, projectCfg)
-					return m, m.transitionToHome()
+					return m, m.resumePendingAction()
 				}
 			case "esc":
 				m.phase = startupPhaseHome
@@ -448,6 +451,21 @@ func guessModulePath(root string) string {
 	return ""
 }
 
+// resumePendingAction continues the home action that was interrupted to ask for
+// the Go module path. Falls back to returning home for any other action.
+func (m *startupModel) resumePendingAction() tea.Cmd {
+	switch m.pendingAction {
+	case homeActionNewTask:
+		cleanWorkspace(m.wsDir, false)
+		m.chatMode = true
+		return tea.Quit
+	case homeActionRunPipeline:
+		return m.showPicker()
+	default:
+		return m.transitionToHome()
+	}
+}
+
 // transitionToHome builds a fresh HomeModel for the current root/cfg and
 // switches to the home phase. Used after project selection and module path input.
 func (m *startupModel) transitionToHome() tea.Cmd {
@@ -552,6 +570,9 @@ func (m startupModel) viewModulePath() string {
 
 // cleanWorkspace removes all files in the workspace directory except preserved ones.
 // When preserveRequirements is false, requirements.md is also removed.
+// cleanWorkspace removes generated pipeline artifacts but always preserves
+// project configuration and project memory. Memory (memory/ + memory.db*)
+// is institutional knowledge and survives every reset.
 func cleanWorkspace(wsDir string, preserveRequirements bool) {
 	entries, err := os.ReadDir(wsDir)
 	if err != nil {
@@ -559,15 +580,21 @@ func cleanWorkspace(wsDir string, preserveRequirements bool) {
 	}
 	preserve := map[string]bool{
 		artifacts.ProjectConfigFile: true,
+		artifacts.MemoryDirName:     true, // memory/ — Markdown facts/decisions
 	}
 	if preserveRequirements {
 		preserve[artifacts.RequirementsFile] = true
 	}
 	for _, entry := range entries {
-		if preserve[entry.Name()] {
+		name := entry.Name()
+		if preserve[name] {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(wsDir, entry.Name()))
+		// Preserve the SQLite memory index and its WAL/SHM companions.
+		if name == artifacts.MemoryDBFile || strings.HasPrefix(name, artifacts.MemoryDBFile+"-") {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(wsDir, name))
 	}
 }
 

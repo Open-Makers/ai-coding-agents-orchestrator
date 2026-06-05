@@ -9,16 +9,22 @@ func DefaultConfig() Config {
 			TestCmd:        "go test -count=1 ./...",
 			LintCmd:        "golangci-lint run",
 			MaxFixAttempts: 3,
+			Context: ContextConfig{
+				Memory: MemoryConfig{
+					Enabled:        true,
+					TopK:           8,
+					ChunkTokens:    400,
+					OverlapTokens:  80,
+					HybridAlpha:    1.0, // pure BM25 by default (no embedder required)
+					MaxRecallChars: 6000,
+					MaxPinnedChars: 4000,
+					AutoPromote:    true,
+				},
+			},
 		},
 		Agents: map[string]AgentConfig{
 			"pm": {
 				Skills: []string{"agentic-engineering"},
-			},
-			"architect": {
-				Skills: []string{"agentic-engineering", "architecture-decision-records", "codebase-onboarding"},
-			},
-			"planner": {
-				Skills: []string{"agentic-engineering", "architecture-decision-records", "codebase-onboarding", "golang-patterns", "coding-standards"},
 			},
 			"coder": {
 				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},
@@ -26,11 +32,8 @@ func DefaultConfig() Config {
 			"coder_fixer": {
 				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},
 			},
-			"tester": {
-				Skills: []string{"golang-testing", "tdd-workflow"},
-			},
-			"reviewer": {
-				Skills: []string{"golang-patterns", "coding-standards"},
+			"qa": {
+				Skills: []string{"golang-testing", "tdd-workflow", "golang-patterns", "coding-standards"},
 			},
 			"ux_reviewer": {
 				Skills: []string{"ux-review", "coding-standards"},

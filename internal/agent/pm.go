@@ -504,6 +504,102 @@ func parseArbitrateResult(text string) ArbitrateResult {
 	return ArbitrateResult{MustFix: mustFix, Pass: pass}
 }
 
+// ArbitrateAllResult is the PM's decision on combined review feedback.
+type ArbitrateAllResult struct {
+	Pass        bool      // true = all clear, nothing to fix
+	SubTasks    []SubTask // new beads for real issues (empty when Pass)
+	ReviewScope string   // "full", "partial", or "none"
+	NiceToHave  []string  // issues PM decided to skip
+}
+
+// ArbitrateAll asks the PM to evaluate combined feedback from QA, UX, and
+// Security review phases in a single call. PM decides what is real, creates
+// sub-tasks for blockers, and determines the scope of re-review.
+func (a *PMAgent) ArbitrateAll(ctx context.Context, qaFeedback, uxFeedback, securityFeedback string) (ArbitrateAllResult, error) {
+	systemPrompt := prompts.MustLoad("pm-arbitrate-all")
+
+	var b strings.Builder
+	if strings.TrimSpace(qaFeedback) != "" {
+		fmt.Fprintf(&b, "## QA Review Feedback\n\n%s\n\n", qaFeedback)
+	}
+	if strings.TrimSpace(uxFeedback) != "" {
+		fmt.Fprintf(&b, "## UX/UI Review Feedback\n\n%s\n\n", uxFeedback)
+	}
+	if strings.TrimSpace(securityFeedback) != "" {
+		fmt.Fprintf(&b, "## Security Review Feedback\n\n%s\n\n", securityFeedback)
+	}
+
+	if b.Len() == 0 {
+		return ArbitrateAllResult{Pass: true, ReviewScope: "none"}, nil
+	}
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: b.String()}},
+	})
+	if err != nil {
+		return ArbitrateAllResult{}, fmt.Errorf("pm arbitrate all: runner: %w", err)
+	}
+
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return ArbitrateAllResult{}, fmt.Errorf("pm arbitrate all: stream: %w", err)
+	}
+
+	return parseArbitrateAllResult(output), nil
+}
+
+func parseArbitrateAllResult(text string) ArbitrateAllResult {
+	result := ArbitrateAllResult{Pass: true, ReviewScope: "none"}
+
+	lines := strings.Split(text, "\n")
+	section := ""
+
+	for _, line := range lines {
+		upper := strings.ToUpper(strings.TrimSpace(line))
+
+		switch {
+		case strings.Contains(upper, "===VERDICT==="):
+			section = "verdict"
+		case section == "verdict" && strings.Contains(upper, "FIX"):
+			result.Pass = false
+			section = ""
+		case section == "verdict" && strings.Contains(upper, "PASS"):
+			result.Pass = true
+			section = ""
+		case strings.Contains(upper, "===REVIEW_SCOPE==="):
+			section = "scope"
+		case section == "scope":
+			scope := strings.TrimSpace(strings.ToLower(line))
+			if scope == "full" || scope == "partial" || scope == "none" {
+				result.ReviewScope = scope
+			}
+			section = ""
+		case strings.Contains(upper, "===NICE_TO_HAVE==="):
+			section = "nice"
+		case strings.Contains(upper, "===TASKS==="):
+			section = ""
+		default:
+			if section == "nice" {
+				item := extractListItem(line)
+				if item != "" && !isNoneValue(item) {
+					result.NiceToHave = append(result.NiceToHave, item)
+				}
+			}
+		}
+	}
+
+	// Parse sub-tasks using existing helper.
+	if tasks, err := parseSubTasks(text); err == nil && len(tasks) > 0 {
+		result.SubTasks = tasks
+		result.Pass = false
+	}
+
+	return result
+}
+
 // TaskSpec is the PM's formalized understanding of a task.
 type TaskSpec struct {
 	Title              string   `json:"title"`

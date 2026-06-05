@@ -112,6 +112,22 @@ Three-layer config with sensible defaults:
 
 Agents are augmented with embedded skill documents (Go patterns, testing strategies, security checklists, etc.) that are injected into their system prompts.
 
+### Project Memory (OpenClaw-style)
+
+The orchestrator persists everything important about a project as Markdown files in `.orchestrator/memory/`:
+
+- **`MEMORY.md`** — pinned facts and decisions, prepended verbatim to every agent prompt.
+- **`memory/daily/YYYY-MM-DD.md`** — auto-appended event log per pipeline run.
+- **`memory/tasks/<task-id>.md`** — per-task summary on completion.
+
+Files are indexed into a local SQLite database (FTS5/BM25) so a new task automatically recalls relevant fragments from past work — no hidden multi-session state, no vector DB. Optional embedder backends (OpenAI-compatible, Ollama) enable hybrid semantic search. See [`doc/memory.md`](doc/memory.md) for full details.
+
+```bash
+orchestrator memory show
+orchestrator memory search "JWT auth"
+orchestrator memory add "Use sqlc for typed queries"
+```
+
 ### Human Approval Gates
 
 The pipeline pauses for your approval at key stages:
