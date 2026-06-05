@@ -3,12 +3,24 @@ package agent
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/chunker"
 	pkgcontext "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
+)
+
+// Selection reasons recorded per included file, used for instrumentation so
+// the source-context pipeline can be measured and compared across agents.
+const (
+	reasonSeed   = "seed"
+	reasonImport = "import"
+	reasonCaller = "caller"
+	reasonFile   = "file"
 )
 
 // maxReviewFileSize limits individual file size in review context.
@@ -25,19 +37,21 @@ const maxReviewTotalContext = 40000
 //
 // Files larger than maxReviewFileSize are truncated at chunk boundaries
 // (whole functions/types) instead of mid-statement.
-func buildCompactSourceContext(root string, files []string, maxTokens int, seeds ...string) string {
-	return buildSourceContextSized(root, files, seeds, maxReviewTotalContext, maxReviewFileSize, maxTokens)
+func buildCompactSourceContext(label, root string, files []string, maxTokens int, seeds ...string) string {
+	return buildSourceContextSized(label, root, files, seeds, maxReviewTotalContext, maxReviewFileSize, maxTokens)
 }
 
 // buildSourceContextSized is the budget-parameterised core of context
 // rendering. Used by review agents (small budgets) and by the Coder fix loop
 // (larger budget). totalBudget is a hard ceiling on the rendered string;
 // perFileBudget is applied per file via chunk-boundary truncation.
-func buildSourceContextSized(root string, files, seeds []string, totalBudget, perFileBudget, maxTokens int) string {
+// label identifies the calling agent for instrumentation.
+func buildSourceContextSized(label, root string, files, seeds []string, totalBudget, perFileBudget, maxTokens int) string {
 	if root == "" {
 		return ""
 	}
-	expanded := expandWithGraph(root, files, seeds)
+	start := time.Now()
+	expanded, reasons := expandWithGraph(root, files, seeds)
 	if len(expanded) == 0 {
 		return ""
 	}
@@ -53,6 +67,10 @@ func buildSourceContextSized(root string, files, seeds []string, totalBudget, pe
 		}
 	}
 
+	includedFiles := 0
+	truncatedFiles := 0
+	reasonCounts := map[string]int{}
+
 	for _, path := range expanded {
 		if totalSize >= budget {
 			break
@@ -65,6 +83,7 @@ func buildSourceContextSized(root string, files, seeds []string, totalBudget, pe
 			continue
 		}
 
+		truncated := len(content) > perFileBudget
 		fileContent := truncateByChunks(path, content, perFileBudget)
 
 		entry := fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, fileContent)
@@ -72,6 +91,7 @@ func buildSourceContextSized(root string, files, seeds []string, totalBudget, pe
 			remaining := budget - totalSize
 			if remaining > 200 {
 				fileContent = tokenutil.Truncate(fileContent, remaining/4)
+				truncated = true
 				entry = fmt.Sprintf("**%s**\n```\n%s\n```\n\n", path, fileContent)
 			} else {
 				break
@@ -80,9 +100,44 @@ func buildSourceContextSized(root string, files, seeds []string, totalBudget, pe
 
 		sb.WriteString(entry)
 		totalSize += len(entry)
+		includedFiles++
+		if truncated {
+			truncatedFiles++
+		}
+		reasonCounts[reasonOf(reasons, path)]++
 	}
 
-	return sb.String()
+	result := sb.String()
+	logSourceContext(label, len(expanded), includedFiles, truncatedFiles, len(result), tokenutil.EstimateTokens(result), reasonCounts, time.Since(start))
+	return result
+}
+
+// reasonOf returns the recorded selection reason for path, defaulting to
+// reasonFile when none was tracked.
+func reasonOf(reasons map[string]string, path string) string {
+	if r, ok := reasons[path]; ok {
+		return r
+	}
+	return reasonFile
+}
+
+// logSourceContext emits one structured record describing what the source
+// context assembly produced, so token usage and selection can be measured and
+// compared across agents and runs.
+func logSourceContext(label string, considered, included, truncated, chars, tokens int, reasons map[string]int, dur time.Duration) {
+	logging.ForComponent("source_context").Info("assembled",
+		slog.String("agent", label),
+		slog.Int("files_considered", considered),
+		slog.Int("files_included", included),
+		slog.Int("files_truncated", truncated),
+		slog.Int("chars", chars),
+		slog.Int("est_tokens", tokens),
+		slog.Int("seed", reasons[reasonSeed]),
+		slog.Int("import", reasons[reasonImport]),
+		slog.Int("caller", reasons[reasonCaller]),
+		slog.Int("file", reasons[reasonFile]),
+		slog.Int64("build_ms", dur.Milliseconds()),
+	)
 }
 
 // truncateByChunks returns a string that fits within budget by selecting whole
@@ -126,17 +181,35 @@ func truncateByChunks(path string, content []byte, budget int) string {
 }
 
 // expandWithGraph prepends seeds, their imports, and their callers to the
-// caller-supplied file list, removing duplicates while preserving order.
-func expandWithGraph(root string, files, seeds []string) []string {
+// caller-supplied file list, removing duplicates while preserving order. It
+// also returns a map recording, per path, the first reason it was selected
+// (seed / import / caller / file) for instrumentation.
+func expandWithGraph(root string, files, seeds []string) ([]string, map[string]string) {
+	reasons := make(map[string]string)
+	record := func(paths []string, reason string) {
+		for _, p := range paths {
+			if p == "" {
+				continue
+			}
+			if _, ok := reasons[p]; !ok {
+				reasons[p] = reason
+			}
+		}
+	}
+
 	if len(seeds) == 0 {
-		return dedupePreserveOrder(files)
+		ordered := dedupePreserveOrder(files)
+		record(ordered, reasonFile)
+		return ordered, reasons
 	}
 	ordered := make([]string, 0, len(files)+len(seeds)*4)
 
 	ordered = append(ordered, seeds...)
+	record(seeds, reasonSeed)
 	for _, s := range seeds {
 		if imps, err := pkgcontext.ImportsOf(root, s); err == nil {
 			ordered = append(ordered, imps...)
+			record(imps, reasonImport)
 		}
 	}
 	for _, s := range seeds {
@@ -146,10 +219,12 @@ func expandWithGraph(root string, files, seeds []string) []string {
 		}
 		if callers, err := pkgcontext.CallersOf(root, sym); err == nil {
 			ordered = append(ordered, callers...)
+			record(callers, reasonCaller)
 		}
 	}
 	ordered = append(ordered, files...)
-	return dedupePreserveOrder(ordered)
+	record(files, reasonFile)
+	return dedupePreserveOrder(ordered), reasons
 }
 
 func dedupePreserveOrder(in []string) []string {

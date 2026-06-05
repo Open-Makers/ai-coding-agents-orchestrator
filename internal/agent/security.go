@@ -56,7 +56,7 @@ func (a *SecurityAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 	payload, _ := msg.Payload.(SecurityPayload)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
-	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
+	sourceContext := buildCompactSourceContext(string(a.Role()), payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
 	if sourceContext == "" {
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		sourceContext = string(raw)

@@ -182,7 +182,7 @@ func (a *QAAgent) runReview(ctx context.Context, payload QAReviewPayload) (bus.M
 	plan, _ := a.ws.ReadFile(artifacts.ImplementationPlanFile)
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
-	sourceContext := buildCompactSourceContext(payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
+	sourceContext := buildCompactSourceContext(string(a.Role()), payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
 	if sourceContext == "" {
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		sourceContext = string(raw)

@@ -585,7 +585,7 @@ func (a *CoderAgent) buildSourceContextWithSeeds(files, seeds []string) string {
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		return string(raw)
 	}
-	return buildSourceContextSized(a.root, files, seeds, maxCoderSourceContext, maxCoderPerFileSize, 0)
+	return buildSourceContextSized(string(a.Role()), a.root, files, seeds, maxCoderSourceContext, maxCoderPerFileSize, 0)
 }
 
 // collectExistingSourceFiles walks the project root and returns relative paths
