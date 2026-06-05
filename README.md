@@ -53,6 +53,10 @@ Manual back-and-forth with AI coding assistants is slow, error-prone, and hard t
 
 Full-featured terminal user interface with agent panels, live token streaming, artifact viewer, chat-based revision, and project picker.
 
+A built-in **System Monitor** (toggle with `Ctrl+T`) shows live CPU, memory, network, and per-agent token usage. Token lines use `↓` for input (prompt) tokens, `↑` for output (generated) tokens, and a trailing `~` when the count is estimated — e.g. `coder ↓33.7k ↑4.5k~`.
+
+See [`doc/tui.md`](doc/tui.md) for a full reference of every panel, status indicator, keyboard shortcut, and token notation, with examples.
+
 <p align="center">
   <img src="doc/images/menu.png" width="700" alt="Main Menu">
 </p>
