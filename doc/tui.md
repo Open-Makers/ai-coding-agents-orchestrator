@@ -42,7 +42,7 @@ output than fits on screen, a scroll indicator appears; use `↑`/`↓` to scrol
 The bottom line is laid out as:
 
 ```
-main  ● coder   ▸ Stage 2/5: Must Have — Auth        copilot/claude-opus-4.8  ⏱ 3m 12s   ↑↓ scroll  Ctrl+R req  …  v0.5.0
+main  ● coder   ▸ Stage 2/5: Must Have — Auth        copilot/claude-opus-4.8  ⏱ 3m 12s   ↑↓ scroll  Ctrl+R req  …  v0.7.0
 ```
 
 Reading left to right:
@@ -55,7 +55,7 @@ Reading left to right:
 | **Runner / model**              | `copilot/claude-opus-4.8`                | The active runner and model for the running agent.                      |
 | **Elapsed timer**               | `⏱ 3m 12s`                               | Time since coding started (appears once the Coder begins).              |
 | **Keyboard shortcuts**          | `↑↓ scroll  Ctrl+R req  …`               | Available actions (see below).                                          |
-| **Version**                     | `v0.5.0`                                 | The orchestrator version.                                               |
+| **Version**                     | `v0.7.0`                                 | The orchestrator version.                                               |
 
 ### Keyboard shortcuts
 
