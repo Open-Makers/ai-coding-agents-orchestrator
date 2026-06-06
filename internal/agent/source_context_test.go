@@ -270,6 +270,92 @@ func Start() error { return nil }
 	}
 }
 
+func TestShadowMeasureScopedContext_NoOpWithoutTargets(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "svc.go"),
+		[]byte("package svc\n\nfunc A() {}\n\nfunc B() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The whole-file context the reviewer actually receives must be identical
+	// whether or not shadow measurement runs — shadow never mutates it.
+	whole := buildCompactSourceContext("rev", dir, []string{"svc.go"}, 0)
+
+	// No targets: shadow is a no-op (must not panic).
+	shadowMeasureScopedContext("rev", dir, []string{"svc.go"}, nil, 0)
+
+	// With targets: shadow renders + logs, but the reviewer's context is
+	// recomputed identically (proving no shared/mutated state).
+	shadowMeasureScopedContext("rev", dir, []string{"svc.go"}, map[string][]string{"svc.go": {"A"}}, 0)
+	wholeAgain := buildCompactSourceContext("rev", dir, []string{"svc.go"}, 0)
+
+	if whole != wholeAgain {
+		t.Error("reviewer whole-file context changed across shadow measurement")
+	}
+}
+
+func TestRenderSymbolChunks_GroupedTypeBlock(t *testing.T) {
+	src := `package p
+
+type (
+	Alpha struct{ a int }
+	Beta  struct{ b int }
+)
+
+func Unrelated() {}
+`
+	// Requesting Beta (second spec in a grouped block) must match the block.
+	out, _ := renderSymbolChunks("p.go", []byte(src), []string{"Beta"}, 100000)
+	if !strings.Contains(out, "Beta  struct") {
+		t.Errorf("expected grouped type block selected for Beta:\n%s", out)
+	}
+	if strings.Contains(out, "func Unrelated()") {
+		t.Errorf("did not expect unrelated decl:\n%s", out)
+	}
+}
+
+func TestRenderSymbolChunks_QualifiedMethodTarget(t *testing.T) {
+	src := `package p
+
+type A struct{}
+type B struct{}
+
+func (A) Close() {}
+func (B) Close() {}
+`
+	// Qualified target must select only B.Close, not A.Close.
+	out, _ := renderSymbolChunks("p.go", []byte(src), []string{"(*B).Close"}, 100000)
+	if !strings.Contains(out, "func (B) Close()") {
+		t.Errorf("expected B.Close:\n%s", out)
+	}
+	if strings.Contains(out, "func (A) Close()") {
+		t.Errorf("did not expect A.Close for qualified (*B).Close:\n%s", out)
+	}
+}
+
+func TestRenderSymbolChunks_PullsSignatureReferencedTypes(t *testing.T) {
+	src := `package p
+
+type Config struct{ n int }
+type Server struct{ c Config }
+
+func NewServer(cfg Config) (*Server, error) { return &Server{}, nil }
+
+func Noise() {}
+`
+	// Selecting the constructor should pull in Config and Server from its
+	// signature, but not unrelated decls.
+	out, _ := renderSymbolChunks("p.go", []byte(src), []string{"NewServer"}, 100000)
+	for _, want := range []string{"func NewServer(cfg Config)", "type Config struct", "type Server struct"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in signature-scoped output:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "func Noise()") {
+		t.Errorf("did not expect unrelated decl:\n%s", out)
+	}
+}
+
 func TestBuildCompactSourceContext_ChunkBoundaries(t *testing.T) {
 	dir := t.TempDir()
 

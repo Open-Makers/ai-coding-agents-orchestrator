@@ -48,6 +48,9 @@ type QAReviewPayload struct {
 	Root           string
 	ProjectContext string
 	Seeds          []string
+	// Targets maps file -> symbol names for measurement-only scoped-context
+	// shadow logging. Set by the runner when scoped_context_shadow is enabled.
+	Targets map[string][]string
 }
 
 // QAReviewResult is the structured outcome of a quality review.
@@ -183,6 +186,7 @@ func (a *QAAgent) runReview(ctx context.Context, payload QAReviewPayload) (bus.M
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
 	sourceContext := buildCompactSourceContext(string(a.Role()), payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
+	shadowMeasureScopedContext(string(a.Role()), payload.Root, payload.Files, payload.Targets, a.maxContextTokens, payload.Seeds...)
 	if sourceContext == "" {
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		sourceContext = string(raw)

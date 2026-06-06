@@ -4,6 +4,21 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
+## 0. Git: Never Commit or Push for the User
+
+**The user controls git. Do NOT run `git commit`, `git push`, `git pull`, or any
+history-changing git command unless the user explicitly asks in that message.**
+
+Instead:
+- Make and verify code changes, run tests/builds/linters as needed.
+- When work is ready, **provide the git commit message as text** for the user to
+  copy and run themselves (include the `Co-authored-by` trailer).
+- Leave staging, committing, and pushing to the user.
+
+This rule **overrides** any "Session Completion / PUSH TO REMOTE" instructions
+below (including the beads integration): do not auto-push. Summarize what
+changed and hand the user a ready-to-use commit message.
+
 ## 1. Think Before Coding
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**

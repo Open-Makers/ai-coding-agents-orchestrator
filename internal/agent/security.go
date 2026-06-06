@@ -13,9 +13,10 @@ import (
 
 // SecurityPayload is the input for security review.
 type SecurityPayload struct {
-	Files []string // source files to review
-	Root  string   // project root for reading files
-	Seeds []string // optional seed paths (graph + semantic) to expand context
+	Files   []string            // source files to review
+	Root    string              // project root for reading files
+	Seeds   []string            // optional seed paths (graph + semantic) to expand context
+	Targets map[string][]string // file -> symbols for scoped-context shadow logging
 }
 
 // SecurityResult is the structured outcome of a security review.
@@ -57,6 +58,7 @@ func (a *SecurityAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, 
 	report, _ := a.ws.ReadFile(artifacts.TestReportFile)
 
 	sourceContext := buildCompactSourceContext(string(a.Role()), payload.Root, payload.Files, a.maxContextTokens, payload.Seeds...)
+	shadowMeasureScopedContext(string(a.Role()), payload.Root, payload.Files, payload.Targets, a.maxContextTokens, payload.Seeds...)
 	if sourceContext == "" {
 		raw, _ := a.ws.ReadFile(artifacts.RawCoderOutputFile)
 		sourceContext = string(raw)

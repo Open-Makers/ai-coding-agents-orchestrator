@@ -297,3 +297,51 @@ project:
 		t.Errorf("unexpected semantic_index: %+v", si)
 	}
 }
+
+func TestLoad_ScopedContextShadow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	orchDir := filepath.Join(dir, GlobalDir)
+	if err := os.MkdirAll(orchDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `
+project:
+  context:
+    scoped_context_shadow: true
+`
+	if err := os.WriteFile(filepath.Join(orchDir, ProjectFilename), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Project.Context.ScopedContextShadow {
+		t.Error("expected scoped_context_shadow to be true after load")
+	}
+}
+
+func TestLoad_ScopedContextCoderFix(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	orchDir := filepath.Join(dir, GlobalDir)
+	if err := os.MkdirAll(orchDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `
+project:
+  context:
+    scoped_context_coder_fix: true
+`
+	if err := os.WriteFile(filepath.Join(orchDir, ProjectFilename), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Project.Context.ScopedContextCoderFix {
+		t.Error("expected scoped_context_coder_fix to be true after load")
+	}
+}

@@ -91,6 +91,20 @@ type ContextConfig struct {
 	ExcludePatterns []string            `yaml:"exclude_patterns,omitempty"`
 	SemanticIndex   SemanticIndexConfig `yaml:"semantic_index,omitempty"`
 	Memory          MemoryConfig        `yaml:"memory,omitempty"`
+
+	// ScopedContextShadow enables measurement-only logging of symbol-scoped
+	// source context during review: the scoped context is rendered and its
+	// token estimate logged (agent="<role>-shadow") alongside the whole-file
+	// context that is actually sent. It does NOT change what agents receive.
+	// Requires the semantic index to be enabled. Default false.
+	ScopedContextShadow bool `yaml:"scoped_context_shadow,omitempty"`
+
+	// ScopedContextCoderFix enables ADDITIVE symbol-scoped related context in
+	// the coder fix loop: the changed/error files are still rendered whole, and
+	// semantically related declarations are appended scoped (cheaply) to improve
+	// fix recall. Non-destructive — it never removes the code being fixed.
+	// Requires the semantic index to be enabled. Default false.
+	ScopedContextCoderFix bool `yaml:"scoped_context_coder_fix,omitempty"`
 }
 
 // SemanticIndexConfig controls the optional embeddings-based file index.
@@ -108,16 +122,16 @@ type SemanticIndexConfig struct {
 // by SQLite FTS5/BM25. When UseEmbeddings is true an embedder backend
 // computes dense vectors for hybrid retrieval.
 type MemoryConfig struct {
-	Enabled         bool    `yaml:"enabled,omitempty"`           // default true
-	TopK            int     `yaml:"top_k,omitempty"`             // default 8
-	ChunkTokens     int     `yaml:"chunk_tokens,omitempty"`      // default 400
-	OverlapTokens   int     `yaml:"overlap_tokens,omitempty"`    // default 80
-	HybridAlpha     float64 `yaml:"hybrid_alpha,omitempty"`      // default 0.5; 1.0 = pure BM25
-	MaxRecallChars  int     `yaml:"max_recall_chars,omitempty"`  // default 6000
-	MaxPinnedChars  int     `yaml:"max_pinned_chars,omitempty"`  // default 4000
-	UseEmbeddings   bool    `yaml:"use_embeddings,omitempty"`    // default false
-	Embedder        string  `yaml:"embedder,omitempty"`          // "openai" | "ollama" | "cybertron"
-	EmbedderModel   string  `yaml:"embedder_model,omitempty"`    // default per backend
+	Enabled           bool    `yaml:"enabled,omitempty"`             // default true
+	TopK              int     `yaml:"top_k,omitempty"`               // default 8
+	ChunkTokens       int     `yaml:"chunk_tokens,omitempty"`        // default 400
+	OverlapTokens     int     `yaml:"overlap_tokens,omitempty"`      // default 80
+	HybridAlpha       float64 `yaml:"hybrid_alpha,omitempty"`        // default 0.5; 1.0 = pure BM25
+	MaxRecallChars    int     `yaml:"max_recall_chars,omitempty"`    // default 6000
+	MaxPinnedChars    int     `yaml:"max_pinned_chars,omitempty"`    // default 4000
+	UseEmbeddings     bool    `yaml:"use_embeddings,omitempty"`      // default false
+	Embedder          string  `yaml:"embedder,omitempty"`            // "openai" | "ollama" | "cybertron"
+	EmbedderModel     string  `yaml:"embedder_model,omitempty"`      // default per backend
 	EmbedderBaseURL   string  `yaml:"embedder_base_url,omitempty"`   // for openai/ollama
 	EmbedderAPIKey    string  `yaml:"embedder_api_key,omitempty"`    // env var indirection acceptable
 	EmbedderModelsDir string  `yaml:"embedder_models_dir,omitempty"` // cybertron model cache; default ~/.orchestrator/cybertron-models
@@ -292,7 +306,6 @@ func mergeMemory(dst *MemoryConfig, src MemoryConfig) {
 	}
 }
 
-
 func merge(dst *Config, src Config) {
 	if src.Project.Name != "" {
 		dst.Project.Name = src.Project.Name
@@ -338,6 +351,12 @@ func merge(dst *Config, src Config) {
 	}
 	if src.Project.Context.SemanticIndex.TopK > 0 {
 		dst.Project.Context.SemanticIndex.TopK = src.Project.Context.SemanticIndex.TopK
+	}
+	if src.Project.Context.ScopedContextShadow {
+		dst.Project.Context.ScopedContextShadow = true
+	}
+	if src.Project.Context.ScopedContextCoderFix {
+		dst.Project.Context.ScopedContextCoderFix = true
 	}
 	mergeMemory(&dst.Project.Context.Memory, src.Project.Context.Memory)
 	if src.PromptLanguage != "" {

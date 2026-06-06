@@ -41,6 +41,18 @@ func buildCompactSourceContext(label, root string, files []string, maxTokens int
 	return buildSourceContextSized(label, root, files, seeds, maxReviewTotalContext, maxReviewFileSize, maxTokens)
 }
 
+// shadowMeasureScopedContext renders a symbol-scoped version of the same review
+// context purely to emit instrumentation under agent="<label>-shadow"; the
+// rendered text is discarded. It lets us compare the potential scoped token
+// cost against the whole-file context actually sent, without changing what the
+// agent receives. No-op when there are no targets.
+func shadowMeasureScopedContext(label, root string, files []string, targets map[string][]string, maxTokens int, seeds ...string) {
+	if len(targets) == 0 {
+		return
+	}
+	_ = buildScopedSourceContext(label+"-shadow", root, files, seeds, targets, maxReviewTotalContext, maxReviewFileSize, maxTokens)
+}
+
 // buildSourceContextSized is the budget-parameterised core of context
 // rendering. Used by review agents (small budgets) and by the Coder fix loop
 // (larger budget). totalBudget is a hard ceiling on the rendered string;
@@ -176,13 +188,7 @@ func renderSymbolChunks(path string, content []byte, symbols []string, budget in
 		return truncateByChunks(path, content, budget), len(content) > budget
 	}
 
-	want := make(map[string]bool, len(symbols))
-	for _, s := range symbols {
-		if s != "" {
-			want[s] = true
-		}
-	}
-
+	want := parseSymbolTargets(symbols)
 	selected := selectSymbolChunks(chunks, want)
 	if len(selected) == 0 {
 		return truncateByChunks(path, content, budget), len(content) > budget
@@ -212,29 +218,111 @@ func renderSymbolChunks(path string, content []byte, symbols []string, budget in
 	return sb.String(), omitted
 }
 
-// selectSymbolChunks returns the chunks matching want, in source order:
-// direct name matches, methods whose receiver type is wanted, and the
-// enclosing type declaration of any included method.
-func selectSymbolChunks(chunks []chunker.Chunk, want map[string]bool) []chunker.Chunk {
+// symbolTargets is a parsed set of requested symbols. names holds bare
+// identifiers (functions, types, vars, consts, or bare method names); methods
+// holds qualified method requests as recvType -> set of method names, parsed
+// from forms like "Server.Start" or "(*Server).Start".
+type symbolTargets struct {
+	names   map[string]bool
+	methods map[string]map[string]bool
+}
+
+// parseSymbolTargets splits requested symbol strings into bare names and
+// qualified method requests. "(*Server).Start" and "Server.Start" both select
+// method Start on receiver type Server; "Foo" selects anything named Foo.
+func parseSymbolTargets(symbols []string) symbolTargets {
+	t := symbolTargets{names: map[string]bool{}, methods: map[string]map[string]bool{}}
+	for _, s := range symbols {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		if recv, method, ok := splitQualifiedMethod(s); ok {
+			if t.methods[recv] == nil {
+				t.methods[recv] = map[string]bool{}
+			}
+			t.methods[recv][method] = true
+			continue
+		}
+		t.names[s] = true
+	}
+	return t
+}
+
+// splitQualifiedMethod parses "Recv.Method" or "(*Recv).Method" into its
+// receiver type and method name. Returns ok=false for unqualified names.
+func splitQualifiedMethod(s string) (recv, method string, ok bool) {
+	dot := strings.LastIndex(s, ".")
+	if dot <= 0 || dot == len(s)-1 {
+		return "", "", false
+	}
+	recv = s[:dot]
+	method = s[dot+1:]
+	recv = strings.TrimPrefix(strings.TrimSuffix(strings.TrimPrefix(recv, "("), ")"), "*")
+	recv = strings.TrimPrefix(recv, "*")
+	if recv == "" || strings.ContainsAny(recv, ".()*") || strings.ContainsAny(method, ".()*") {
+		return "", "", false
+	}
+	return recv, method, true
+}
+
+// selectSymbolChunks returns the chunks matching the requested targets, in
+// source order. It matches by any declared name (covering grouped
+// type/const/var blocks), qualified or bare method names, and methods whose
+// receiver type was requested. For any selected function/method it also pulls
+// in same-file type declarations referenced in the signature, and for any
+// selected method it pulls in its enclosing type declaration.
+func selectSymbolChunks(chunks []chunker.Chunk, want symbolTargets) []chunker.Chunk {
 	included := make([]bool, len(chunks))
 	wantType := make(map[string]bool)
 
-	for i, c := range chunks {
-		if c.Name != "" && want[c.Name] {
-			included[i] = true
+	nameMatch := func(c chunker.Chunk) bool {
+		for _, n := range chunkNames(c) {
+			if want.names[n] {
+				return true
+			}
 		}
-		if c.Kind == "method" && c.Recv != "" && want[c.Recv] {
+		return false
+	}
+	methodMatch := func(c chunker.Chunk) bool {
+		if c.Kind != "method" {
+			return false
+		}
+		if c.Recv != "" && want.names[c.Recv] {
+			return true // requesting a type pulls its methods
+		}
+		if ms, ok := want.methods[c.Recv]; ok && ms[c.Name] {
+			return true // qualified Recv.Method
+		}
+		return false
+	}
+
+	for i, c := range chunks {
+		if nameMatch(c) || methodMatch(c) {
 			included[i] = true
 		}
 	}
+	// Expand: enclosing types of selected methods + signature-referenced types.
 	for i, c := range chunks {
-		if included[i] && c.Kind == "method" && c.Recv != "" {
+		if !included[i] {
+			continue
+		}
+		if c.Kind == "method" && c.Recv != "" {
 			wantType[c.Recv] = true
 		}
+		for _, r := range c.Refs {
+			wantType[r] = true
+		}
 	}
 	for i, c := range chunks {
-		if c.Kind == "type" && wantType[c.Name] {
-			included[i] = true
+		if c.Kind != "type" {
+			continue
+		}
+		for _, n := range chunkNames(c) {
+			if wantType[n] {
+				included[i] = true
+				break
+			}
 		}
 	}
 
@@ -245,6 +333,17 @@ func selectSymbolChunks(chunks []chunker.Chunk, want map[string]bool) []chunker.
 		}
 	}
 	return out
+}
+
+// chunkNames returns a chunk's declared names, falling back to its primary name.
+func chunkNames(c chunker.Chunk) []string {
+	if len(c.Names) > 0 {
+		return c.Names
+	}
+	if c.Name != "" {
+		return []string{c.Name}
+	}
+	return nil
 }
 
 // fileHeader returns the bytes preceding the first declaration — the package

@@ -14,10 +14,12 @@ import (
 
 // Chunk represents one syntactic unit of a source file.
 type Chunk struct {
-	Kind      string // "function", "method", "type", "var", "const", "file"
-	Name      string // identifier (may be "" for "file" kind)
-	Recv      string // receiver type name for methods (e.g. "Foo"), else ""
-	Exported  bool   // true if the identifier is exported (Go convention)
+	Kind      string   // "function", "method", "type", "var", "const", "file"
+	Name      string   // primary identifier (may be "" for "file" kind)
+	Names     []string // all declared identifiers (grouped type/const/var blocks)
+	Recv      string   // receiver type name for methods (e.g. "Foo"), else ""
+	Refs      []string // type identifiers referenced in a func/method signature
+	Exported  bool     // true if the primary identifier is exported (Go convention)
 	StartLine int
 	EndLine   int
 	Body      string // verbatim source for the chunk
@@ -90,13 +92,18 @@ func chunkGo(path string, content []byte) ([]Chunk, error) {
 			continue
 		}
 		recv := ""
-		if kind == "method" {
+		var refs []string
+		if kind == "method" || kind == "function" {
 			if fn, ok := decl.(*ast.FuncDecl); ok {
-				recv = recvTypeName(fn.Recv)
+				if kind == "method" {
+					recv = recvTypeName(fn.Recv)
+				}
+				refs = signatureTypeNames(fn.Type)
 			}
 		}
 		chunks = append(chunks, Chunk{
-			Kind: kind, Name: name, Recv: recv, Exported: isExported(name),
+			Kind: kind, Name: name, Names: declNames(decl, name), Recv: recv, Refs: refs,
+			Exported:  isExported(name),
 			StartLine: startPos.Line, EndLine: endPos.Line, Body: body,
 		})
 	}
@@ -171,6 +178,102 @@ func substringByOffset(src []byte, start, end int) string {
 		return ""
 	}
 	return string(src[start:end])
+}
+
+// declNames returns all top-level identifiers declared by a declaration. For a
+// grouped GenDecl (e.g. `type ( A; B )` or a multi-name const/var block) this
+// returns every declared name so a request for any of them matches the chunk.
+// Falls back to the single primary name for function/method declarations.
+func declNames(decl ast.Decl, primary string) []string {
+	gd, ok := decl.(*ast.GenDecl)
+	if !ok {
+		if primary == "" {
+			return nil
+		}
+		return []string{primary}
+	}
+	var names []string
+	for _, spec := range gd.Specs {
+		switch sp := spec.(type) {
+		case *ast.TypeSpec:
+			if sp.Name != nil {
+				names = append(names, sp.Name.Name)
+			}
+		case *ast.ValueSpec:
+			for _, n := range sp.Names {
+				if n != nil {
+					names = append(names, n.Name)
+				}
+			}
+		}
+	}
+	if len(names) == 0 && primary != "" {
+		return []string{primary}
+	}
+	return names
+}
+
+// signatureTypeNames returns the identifier names of types referenced in a
+// function/method signature (type params, parameters and results), unwrapping
+// pointers, slices, maps, channels, variadics and generic instantiations.
+// Package-qualified types (pkg.T) are skipped — only same-package identifiers
+// are useful for pulling local type declarations into scoped context.
+func signatureTypeNames(ft *ast.FuncType) []string {
+	if ft == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	add := func(fl *ast.FieldList) {
+		if fl == nil {
+			return
+		}
+		for _, f := range fl.List {
+			for _, name := range typeIdents(f.Type) {
+				if !seen[name] {
+					seen[name] = true
+					out = append(out, name)
+				}
+			}
+		}
+	}
+	if ft.TypeParams != nil {
+		add(ft.TypeParams)
+	}
+	add(ft.Params)
+	add(ft.Results)
+	return out
+}
+
+// typeIdents extracts base identifier names from a type expression.
+func typeIdents(expr ast.Expr) []string {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return []string{e.Name}
+	case *ast.StarExpr:
+		return typeIdents(e.X)
+	case *ast.ArrayType:
+		return typeIdents(e.Elt)
+	case *ast.Ellipsis:
+		return typeIdents(e.Elt)
+	case *ast.MapType:
+		return append(typeIdents(e.Key), typeIdents(e.Value)...)
+	case *ast.ChanType:
+		return typeIdents(e.Value)
+	case *ast.IndexExpr:
+		return append(typeIdents(e.X), typeIdents(e.Index)...)
+	case *ast.IndexListExpr:
+		out := typeIdents(e.X)
+		for _, idx := range e.Indices {
+			out = append(out, typeIdents(idx)...)
+		}
+		return out
+	case *ast.ParenExpr:
+		return typeIdents(e.X)
+	}
+	// SelectorExpr (pkg.T), FuncType, InterfaceType, StructType, etc. are
+	// intentionally ignored: they are either external or not single idents.
+	return nil
 }
 
 // recvTypeName returns the base type name of a method receiver, unwrapping

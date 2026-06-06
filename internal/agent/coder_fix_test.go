@@ -195,37 +195,73 @@ func TestWriteOneFile_NoOpRewriteSkipped(t *testing.T) {
 // A no-op rewrite must still count as a recognised file block so the empty-
 // output retry path does not fire.
 func TestStreamAndWriteFiles_NoOpCountsAsRecognised(t *testing.T) {
-root := t.TempDir()
-target := filepath.Join(root, "pkg", "x.go")
-if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-t.Fatal(err)
-}
-existing := "package x\n\nfunc Foo() {}\n"
-if err := os.WriteFile(target, []byte(existing), 0o644); err != nil {
-t.Fatal(err)
+	root := t.TempDir()
+	target := filepath.Join(root, "pkg", "x.go")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	existing := "package x\n\nfunc Foo() {}\n"
+	if err := os.WriteFile(target, []byte(existing), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &CoderAgent{root: root, BaseAgent: NewBase("coder", bus.New())}
+
+	ch := make(chan runner.Token, 16)
+	for _, line := range []string{
+		"**pkg/x.go**\n",
+		"```go\n",
+		"package x\n",
+		"\n",
+		"func Foo() {}\n",
+		"```\n",
+	} {
+		ch <- runner.Token{Text: line}
+	}
+	ch <- runner.Token{Done: true}
+	close(ch)
+
+	written, _, _, err := a.streamAndWriteFiles(ch)
+	if err != nil {
+		t.Fatalf("streamAndWriteFiles: %v", err)
+	}
+	if len(written) != 1 || written[0] != "pkg/x.go" {
+		t.Errorf("expected pkg/x.go recognised as no-op write, got written=%v", written)
+	}
 }
 
-a := &CoderAgent{root: root, BaseAgent: NewBase("coder", bus.New())}
+func TestBuildScopedRelatedContext_AdditiveAndNonDestructive(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, content string) {
+		full := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("changed.go", "package p\n\nfunc Changed() {}\n")
+	write("related.go", "package p\n\nfunc Related() {}\n\nfunc HugeUnrelated() string { return \""+strings.Repeat("x", 4000)+"\" }\n")
 
-ch := make(chan runner.Token, 16)
-for _, line := range []string{
-"**pkg/x.go**\n",
-"```go\n",
-"package x\n",
-"\n",
-"func Foo() {}\n",
-"```\n",
-} {
-ch <- runner.Token{Text: line}
-}
-ch <- runner.Token{Done: true}
-close(ch)
+	a := &CoderAgent{root: dir, BaseAgent: NewBase("coder", bus.New())}
 
-written, _, _, err := a.streamAndWriteFiles(ch)
-if err != nil {
-t.Fatalf("streamAndWriteFiles: %v", err)
-}
-if len(written) != 1 || written[0] != "pkg/x.go" {
-t.Errorf("expected pkg/x.go recognised as no-op write, got written=%v", written)
-}
+	// No targets → no related context.
+	if got := a.buildScopedRelatedContext([]string{"changed.go"}, nil, nil); got != "" {
+		t.Errorf("expected empty related context without targets, got %q", got)
+	}
+
+	// Target on a mandatory (changed) file → excluded (never re-add the diff).
+	if got := a.buildScopedRelatedContext([]string{"changed.go"}, nil, map[string][]string{"changed.go": {"Changed"}}); got != "" {
+		t.Errorf("expected mandatory file excluded from related context, got %q", got)
+	}
+
+	// Target on a new related file → scoped render added (only the named decl).
+	got := a.buildScopedRelatedContext([]string{"changed.go"}, nil, map[string][]string{"related.go": {"Related"}})
+	if !strings.Contains(got, "func Related()") {
+		t.Errorf("expected Related() in related context:\n%s", got)
+	}
+	if strings.Contains(got, "HugeUnrelated") {
+		t.Errorf("related context should be scoped, not whole-file:\n%s", got)
+	}
 }

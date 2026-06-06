@@ -11,8 +11,8 @@ permissions:
   checks: write
 
 jobs:
-  lint:
-    name: Lint & Security
+  ci:
+    name: Lint, Test & Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6.0.2
@@ -21,23 +21,23 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build check
-        run: go build -o /dev/null ./...
-
-      - name: Go vet
-        run: go vet ./...
-
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-
-      - name: golangci-lint
-        run: golangci-lint run ./...
 
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@latest
 
-      - name: Run tests
+      - name: make vet
+        run: make vet
+
+      - name: make lint
+        run: make lint
+
+      - name: make test-race (coverage + junit report)
         run: gotestsum --junitfile test-report.xml -- -race -coverprofile=coverage.out ./...
+
+      - name: make build
+        run: make build
 
       - name: Upload test report
         if: always()

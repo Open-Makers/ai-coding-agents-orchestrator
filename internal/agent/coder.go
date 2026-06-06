@@ -33,6 +33,10 @@ type CoderFixPayload struct {
 	Failure        string
 	ProjectContext string
 	Files          []string // source files to include as context (read from disk)
+	// Targets maps file -> symbol names for ADDITIVE scoped related context.
+	// Files here that are not already in Files are appended, rendered scoped.
+	// Never removes Files from context. Set by the runner when enabled.
+	Targets map[string][]string
 }
 
 // CoderResult holds the list of files written by the coder.
@@ -544,6 +548,13 @@ Without it the file will NOT be saved. No descriptions, no prose — only file b
 
 		sourceContext := a.buildSourceContextWithSeeds(payload.Files, errorFiles)
 
+		// Additive scoped related context: append semantically-related decls
+		// from files not already included, rendered scoped (cheap). Never
+		// removes the changed/error files above.
+		if related := a.buildScopedRelatedContext(payload.Files, errorFiles, payload.Targets); related != "" {
+			sourceContext += "\n\nRelated context (scoped to relevant declarations):\n" + related
+		}
+
 		errorFileList := ""
 		if len(errorFiles) > 0 {
 			errorFileList = "\n\nFiles referenced in errors:\n- " + strings.Join(errorFiles, "\n- ")
@@ -586,6 +597,33 @@ func (a *CoderAgent) buildSourceContextWithSeeds(files, seeds []string) string {
 		return string(raw)
 	}
 	return buildSourceContextSized(string(a.Role()), a.root, files, seeds, maxCoderSourceContext, maxCoderPerFileSize, 0)
+}
+
+// buildScopedRelatedContext renders additive, symbol-scoped context for files
+// in targets that are NOT already part of the whole-rendered fix context
+// (mandatory = files + seeds). Returns "" when there is nothing new to add.
+// This only ADDS related declarations; it never removes the code being fixed.
+func (a *CoderAgent) buildScopedRelatedContext(files, seeds []string, targets map[string][]string) string {
+	if len(targets) == 0 {
+		return ""
+	}
+	mandatory := make(map[string]struct{}, len(files)+len(seeds))
+	for _, f := range append(append([]string{}, files...), seeds...) {
+		mandatory[f] = struct{}{}
+	}
+	var relatedFiles []string
+	scoped := make(map[string][]string)
+	for f, syms := range targets {
+		if _, ok := mandatory[f]; ok || len(syms) == 0 {
+			continue
+		}
+		relatedFiles = append(relatedFiles, f)
+		scoped[f] = syms
+	}
+	if len(relatedFiles) == 0 {
+		return ""
+	}
+	return buildScopedSourceContext(string(a.Role())+"-related", a.root, relatedFiles, nil, scoped, maxCoderSourceContext, maxCoderPerFileSize, 0)
 }
 
 // collectExistingSourceFiles walks the project root and returns relative paths
