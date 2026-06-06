@@ -508,7 +508,7 @@ func parseArbitrateResult(text string) ArbitrateResult {
 type ArbitrateAllResult struct {
 	Pass        bool      // true = all clear, nothing to fix
 	SubTasks    []SubTask // new beads for real issues (empty when Pass)
-	ReviewScope string   // "full", "partial", or "none"
+	ReviewScope string    // "full", "partial", or "none"
 	NiceToHave  []string  // issues PM decided to skip
 }
 
@@ -740,7 +740,7 @@ func (a *PMAgent) loadCachedTaskSpec(key string) (TaskSpec, bool) {
 		return TaskSpec{}, false
 	}
 	path := filepath.Join(a.ws.Dir, taskSpecCacheDir, key+".json")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- workspace-controlled cache path under .orchestrator/
 	if err != nil {
 		return TaskSpec{}, false
 	}

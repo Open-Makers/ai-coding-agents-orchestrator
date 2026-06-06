@@ -274,7 +274,7 @@ func PrimarySymbolOf(root, file string) string {
 }
 
 func readModulePath(root string) string {
-	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	data, err := os.ReadFile(filepath.Join(root, "go.mod")) // #nosec G304 -- go.mod at the project root the user is operating on
 	if err != nil {
 		return ""
 	}

@@ -44,7 +44,7 @@ func loadOMLXAPIKey() string {
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, omlxSettingsRel))
+	data, err := os.ReadFile(filepath.Join(home, omlxSettingsRel)) // #nosec G304 -- fixed settings path under the user's home dir
 	if err != nil {
 		return ""
 	}

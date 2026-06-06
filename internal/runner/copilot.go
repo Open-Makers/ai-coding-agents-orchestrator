@@ -108,7 +108,7 @@ func readCopilotConfiguredModel() string {
 	if err != nil {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(home, ".copilot", "settings.json"))
+	data, err := os.ReadFile(filepath.Join(home, ".copilot", "settings.json")) // #nosec G304 -- fixed Copilot settings path under the user's home dir
 	if err != nil {
 		return ""
 	}

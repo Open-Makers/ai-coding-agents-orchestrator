@@ -251,6 +251,7 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
+	defer pipelineCancel()
 
 	go func() {
 		taskRunner := orchestrator.NewTaskRunner(b, agents, cfg, ws, root)

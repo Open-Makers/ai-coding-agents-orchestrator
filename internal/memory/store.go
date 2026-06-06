@@ -425,7 +425,7 @@ func (s *Store) rerankWithCosine(ctx context.Context, hits []Hit, qvec []float32
 		args[i] = v
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT chunk_id, dim, vec FROM embeddings WHERE chunk_id IN (`+placeholders+`)`,
+		`SELECT chunk_id, dim, vec FROM embeddings WHERE chunk_id IN (`+placeholders+`)`, // #nosec G202 -- placeholders is a generated list of bind markers (?,?,...), not user data
 		args...)
 	if err != nil {
 		for i := range hits {

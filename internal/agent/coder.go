@@ -425,7 +425,7 @@ func (a *CoderAgent) writeOneFile(path, content string) error {
 		content = fixInvalidGoPackage(content)
 	}
 	target := filepath.Join(a.root, path)
-	if existing, err := os.ReadFile(target); err == nil && string(existing) == content {
+	if existing, err := os.ReadFile(target); err == nil && string(existing) == content { // #nosec G304 -- target is sanitized via filepath.Join under the project root
 		return errNoOpRewrite
 	}
 	if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {

@@ -105,7 +105,7 @@ func Ready(ctx context.Context, root string) ([]Issue, error) {
 func runCmd(ctx context.Context, root string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bd", args...)
+	cmd := exec.CommandContext(ctx, "bd", args...) // #nosec G204 -- "bd" is a constant; args are internally built, not user-derived
 	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
