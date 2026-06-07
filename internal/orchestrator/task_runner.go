@@ -19,9 +19,11 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/bus"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/gitclient"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
 // defaultMaxCoderAttempts is the number of times the coder may fail before
@@ -141,7 +143,7 @@ func (tr *TaskRunner) Regenerate() {
 // 2. PM plans execution strategy (autonomous)
 // 3. Execute: code → quality gate (fully autonomous)
 func (tr *TaskRunner) Run(ctx context.Context, taskInput string) error {
-	err := tr.run(ctx, taskInput)
+	err := tr.run(ctx, taskInput, false)
 	if err != nil && errors.Is(err, runner.ErrRateLimited) && tr.state != PipelineRateLimited {
 		tr.setState(PipelineRateLimited)
 		tr.event(fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err))
@@ -149,7 +151,19 @@ func (tr *TaskRunner) Run(ctx context.Context, taskInput string) error {
 	return err
 }
 
-func (tr *TaskRunner) run(ctx context.Context, taskInput string) (retErr error) {
+// Resume continues an interrupted task: it loads the top-level bead, spec and
+// sub-task plan from the workspace, skips negotiate/decompose, and finishes the
+// remaining (open or interrupted) sub-tasks. Use Resumable() to check first.
+func (tr *TaskRunner) Resume(ctx context.Context) error {
+	err := tr.run(ctx, "", true)
+	if err != nil && errors.Is(err, runner.ErrRateLimited) && tr.state != PipelineRateLimited {
+		tr.setState(PipelineRateLimited)
+		tr.event(fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err))
+	}
+	return err
+}
+
+func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (retErr error) {
 	promptsDir := filepath.Join(tr.root, artifacts.DirName, appprompts.PromptsDirName)
 	appprompts.SetOverrideDir(promptsDir)
 	appprompts.SetUserLanguage("English")
@@ -159,7 +173,7 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string) (retErr error) 
 		curSpec  agent.TaskSpec
 	)
 	curSpec.Title = strings.TrimSpace(firstLine(taskInput))
-	if tr.runID == "" {
+	if !resume && tr.runID == "" {
 		tr.runID = newRunID()
 	}
 	defer func() {
@@ -177,9 +191,31 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string) (retErr error) 
 		tr.event(fmt.Sprintf("context collect warning: %v", err))
 	}
 	tr.projCtx = projCtx
-	tr.taskQuery = strings.TrimSpace(taskInput)
 
-	if recalled, mErr := appctx.CollectMemory(ctx, tr.root, tr.cfg, taskInput); mErr != nil {
+	var (
+		spec       agent.TaskSpec
+		subTasks   []agent.SubTask
+		subBeadIDs map[string]string
+		beadID     string
+	)
+
+	// On resume, load the saved state up front so memory recall and the
+	// semantic query use the actual task (taskInput is empty for resume).
+	memoryQuery := strings.TrimSpace(taskInput)
+	if resume {
+		curStage = "resume-load"
+		s, st, plan, lerr := tr.loadResumeState()
+		if lerr != nil {
+			return lerr
+		}
+		spec, curSpec = s, s
+		tr.taskBeadID, tr.runID, beadID = st.TopBeadID, st.RunID, st.TopBeadID
+		subTasks, subBeadIDs = plan.Tasks, plan.IDByKey
+		memoryQuery = strings.TrimSpace(spec.Title + " " + spec.Description)
+	}
+	tr.taskQuery = memoryQuery
+
+	if recalled, mErr := appctx.CollectMemory(ctx, tr.root, tr.cfg, memoryQuery); mErr != nil {
 		tr.event(fmt.Sprintf("memory recall warning: %v", mErr))
 		projCtx.Memory = recalled
 	} else {
@@ -191,53 +227,68 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string) (retErr error) 
 
 	ctxFragment := projCtx.SystemPromptFragment(appctx.ProfileFull)
 
-	tr.memAppend("task-start", fmt.Sprintf("**Task input:**\n\n%s", strings.TrimSpace(taskInput)))
+	if resume {
+		curStage = "execute"
+		tr.event(fmt.Sprintf("resuming task %s: %s", beadID, spec.Title))
+		// Resume safety: re-run build/tests to establish the current state and
+		// give agents the work already in progress (git diff), so they continue
+		// from the partial state instead of restarting from scratch.
+		if rc := tr.buildResumeContext(ctx); rc != "" {
+			ctxFragment += "\n\n" + rc
+		}
+	} else {
+		tr.memAppend("task-start", fmt.Sprintf("**Task input:**\n\n%s", strings.TrimSpace(taskInput)))
 
-	// ── Phase 1: Negotiate ── (human in the loop)
-	curStage = "negotiate"
-	var spec agent.TaskSpec
-	for {
-		spec, err = tr.negotiate(ctx, taskInput, ctxFragment)
+		// ── Phase 1: Negotiate ── (human in the loop)
+		curStage = "negotiate"
+		for {
+			spec, err = tr.negotiate(ctx, taskInput, ctxFragment)
+			if err != nil {
+				return fmt.Errorf("negotiate: %w", err)
+			}
+
+			if projCtx.IsBrownfield && strings.EqualFold(spec.Scope, "greenfield") {
+				newScope := inferBrownfieldScope(taskInput, spec.Description)
+				tr.event(fmt.Sprintf("brownfield project detected — downgrading scope from greenfield to %s", newScope))
+				spec.Scope = newScope
+			}
+
+			specData, _ := json.MarshalIndent(spec, "", "  ")
+			if err := tr.ws.WriteFile(artifacts.TaskSpecFile, specData); err != nil {
+				return fmt.Errorf("write task spec: %w", err)
+			}
+
+			approved, err := tr.waitArtifact(ctx, artifacts.TaskSpecFile)
+			if err != nil {
+				return err
+			}
+			if approved {
+				curSpec = spec
+				tr.memAppend("spec-approved", fmt.Sprintf("**Title:** %s\n\n**Scope:** %s\n\n**Description:**\n\n%s",
+					spec.Title, spec.Scope, strings.TrimSpace(spec.Description)))
+				break
+			}
+			tr.event("re-negotiating task spec…")
+			_ = removeWorkspaceFile(tr.ws, artifacts.TaskSpecFile)
+		}
+
+		beadID = tr.registerBead(ctx, spec)
+
+		// ── Phase 2: Decompose ── (PM creates sub-tasks / beads)
+		curStage = "decompose"
+		subTasks, err = tr.runDecomposeGate(ctx, spec, "", ctxFragment, projCtx.IsBrownfield)
 		if err != nil {
-			return fmt.Errorf("negotiate: %w", err)
+			return fmt.Errorf("decompose: %w", err)
 		}
+		tr.memAppend("plan-done", fmt.Sprintf("Decomposed into %d sub-task(s).", len(subTasks)))
 
-		if projCtx.IsBrownfield && strings.EqualFold(spec.Scope, "greenfield") {
-			newScope := inferBrownfieldScope(taskInput, spec.Description)
-			tr.event(fmt.Sprintf("brownfield project detected — downgrading scope from greenfield to %s", newScope))
-			spec.Scope = newScope
+		subBeadIDs = tr.createSubTaskBeads(ctx, subTasks)
+		// Persist the structured plan so an interrupted run can resume without
+		// re-negotiating or re-decomposing.
+		if err := tr.writeSubTasks(subTasks, subBeadIDs); err != nil {
+			tr.event(fmt.Sprintf("warning: write sub-task plan: %v", err))
 		}
-
-		specData, _ := json.MarshalIndent(spec, "", "  ")
-		if err := tr.ws.WriteFile(artifacts.TaskSpecFile, specData); err != nil {
-			return fmt.Errorf("write task spec: %w", err)
-		}
-
-		approved, err := tr.waitArtifact(ctx, artifacts.TaskSpecFile)
-		if err != nil {
-			return err
-		}
-		if approved {
-			curSpec = spec
-			tr.memAppend("spec-approved", fmt.Sprintf("**Title:** %s\n\n**Scope:** %s\n\n**Description:**\n\n%s",
-				spec.Title, spec.Scope, strings.TrimSpace(spec.Description)))
-			break
-		}
-		tr.event("re-negotiating task spec…")
-		_ = removeWorkspaceFile(tr.ws, artifacts.TaskSpecFile)
 	}
-
-	beadID := tr.registerBead(ctx, spec)
-
-	// ── Phase 2: Decompose ── (PM creates sub-tasks / beads)
-	curStage = "decompose"
-	subTasks, err := tr.runDecomposeGate(ctx, spec, "", ctxFragment, projCtx.IsBrownfield)
-	if err != nil {
-		return fmt.Errorf("decompose: %w", err)
-	}
-	tr.memAppend("plan-done", fmt.Sprintf("Decomposed into %d sub-task(s).", len(subTasks)))
-
-	subBeadIDs := tr.createSubTaskBeads(ctx, subTasks)
 
 	// ── Phase 3+4: Implement + Quality Review loop ──
 	curStage = "execute"
@@ -253,6 +304,9 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string) (retErr error) 
 	emitSummary(tr.b, tr.ws, tr.agents, tr.niceToHave, tr.agentDurations, tr.codingStarted)
 	tr.finaliseMemory(ctx, spec)
 	tr.closeBead(ctx, beadID, "Completed by orchestrator")
+	// The run is complete; drop the resume sidecars so it isn't offered later.
+	_ = removeWorkspaceFile(tr.ws, artifacts.RunStateFile)
+	_ = removeWorkspaceFile(tr.ws, artifacts.SubTasksFile)
 	tr.event("task complete")
 	return nil
 }
@@ -400,6 +454,38 @@ func (tr *TaskRunner) runDecomposeGate(ctx context.Context, spec agent.TaskSpec,
 	}
 }
 
+// resumeDiffMaxTokens caps the size of the uncommitted-changes diff injected
+// into the resume context so a large diff doesn't blow the prompt budget.
+const resumeDiffMaxTokens = 2000
+
+// buildResumeContext produces a context block describing the partial state of an
+// interrupted task: the current uncommitted changes and whether the project
+// currently builds/tests cleanly. It is prepended to the agent context on
+// resume so agents continue from the existing work rather than restarting.
+func (tr *TaskRunner) buildResumeContext(ctx context.Context) string {
+	var sb strings.Builder
+	sb.WriteString("## Resuming an interrupted task\n\n")
+	sb.WriteString("This task was interrupted; the workspace already contains partial work. Continue from the current state — do NOT restart from scratch or duplicate existing changes.\n\n")
+
+	gc := gitclient.New(tr.root)
+	if diff, err := gc.Diff("."); err == nil {
+		if diff = strings.TrimSpace(diff); diff != "" {
+			sb.WriteString("### Uncommitted changes so far\n```diff\n")
+			sb.WriteString(tokenutil.Truncate(diff, resumeDiffMaxTokens))
+			sb.WriteString("\n```\n\n")
+		}
+	}
+
+	tr.event("resume: checking current build/test state…")
+	files := collectProjectFilesFromRoot(nil, tr.root)
+	if tr.runBuildTests(ctx, files) {
+		sb.WriteString("### Current build/tests: PASSING. Verify each remaining sub-task is genuinely incomplete before changing more code.\n")
+	} else {
+		sb.WriteString("### Current build/tests: FAILING. Fixing these failures is part of the remaining work.\n")
+	}
+	return sb.String()
+}
+
 // renderTaskPlan turns the decomposed sub-tasks into a human-readable markdown
 // document for the task_plan.md approval gate.
 func renderTaskPlan(tasks []agent.SubTask) string {
@@ -432,6 +518,7 @@ func (tr *TaskRunner) createSubTaskBeads(ctx context.Context, tasks []agent.SubT
 		return nil
 	}
 	idByKey := make(map[string]string, len(tasks))
+	// Pass 1: create all sub-task beads and link them to the top-level task.
 	for _, t := range tasks {
 		id, err := beads.Create(ctx, tr.root, t.Title, t.Description, t.Priority, labelOrchestratorSubtask)
 		if err != nil {
@@ -446,7 +533,15 @@ func (tr *TaskRunner) createSubTaskBeads(ctx context.Context, tasks []agent.SubT
 				tr.event(fmt.Sprintf("warning: bd link %s→%s (parent-child): %v", id, tr.taskBeadID, err))
 			}
 		}
-		// Sibling ordering: a sub-task depends on (is blocked by) its DependsOn.
+		tr.event(fmt.Sprintf("registered %s as %s — %s", t.Key, id, t.Title))
+	}
+	// Pass 2: wire sibling dependencies now that all ids are known, so a
+	// dependency on a later-declared sub-task is not silently dropped.
+	for _, t := range tasks {
+		id, ok := idByKey[t.Key]
+		if !ok {
+			continue
+		}
 		for _, depKey := range t.DependsOn {
 			parentID, ok := idByKey[depKey]
 			if !ok {
@@ -457,7 +552,6 @@ func (tr *TaskRunner) createSubTaskBeads(ctx context.Context, tasks []agent.SubT
 				tr.event(fmt.Sprintf("warning: bd dep add %s→%s: %v", id, parentID, err))
 			}
 		}
-		tr.event(fmt.Sprintf("registered %s as %s — %s", t.Key, id, t.Title))
 	}
 	return idByKey
 }
@@ -468,8 +562,15 @@ func (tr *TaskRunner) createSubTaskBeads(ctx context.Context, tasks []agent.SubT
 // Execution is scoped to the top-level task bead so other tasks' beads are not
 // interleaved. Falls back to in-order execution when `bd` is unavailable.
 func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctxFragment string, tasks []agent.SubTask, idByKey map[string]string) error {
-	if !beads.Available() || len(idByKey) == 0 {
+	if len(idByKey) == 0 {
+		// No beads were created (bd unavailable at decompose) — run in order.
 		return tr.executeSubTasksInOrder(ctx, spec, ctxFragment, tasks)
+	}
+	if !beads.Available() {
+		// The plan is bead-backed but bd is no longer available. Running
+		// in-order here would re-run already-completed sub-tasks (their done
+		// state lives in beads), so refuse instead of corrupting progress.
+		return fmt.Errorf("this task is tracked in beads but `bd` is not available — install bd to continue/resume")
 	}
 
 	// Resolve a bead's title/description from the decomposed sub-tasks; `bd
@@ -494,11 +595,14 @@ func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctx
 	for {
 		bead, resumed, ok, err := tr.nextBead(ctx, processed)
 		if err != nil {
-			tr.event(fmt.Sprintf("warning: %v — falling back to in-order execution", err))
-			return tr.executeSubTasksInOrder(ctx, spec, ctxFragment, tasks)
+			return fmt.Errorf("select next sub-task: %w", err)
 		}
 		if !ok {
-			return nil // no interrupted and no ready sub-tasks left
+			// No interrupted or ready sub-tasks left. Confirm everything is
+			// actually closed before declaring the task done — otherwise a
+			// blocked/cyclic/orphaned child would be silently dropped and the
+			// resume sidecars removed.
+			return tr.verifySubtasksComplete(ctx)
 		}
 
 		done++
@@ -514,9 +618,33 @@ func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctx
 		}
 		processed[bead.ID] = true
 		if err := beads.Close(ctx, tr.root, bead.ID, "Completed by orchestrator"); err != nil {
-			tr.event(fmt.Sprintf("warning: bd close %s: %v", bead.ID, err))
+			// A failed close would leave the sub-task in_progress; don't proceed
+			// to finalize (which removes resume state) on an inconsistent bead.
+			return fmt.Errorf("close sub-task %s: %w", bead.ID, err)
 		}
 	}
+}
+
+// verifySubtasksComplete returns an error if any child of the task bead is not
+// closed, so executeBeads never reports success while work remains. Best-effort
+// when the parent is unknown or the listing fails.
+func (tr *TaskRunner) verifySubtasksComplete(ctx context.Context) error {
+	if tr.taskBeadID == "" {
+		return nil
+	}
+	remaining, err := beads.Children(ctx, tr.root, tr.taskBeadID, "open", "in_progress", "blocked")
+	if err != nil {
+		return nil // best-effort: don't block finalize on a transient list error
+	}
+	if len(remaining) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(remaining))
+	for _, r := range remaining {
+		ids = append(ids, r.ID)
+	}
+	return fmt.Errorf("%d sub-task(s) still unresolved (%s) — cannot complete; check dependencies/blockers in beads",
+		len(remaining), strings.Join(ids, ", "))
 }
 
 // nextBead selects the next sub-task bead to run for the current task: an
@@ -962,6 +1090,11 @@ func (tr *TaskRunner) registerBead(ctx context.Context, spec agent.TaskSpec) str
 		tr.event(fmt.Sprintf("warning: bd claim %s: %v", id, err))
 	}
 	tr.taskBeadID = id
+	// Persist the run-state sidecar so an interrupted run can be matched to its
+	// top-level bead on resume.
+	if err := tr.writeRunState(spec.Title); err != nil {
+		tr.event(fmt.Sprintf("warning: write run state: %v", err))
+	}
 	tr.event(fmt.Sprintf("registered task in beads as %s", id))
 	return id
 }

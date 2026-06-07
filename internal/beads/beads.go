@@ -144,7 +144,29 @@ func Ready(ctx context.Context, root, parent string) ([]Issue, error) {
 	return issues, nil
 }
 
-// Children lists the children of parent, optionally filtered by status
+// ActiveTasks lists top-level orchestrator task beads that are currently
+// in_progress, i.e. resumable runs. Uses
+// `bd list --no-parent --label orchestrator-task --status in_progress --json`.
+// Returns nil when bd is unavailable.
+func ActiveTasks(ctx context.Context, root, label string) ([]Issue, error) {
+	if !Available() {
+		return nil, nil
+	}
+	if label == "" {
+		label = "orchestrator-task"
+	}
+	out, err := runCmd(ctx, root,
+		"list", "--no-parent", "--label", label, "--status", "in_progress", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var issues []Issue
+	if err := json.Unmarshal([]byte(out), &issues); err != nil {
+		return nil, fmt.Errorf("bd list active: parse json: %w", err)
+	}
+	return issues, nil
+}
+
 // (e.g. "in_progress", "open"). Returns nil when bd is unavailable or parent
 // is empty.
 func Children(ctx context.Context, root, parent string, statuses ...string) ([]Issue, error) {

@@ -46,6 +46,7 @@ type startupModel struct {
 	cfg           config.Config
 	reqPath       string     // result — non-empty when resolved (legacy pipeline)
 	chatMode      bool       // result — true when PM chat-based requirements gathering was selected
+	resume        bool       // result — true when the user chose to resume an interrupted task
 	pendingAction homeAction // action to resume after module path input
 	width         int
 	height        int
@@ -118,6 +119,11 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.showModulePathInput()
 				}
 				return m, m.showPicker()
+			case homeActionResume:
+				// Resume the interrupted task — do NOT clean the workspace
+				// (the sub-task plan and run-state must survive).
+				m.resume = true
+				return m, tea.Quit
 			case homeActionOpenProject:
 				picker := NewProjectPicker(m.root)
 				picker.width, picker.height = m.width, m.height
@@ -647,6 +653,7 @@ func pairLess(r1, m1, r2, m2 string) bool {
 type StartupResult struct {
 	ReqPath  string        // non-empty when legacy pipeline was selected
 	ChatMode bool          // true when PM chat-based requirements gathering was selected
+	Resume   bool          // true when the user chose to resume an interrupted task
 	Cfg      config.Config // possibly updated config
 }
 
@@ -666,6 +673,7 @@ func RunStartup(root, wsReqPath string, cfg config.Config) (StartupResult, error
 	return StartupResult{
 		ReqPath:  final.reqPath,
 		ChatMode: final.chatMode,
+		Resume:   final.resume,
 		Cfg:      final.cfg,
 	}, nil
 }

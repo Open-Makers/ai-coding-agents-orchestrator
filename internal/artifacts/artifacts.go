@@ -13,8 +13,8 @@ import (
 
 const (
 	DirName                  = ".orchestrator"
-	MemoryDirName            = "memory"      // .orchestrator/memory/
-	MemoryDBFile             = "memory.db"   // .orchestrator/memory.db (sqlite cache, gitignored)
+	MemoryDirName            = "memory"    // .orchestrator/memory/
+	MemoryDBFile             = "memory.db" // .orchestrator/memory.db (sqlite cache, gitignored)
 	ProjectConfigFile        = "project.yaml"
 	ModulePathFile           = "module_path"
 	RequirementsFile         = "requirements.md"
@@ -41,6 +41,8 @@ const (
 	RunLogFile               = "runlog.txt"
 	TaskSpecFile             = "task_spec.json"
 	TaskPlanFile             = "task_plan.md"
+	RunStateFile             = "run_state.json" // links the active run to its top-level bead (resume)
+	SubTasksFile             = "sub_tasks.json" // structured decomposition for resume
 )
 
 // Workspace represents the .orchestrator directory inside a repo root.

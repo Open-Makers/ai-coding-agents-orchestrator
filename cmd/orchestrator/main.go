@@ -176,10 +176,14 @@ func runCmd(args []string) {
 
 		if result.ReqPath != "" {
 			*reqPath = result.ReqPath
+		} else if result.Resume {
+			// User chose to resume the interrupted task.
+			runTaskFlow(root, "", *branch, *ui, cfg, ws, true)
+			return
 		} else if result.ChatMode {
 			// User picked "New Task" — route to the brownfield-aware TaskRunner
 			// (PM negotiation gathers the description from the user).
-			runTaskFlow(root, "", *branch, *ui, cfg, ws)
+			runTaskFlow(root, "", *branch, *ui, cfg, ws, false)
 			return
 		} else {
 			return // user quit
@@ -207,12 +211,13 @@ func runCmd(args []string) {
 	if err != nil {
 		fatal(fmt.Errorf("read requirements: %w", err))
 	}
-	runTaskFlow(root, string(reqs), *branch, *ui, cfg, ws)
+	runTaskFlow(root, string(reqs), *branch, *ui, cfg, ws, false)
 }
 
-// runTaskFlow launches the task runner with the given description.
+// runTaskFlow launches the task runner with the given description. When resume
+// is true, taskInput is ignored and the runner resumes the interrupted task.
 // Extracted so both the startup "New Task" flow and the `task` subcommand can reuse it.
-func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws artifacts.Workspace) {
+func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws artifacts.Workspace, resume bool) {
 	if branch != "" {
 		if err := checkoutBranch(root, branch); err != nil {
 			fatal(err)
@@ -233,8 +238,14 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 		taskRunner := orchestrator.NewTaskRunner(b, agents, cfg, ws, root)
 		events := b.Subscribe()
 		go plainLogger(events)
-		if err := taskRunner.Run(ctx, taskInput); err != nil {
-			fatal(err)
+		var runErr error
+		if resume {
+			runErr = taskRunner.Resume(ctx)
+		} else {
+			runErr = taskRunner.Run(ctx, taskInput)
+		}
+		if runErr != nil {
+			fatal(runErr)
 		}
 		return
 	}
@@ -256,7 +267,12 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 	go func() {
 		taskRunner := orchestrator.NewTaskRunner(b, agents, cfg, ws, root)
 		p.Send(tui.TaskRunnerReadyMsg{Runner: taskRunner, Cancel: pipelineCancel})
-		err := taskRunner.Run(pipelineCtx, taskInput)
+		var err error
+		if resume {
+			err = taskRunner.Resume(pipelineCtx)
+		} else {
+			err = taskRunner.Run(pipelineCtx, taskInput)
+		}
 		if pipelineCtx.Err() != nil {
 			err = fmt.Errorf("task cancelled by user")
 		}
@@ -296,11 +312,15 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 		runCmd([]string{"--requirements", startupResult.ReqPath, "--ui", uiMode})
 		return
 	}
+	if startupResult.Resume {
+		runTaskFlow(root, "", "", uiMode, cfg, ws, true)
+		return
+	}
 	if startupResult.ChatMode {
 		// Route straight into the PM chat flow. Re-invoking runCmd here would
 		// show the home menu a second time (it opens the startup picker when no
 		// requirements are given), forcing a second "New Task" click.
-		runTaskFlow(root, "", "", uiMode, cfg, ws)
+		runTaskFlow(root, "", "", uiMode, cfg, ws, false)
 		return
 	}
 }
@@ -352,7 +372,7 @@ func taskCmd(args []string) {
 		os.Exit(2)
 	}
 
-	runTaskFlow(root, taskInput, *branch, *ui, cfg, ws)
+	runTaskFlow(root, taskInput, *branch, *ui, cfg, ws, false)
 }
 
 func resolveUIMode(requested string) string {

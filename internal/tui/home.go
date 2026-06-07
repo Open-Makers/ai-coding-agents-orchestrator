@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 )
 
 // ── Actions ──────────────────────────────────────────────────────────────────
@@ -20,6 +22,7 @@ type homeAction int
 const (
 	homeActionNewTask homeAction = iota
 	homeActionRunPipeline
+	homeActionResume
 	homeActionOpenProject
 	homeActionGlobalSettings
 	homeActionSetup
@@ -125,6 +128,28 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		promptLang = "English"
 	}
 
+	items := []homeMenuItem{
+		{icon: "▶", label: "New Task", desc: "Start a PM chat to define a new task before execution", action: homeActionNewTask, key: "Enter"},
+		{icon: "📋", label: "Run Pipeline", desc: "Choose a requirements file and run the full pipeline", action: homeActionRunPipeline, key: "r"},
+		{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
+		{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
+		{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
+		{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports — keeps code, config, and project memory", action: homeActionClean, key: "c"},
+		{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
+	}
+
+	// Offer Resume at the top when an interrupted task is detected.
+	if rt, ok := orchestrator.Resumable(context.Background(), root); ok {
+		resumeItem := homeMenuItem{
+			icon:   "↻",
+			label:  "Resume Task",
+			desc:   "Continue the interrupted task: " + rt.Title,
+			action: homeActionResume,
+			key:    "Enter",
+		}
+		items = append([]homeMenuItem{resumeItem}, items...)
+	}
+
 	return HomeModel{
 		cfg:              cfg,
 		root:             root,
@@ -139,17 +164,9 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		cachedBranch:     gitBranch,
 		cachedOverrides:  overrides,
 		recentProjects:   LoadRecentProjects(),
-		items: []homeMenuItem{
-			{icon: "▶", label: "New Task", desc: "Start a PM chat to define a new task before execution", action: homeActionNewTask, key: "Enter"},
-			{icon: "📋", label: "Run Pipeline", desc: "Choose a requirements file and run the full pipeline", action: homeActionRunPipeline, key: "r"},
-			{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
-			{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
-			{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
-			{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports — keeps code, config, and project memory", action: homeActionClean, key: "c"},
-			{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
-		},
-		width:  80,
-		height: 24,
+		items:            items,
+		width:            80,
+		height:           24,
 	}
 }
 
@@ -940,7 +957,7 @@ func isValidProjectRoot(root string) bool {
 // requiresProject returns true for actions that need a valid project directory.
 func requiresProject(action homeAction) bool {
 	switch action {
-	case homeActionNewTask, homeActionRunPipeline, homeActionSetup, homeActionClean:
+	case homeActionNewTask, homeActionRunPipeline, homeActionResume, homeActionSetup, homeActionClean:
 		return true
 	case homeActionOpenProject, homeActionGlobalSettings, homeActionQuit:
 		return false
