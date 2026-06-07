@@ -111,7 +111,19 @@ var statusBarShortcuts = []statusBarShortcut{
 }
 
 func (m StatusBarModel) View() string {
-	// ── Right side (always fully visible) ──
+	return strings.Join(m.viewLines(), "\n")
+}
+
+// Height returns the number of terminal rows View() will occupy at the current
+// width (1 normally, more when the shortcuts must wrap).
+func (m StatusBarModel) Height() int {
+	return len(m.viewLines())
+}
+
+// viewLines renders the status bar, wrapping the shortcut hints onto additional
+// lines when the left status segment plus the hints do not fit on one line —
+// instead of letting the hints overflow past the right edge.
+func (m StatusBarModel) viewLines() []string {
 	descStyle := lipgloss.NewStyle().
 		Background(crt.panelBg).
 		Foreground(crt.dim)
@@ -165,13 +177,51 @@ func (m StatusBarModel) View() string {
 	}
 
 	left := prefix + stageRendered + suffix
+	leftWidth := lipglossLen(left)
 
-	gap := m.width - lipglossLen(left) - rightWidth
-	if gap < 0 {
-		gap = 0
+	// Single line when everything fits.
+	if m.width <= 0 || leftWidth+2+rightWidth <= m.width {
+		gap := m.width - leftWidth - rightWidth
+		if gap < 0 {
+			gap = 0
+		}
+		return []string{left + strings.Repeat(" ", gap) + rightSide}
 	}
 
-	return left + strings.Repeat(" ", gap) + rightSide
+	// Otherwise: left on its own line, then wrap the hints (+ version) so they
+	// stay within the terminal width instead of overflowing the right edge.
+	lines := []string{left}
+	tokens := append(append([]string{}, hints...), versionTag)
+	lines = append(lines, wrapStatusTokens(tokens, m.width)...)
+	return lines
+}
+
+// wrapStatusTokens greedily packs pre-rendered tokens (joined by two spaces)
+// into lines no wider than maxWidth.
+func wrapStatusTokens(tokens []string, maxWidth int) []string {
+	var lines []string
+	cur := ""
+	curWidth := 0
+	for _, tok := range tokens {
+		tw := lipglossLen(tok)
+		if cur == "" {
+			cur = tok
+			curWidth = tw
+			continue
+		}
+		if curWidth+2+tw > maxWidth {
+			lines = append(lines, cur)
+			cur = tok
+			curWidth = tw
+			continue
+		}
+		cur += "  " + tok
+		curWidth += 2 + tw
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
 }
 
 // renderScrollingStage returns the stageInfo text, applying marquee scrolling

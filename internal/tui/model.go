@@ -769,7 +769,8 @@ func (m Model) View() string {
 	}
 
 	// Main area: single active agent panel (or congratulations on completion).
-	panelH := m.height - 3 // phase bar (1) + status bar (1) + newline
+	// status bar may wrap to multiple lines on narrow terminals.
+	panelH := m.height - 2 - m.statusbar.Height() // phase bar (1) + status bar (N) + newline
 	if panelH < 4 {
 		panelH = 4
 	}
@@ -1255,7 +1256,8 @@ func (m *Model) resizeActiveOverlay() tea.Cmd {
 }
 
 func (m *Model) layout() {
-	panelH := m.height - 3
+	m.statusbar = m.statusbar.WithWidth(m.width)
+	panelH := m.height - 2 - m.statusbar.Height()
 	if panelH < 4 {
 		panelH = 4
 	}
@@ -1277,7 +1279,6 @@ func (m *Model) layout() {
 		p.SetSize(agentW, panelH)
 		m.panels[role] = p
 	}
-	m.statusbar = m.statusbar.WithWidth(m.width)
 }
 
 // buildPMChatPrompt constructs a system prompt for PM chat with current project context.

@@ -236,6 +236,28 @@ func TestStatusBar_StageInfo(t *testing.T) {
 	}
 }
 
+func TestStatusBar_WrapsWhenTooNarrow(t *testing.T) {
+	// Wide terminal: everything on one line.
+	wide := NewStatusBar(200).WithBranch("master").WithState("coder").
+		WithRunnerModel("lmstudio", "google/gemma-4-12b-qat")
+	if wide.Height() != 1 {
+		t.Errorf("wide bar should be 1 line, got %d", wide.Height())
+	}
+
+	// Narrow terminal: shortcuts wrap to additional lines instead of overflowing.
+	narrow := NewStatusBar(60).WithBranch("master").WithState("coder").
+		WithRunnerModel("lmstudio", "google/gemma-4-12b-qat")
+	if narrow.Height() < 2 {
+		t.Errorf("narrow bar should wrap to >=2 lines, got %d", narrow.Height())
+	}
+	// No rendered line may exceed the terminal width.
+	for i, line := range strings.Split(narrow.View(), "\n") {
+		if w := lipglossLen(line); w > 60 {
+			t.Errorf("line %d width %d exceeds terminal width 60: %q", i, w, line)
+		}
+	}
+}
+
 func TestModel_EscDuringPipelineOpensCancelConfirm(t *testing.T) {
 	m := New(nil, "", "", nil, config.Config{})
 
