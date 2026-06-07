@@ -247,7 +247,7 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 	events := b.Subscribe()
 	wsPath := ws.Path("")
 	chatLLM := runner.OpenCodeRunner{}
-	tuiModel := tui.New(events, root, wsPath, chatLLM, cfg)
+	tuiModel := tui.New(events, root, wsPath, chatLLM, cfg).WithTaskInput(taskInput)
 	p := tea.NewProgram(tuiModel, tea.WithAltScreen())
 
 	pipelineCtx, pipelineCancel := context.WithCancel(ctx)
@@ -297,7 +297,10 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 		return
 	}
 	if startupResult.ChatMode {
-		runCmd([]string{"--ui", uiMode})
+		// Route straight into the PM chat flow. Re-invoking runCmd here would
+		// show the home menu a second time (it opens the startup picker when no
+		// requirements are given), forcing a second "New Task" click.
+		runTaskFlow(root, "", "", uiMode, cfg, ws)
 		return
 	}
 }

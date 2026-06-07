@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -10,6 +11,28 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 )
+
+func TestModel_PMConversationSeedsTaskInput(t *testing.T) {
+	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{}).
+		WithTaskInput("# Build tic-tac-toe\nImplement a CLI game")
+
+	// First PM conversation message opens the negotiate overlay.
+	msg := BusMessageMsg{Msg: bus.NewMessage(bus.RolePM, "", bus.MsgConversation,
+		bus.ConversationPayload{From: "pm", Content: "What grid size?"})}
+	updated, _ := m.Update(msg)
+	got := updated.(Model)
+
+	if got.overlay != overlayNegotiate {
+		t.Fatalf("expected negotiate overlay to open, got %v", got.overlay)
+	}
+	view := got.overlayNegotiate.vp.View()
+	if !strings.Contains(view, "Build tic-tac-toe") {
+		t.Errorf("expected submitted task input seeded in PM conversation:\n%s", view)
+	}
+	if !strings.Contains(view, "What grid size?") {
+		t.Errorf("expected PM message shown:\n%s", view)
+	}
+}
 
 func TestRunnerModelForRole_ExplicitConfig(t *testing.T) {
 	agents := map[string]config.AgentConfig{

@@ -28,9 +28,10 @@ const (
 	providerMLX
 	providerCodex
 	providerCopilot
+	providerLMStudio
 )
 
-var providerLabels = []string{"OpenCode", "Claude", "Ollama", "oMLX", "Codex", "Copilot"}
+var providerLabels = []string{"OpenCode", "Claude", "Ollama", "oMLX", "Codex", "Copilot", "LM Studio"}
 
 func providerFromString(s string) providerKind {
 	switch s {
@@ -44,6 +45,8 @@ func providerFromString(s string) providerKind {
 		return providerCodex
 	case "copilot":
 		return providerCopilot
+	case "lmstudio":
+		return providerLMStudio
 	default:
 		return providerOpenCode
 	}
@@ -61,6 +64,8 @@ func providerToString(p providerKind) string {
 		return "codex"
 	case providerCopilot:
 		return "copilot"
+	case providerLMStudio:
+		return "lmstudio"
 	default:
 		return "opencode"
 	}
@@ -127,6 +132,11 @@ type copilotModelsListMsg struct {
 	err    error
 }
 
+type lmstudioModelsListMsg struct {
+	models []string
+	err    error
+}
+
 // pingResultMsg carries the result of an async model reachability test.
 type pingResultMsg struct {
 	err error
@@ -164,6 +174,9 @@ type SetupModel struct {
 
 	copilotModels        []string
 	copilotModelsLoading bool
+
+	lmstudioModels        []string
+	lmstudioModelsLoading bool
 
 	// Language selection.
 	languages   []string
@@ -225,27 +238,29 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 	}
 
 	m := SetupModel{
-		models:               runner.OpenCodeAvailableModels,
-		modelsLoading:        true,
-		claudeModels:         runner.ClaudeModels,
-		claudeModelsLoading:  true,
-		ollamaModels:         runner.OllamaPopularModels,
-		ollamaModelsLoading:  true,
-		mlxModels:            nil,
-		mlxModelsLoading:     true,
-		codexModels:          runner.CodexModels,
-		codexModelsLoading:   true,
-		copilotModels:        nil,
-		copilotModelsLoading: true,
-		providerAvailability: make(map[providerKind]error),
-		languages:            languages,
-		languageIdx:          langIdx,
-		progLanguages:        config.SupportedProgrammingLanguages,
-		agentRoles:           setupAgentRoles,
-		agentOverrides:       make(map[string]agentSetupOverride),
-		spinner:              sp,
-		width:                80,
-		height:               24,
+		models:                runner.OpenCodeAvailableModels,
+		modelsLoading:         true,
+		claudeModels:          runner.ClaudeModels,
+		claudeModelsLoading:   true,
+		ollamaModels:          runner.OllamaPopularModels,
+		ollamaModelsLoading:   true,
+		mlxModels:             nil,
+		mlxModelsLoading:      true,
+		codexModels:           runner.CodexModels,
+		codexModelsLoading:    true,
+		copilotModels:         nil,
+		copilotModelsLoading:  true,
+		lmstudioModels:        nil,
+		lmstudioModelsLoading: true,
+		providerAvailability:  make(map[providerKind]error),
+		languages:             languages,
+		languageIdx:           langIdx,
+		progLanguages:         config.SupportedProgrammingLanguages,
+		agentRoles:            setupAgentRoles,
+		agentOverrides:        make(map[string]agentSetupOverride),
+		spinner:               sp,
+		width:                 80,
+		height:                24,
 	}
 
 	m.provider = providerFromString(currentRunner)
@@ -347,13 +362,15 @@ func (m SetupModel) modelsForProvider(p providerKind) []string {
 		return m.codexModels
 	case providerCopilot:
 		return m.copilotModels
+	case providerLMStudio:
+		return m.lmstudioModels
 	default:
 		return m.models
 	}
 }
 
 func (m SetupModel) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, fetchOpenCodeModels(), fetchOllamaModels(), fetchMLXModels(), fetchCodexModels(), fetchClaudeModels(), fetchCopilotModels(), checkProviderAvailability())
+	return tea.Batch(m.spinner.Tick, fetchOpenCodeModels(), fetchOllamaModels(), fetchMLXModels(), fetchCodexModels(), fetchClaudeModels(), fetchCopilotModels(), fetchLMStudioModels(), checkProviderAvailability())
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -489,6 +506,22 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 			m.viewport.SetContent(m.renderContent())
 		}
 
+	case lmstudioModelsListMsg:
+		m.lmstudioModelsLoading = false
+		if msg.err == nil && len(msg.models) > 0 {
+			prevModel := ""
+			if m.provider == providerLMStudio && m.modelIdx < len(m.lmstudioModels) {
+				prevModel = m.lmstudioModels[m.modelIdx]
+			}
+			m.lmstudioModels = msg.models
+			if m.provider == providerLMStudio {
+				m.modelIdx = findModelIndex(m.lmstudioModels, prevModel)
+			}
+		}
+		if m.ready {
+			m.viewport.SetContent(m.renderContent())
+		}
+
 	case providerAvailabilityMsg:
 		if m.providerAvailability == nil {
 			m.providerAvailability = make(map[providerKind]error)
@@ -497,7 +530,6 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 		if m.ready {
 			m.viewport.SetContent(m.renderContent())
 		}
-
 	case tea.KeyMsg:
 		var cmd tea.Cmd
 		prevSection := m.section
@@ -1059,6 +1091,9 @@ func (m SetupModel) renderModelCard(contentWidth int, label, focusLabel, active,
 	case providerCopilot:
 		modelLines = append(modelLines, dim.Render("  GitHub Copilot CLI"))
 		modelLines = append(modelLines, m.viewCopilotModels(active, inactive, dim)...)
+	case providerLMStudio:
+		modelLines = append(modelLines, dim.Render("  LM Studio local models (OpenAI-compatible API on :1234)"))
+		modelLines = append(modelLines, m.viewLMStudioModels(active, inactive, dim)...)
 	}
 
 	// Model validation status.
@@ -1348,6 +1383,25 @@ func (m SetupModel) viewCopilotModels(active, inactive, dim lipgloss.Style) []st
 	return lines
 }
 
+func (m SetupModel) viewLMStudioModels(active, inactive, dim lipgloss.Style) []string {
+	isModelSection := m.section == sectionModel
+
+	var lines []string
+
+	if m.lmstudioModelsLoading {
+		lines = append(lines, dim.Render("  loading models…"))
+		return lines
+	}
+
+	if len(m.lmstudioModels) == 0 {
+		lines = append(lines, dim.Render("  no models found — start the LM Studio server and load a model"))
+		return lines
+	}
+
+	lines = append(lines, renderWindowedList(m.lmstudioModels, m.modelIdx, isModelSection, active, inactive, dim)...)
+	return lines
+}
+
 // ── Footer ───────────────────────────────────────────────────────────────────
 
 func (m SetupModel) renderFooter(style lipgloss.Style) string {
@@ -1477,6 +1531,13 @@ func fetchCopilotModels() tea.Cmd {
 	}
 }
 
+func fetchLMStudioModels() tea.Cmd {
+	return func() tea.Msg {
+		models, err := runner.LMStudioListInstalled()
+		return lmstudioModelsListMsg{models: models, err: err}
+	}
+}
+
 // checkProviderAvailability emits one providerAvailabilityMsg per provider
 // once each backend has been probed. Slow providers (HTTP timeouts) do not
 // block the others — each runs in its own goroutine via tea.Batch.
@@ -1509,7 +1570,7 @@ func findModelIndex(models []string, name string) int {
 
 // isLoadingModels returns true if any model list is still being fetched.
 func (m SetupModel) isLoadingModels() bool {
-	return m.modelsLoading || m.claudeModelsLoading || m.ollamaModelsLoading || m.mlxModelsLoading || m.codexModelsLoading || m.copilotModelsLoading
+	return m.modelsLoading || m.claudeModelsLoading || m.ollamaModelsLoading || m.mlxModelsLoading || m.codexModelsLoading || m.copilotModelsLoading || m.lmstudioModelsLoading
 }
 
 // ensureSectionVisible scrolls the viewport so the focused section is visible.

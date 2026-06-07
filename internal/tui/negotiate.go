@@ -47,6 +47,24 @@ func (m *NegotiateModel) AddPMMessage(content string) {
 	m.refreshViewport()
 }
 
+// SeedContext shows initial context (e.g. the requirements the user submitted)
+// at the top of the conversation, before any PM reply, so the screen is never
+// blank and the user can review what they're refining.
+func (m *NegotiateModel) SeedContext(content string) {
+	if strings.TrimSpace(content) == "" {
+		return
+	}
+	m.lines = append(m.lines, chatLine{role: "context", content: content})
+	m.refreshViewport()
+}
+
+// SetReady stops the waiting indicator without appending a message. Used when
+// the PM returns no question, so the user can refine or accept (Ctrl+A).
+func (m *NegotiateModel) SetReady() {
+	m.waiting = false
+	m.refreshViewport()
+}
+
 func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -116,6 +134,9 @@ func (m *NegotiateModel) refreshViewport() {
 	var sb strings.Builder
 	for _, line := range m.lines {
 		switch line.role {
+		case "context":
+			sb.WriteString(renderWrappedChatLine("requirements › ", line.content, dimStyle, dimStyle, m.vp.Width))
+			sb.WriteString("\n\n")
 		case "user":
 			sb.WriteString(renderWrappedChatLine("you › ", line.content, userStyle, lipgloss.NewStyle(), m.vp.Width))
 			sb.WriteString("\n\n")

@@ -34,8 +34,11 @@ func New(cfg config.AgentConfig, skillLoader *skills.Loader, promptLanguage stri
 	case "copilot":
 		base = CopilotRunner{Model: cfg.Model}
 
+	case "lmstudio":
+		base = NewLMStudioRunner(cfg.Model)
+
 	default:
-		return nil, fmt.Errorf("runner: unknown runner %q (supported: opencode, claude, ollama, mlx, codex, copilot)", cfg.Runner)
+		return nil, fmt.Errorf("runner: unknown runner %q (supported: opencode, claude, ollama, mlx, codex, copilot, lmstudio)", cfg.Runner)
 	}
 
 	if skillLoader != nil {
@@ -71,6 +74,8 @@ func IsLocalRunner(cfg config.AgentConfig) bool {
 	case "ollama":
 		return true
 	case "mlx":
+		return true
+	case "lmstudio":
 		return true
 	case "opencode", "":
 		return cfg.Model == "" || !contains(cfg.Model, "/")

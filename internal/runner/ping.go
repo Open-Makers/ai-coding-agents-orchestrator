@@ -31,6 +31,8 @@ func Ping(provider, model string) error {
 		return pingOllama(ctx, model)
 	case "mlx":
 		return pingMLX(ctx, model)
+	case "lmstudio":
+		return pingHTTP(ctx, lmStudioBaseURL+"/v1/models", "lmstudio")
 	default:
 		return fmt.Errorf("unknown provider %q", provider)
 	}
@@ -58,6 +60,8 @@ func ProviderReachable(provider string) error {
 		return pingHTTP(ctx, ollamaBaseURL+"/api/tags", "ollama")
 	case "mlx":
 		return pingHTTP(ctx, mlxBaseURL+"/v1/models", "omlx")
+	case "lmstudio":
+		return pingHTTP(ctx, lmStudioBaseURL+"/v1/models", "lmstudio")
 	default:
 		return fmt.Errorf("unknown provider %q", provider)
 	}

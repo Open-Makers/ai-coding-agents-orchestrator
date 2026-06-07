@@ -157,6 +157,16 @@ type Model struct {
 
 	// taskRunner is used for the unified task flow and may be nil until ready.
 	taskRunner *orchestrator.TaskRunner
+
+	// taskInput is the requirements/description submitted for this run. Shown
+	// at the top of the PM conversation so the user sees what they submitted.
+	taskInput string
+}
+
+// WithTaskInput sets the submitted requirements shown in the PM conversation.
+func (m Model) WithTaskInput(input string) Model {
+	m.taskInput = input
+	return m
 }
 
 // ReturnToMenu returns true if the user chose to go back to the main menu
@@ -374,10 +384,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					neg := NewNegotiate(sendFn)
 					neg.SetSize(m.contentWidth(), m.height)
+					// Seed with the submitted requirements so the conversation
+					// shows the file from the first step — the user can review it
+					// and either refine it via chat or accept (Ctrl+A). Falls
+					// back to the workspace requirements file if no task input
+					// was provided (e.g. a resumed run).
+					seed := m.taskInput
+					if strings.TrimSpace(seed) == "" {
+						ws := artifacts.Workspace{Dir: m.wsPath}
+						if data, err := ws.ReadFile(artifacts.RequirementsFile); err == nil {
+							seed = string(data)
+						}
+					}
+					neg.SeedContext(seed)
 					m.overlayNegotiate = neg
 					m.overlay = overlayNegotiate
 				}
-				m.overlayNegotiate.AddPMMessage(conv.Content)
+				// Only render a non-empty PM message; an empty response would
+				// otherwise leave a blank "pm ›" line and strand the user.
+				if strings.TrimSpace(conv.Content) != "" {
+					m.overlayNegotiate.AddPMMessage(conv.Content)
+				} else {
+					m.overlayNegotiate.SetReady()
+				}
 			}
 		}
 
