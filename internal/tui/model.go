@@ -128,6 +128,7 @@ type Model struct {
 	quitting         bool
 	confirmQuit      bool   // true when showing quit confirmation dialog
 	cancelConfirm    bool   // true when showing cancel confirmation dialog
+	pauseConfirm     bool   // true when showing pause-to-change-model confirmation
 	cancelled        bool   // true after user confirmed cancel — auto-return to menu
 	gateMsg          string // non-empty while pipeline is waiting for human approval
 	pipelineErr      string // non-empty when pipeline finished with an error
@@ -136,6 +137,7 @@ type Model struct {
 	hidePipelineErr  bool   // true when the error banner is dismissed
 	pipelineDone     bool   // true after pipeline finished (enables return-to-menu)
 	returnToMenu     bool   // true when user chose to return to menu
+	pauseForModel    bool   // true when user paused to change the model (resume after)
 	log              *slog.Logger
 
 	// Planning sub-stage tracking.
@@ -178,6 +180,13 @@ func (m Model) WithTaskInput(input string) Model {
 // after pipeline completion (instead of quitting).
 func (m Model) ReturnToMenu() bool {
 	return m.returnToMenu
+}
+
+// PauseForModelChange returns true if the user paused the running task to
+// change the model. The caller should show the model setup screen and then
+// resume the task with the updated config.
+func (m Model) PauseForModelChange() bool {
+	return m.pauseForModel
 }
 
 // buildResumeFn returns a closure that re-runs the coder's build-and-fix loop.
@@ -514,6 +523,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Pause confirmation intercepts all keys.
+		if m.pauseConfirm {
+			switch msg.String() {
+			case "y", "Y", "enter":
+				if m.cancelFunc != nil {
+					m.cancelFunc()
+				}
+				m.pauseConfirm = false
+				m.pauseForModel = true
+				m.statusbar = m.statusbar.WithState("pausing to change model…")
+				return m, tea.Quit
+			default:
+				m.pauseConfirm = false
+			}
+			return m, nil
+		}
+
 		// Tree-browsing mode: navigate the System Monitor file tree and preview
 		// the selected file in place of the agent output.
 		if m.treeBrowsing {
@@ -562,6 +588,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelConfirm = true
 		case "ctrl+a":
 			m.approveCurrentGate("shortcut")
+		case "ctrl+p":
+			// Pause the running task to change the model, then resume.
+			if !m.pipelineDone {
+				m.pauseConfirm = true
+			}
 		case "ctrl+e":
 			if m.pipelineFailed && !m.pipelineResuming {
 				resumeFn := m.buildResumeFn()
@@ -898,6 +929,26 @@ func (m Model) View() string {
 			Padding(1, 3).
 			Render(
 				warnStyle.Render("  CANCEL PIPELINE AND RETURN TO MENU?") + "\n\n" +
+					dimStyle.Render("  Press ") +
+					brightStyle.Render("y") +
+					dimStyle.Render(" or ") +
+					brightStyle.Render("Enter") +
+					dimStyle.Render(" to confirm, any other key to continue"),
+			)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, confirmBox)
+	}
+
+	if m.pauseConfirm {
+		dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
+		warnStyle := lipgloss.NewStyle().Foreground(crt.primary).Bold(true)
+		brightStyle := lipgloss.NewStyle().Foreground(crt.bright).Bold(true)
+		confirmBox := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(crt.primary).
+			Padding(1, 3).
+			Render(
+				warnStyle.Render("  PAUSE TASK TO CHANGE MODEL?") + "\n\n" +
+					dimStyle.Render("  The current step restarts with the new model on resume.") + "\n\n" +
 					dimStyle.Render("  Press ") +
 					brightStyle.Render("y") +
 					dimStyle.Render(" or ") +

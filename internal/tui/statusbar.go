@@ -98,16 +98,17 @@ type statusBarShortcut struct {
 
 // statusBarShortcuts defines the shortcut hints with per-action accent colors.
 var statusBarShortcuts = []statusBarShortcut{
-	{"↑↓", "scroll", lipgloss.Color("#7aa2f7")},      // blue — navigation
-	{"Ctrl+R", "req", lipgloss.Color("#9ece6a")},     // green — requirements
-	{"Ctrl+G", "git", lipgloss.Color("#73daca")},     // teal — git
-	{"Ctrl+C", "chat", lipgloss.Color("#2ac3de")},    // cyan — chat
-	{"Ctrl+T", "sysmon", lipgloss.Color("#ff9e64")},  // orange — system monitor
-	{"Tab", "files", lipgloss.Color("#bb9af7")},      // purple — browse tree
-	{"Ctrl+A", "approve", lipgloss.Color("#9ece6a")}, // green — approve
-	{"Ctrl+E", "error", lipgloss.Color("#f7768e")},   // coral — toggle error banner
-	{"Ctrl+X", "cancel", lipgloss.Color("#f7768e")},  // coral — cancel
-	{"q", "quit", lipgloss.Color("#6b553f")},         // dim — quit
+	{"↑↓", "scroll", lipgloss.Color("#7aa2f7")},          // blue — navigation
+	{"Ctrl+R", "req", lipgloss.Color("#9ece6a")},         // green — requirements
+	{"Ctrl+G", "git", lipgloss.Color("#73daca")},         // teal — git
+	{"Ctrl+C", "chat", lipgloss.Color("#2ac3de")},        // cyan — chat
+	{"Ctrl+T", "sysmon", lipgloss.Color("#ff9e64")},      // orange — system monitor
+	{"Tab", "files", lipgloss.Color("#bb9af7")},          // purple — browse tree
+	{"Ctrl+A", "approve", lipgloss.Color("#9ece6a")},     // green — approve
+	{"Ctrl+P", "pause", lipgloss.Color("#e0af68")},   // gold — pause to change model
+	{"Ctrl+E", "error", lipgloss.Color("#f7768e")},       // coral — toggle error banner
+	{"Ctrl+X", "cancel", lipgloss.Color("#f7768e")},      // coral — cancel
+	{"q", "quit", lipgloss.Color("#6b553f")},             // dim — quit
 }
 
 func (m StatusBarModel) View() string {

@@ -272,7 +272,7 @@ func TestStatusBar_StageInfo(t *testing.T) {
 
 func TestStatusBar_WrapsWhenTooNarrow(t *testing.T) {
 	// Wide terminal: everything on one line.
-	wide := NewStatusBar(200).WithBranch("master").WithState("coder").
+	wide := NewStatusBar(220).WithBranch("master").WithState("coder").
 		WithRunnerModel("lmstudio", "google/gemma-4-12b-qat")
 	if wide.Height() != 1 {
 		t.Errorf("wide bar should be 1 line, got %d", wide.Height())
@@ -327,6 +327,46 @@ func TestModel_EscAfterPipelineReturnsToMenu(t *testing.T) {
 	}
 	if !model.returnToMenu {
 		t.Fatal("expected esc to return to menu after pipeline completion")
+	}
+}
+
+func TestModel_CtrlPDuringPipelineOpensPauseConfirm(t *testing.T) {
+	m := New(nil, "", "", nil, config.Config{})
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if cmd != nil {
+		t.Fatal("expected no quit command until pause is confirmed")
+	}
+	model := updated.(Model)
+	if !model.pauseConfirm {
+		t.Fatal("expected Ctrl+P to open pause confirmation")
+	}
+	if model.pauseForModel {
+		t.Fatal("should not flag pause before confirmation")
+	}
+}
+
+func TestModel_PauseConfirmQuitsWithFlag(t *testing.T) {
+	m := New(nil, "", "", nil, config.Config{})
+	m.pauseConfirm = true
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("expected quit command after confirming pause")
+	}
+	model := updated.(Model)
+	if !model.PauseForModelChange() {
+		t.Fatal("expected PauseForModelChange to be true after confirm")
+	}
+}
+
+func TestModel_CtrlPIgnoredAfterPipelineDone(t *testing.T) {
+	m := New(nil, "", "", nil, config.Config{})
+	m.pipelineDone = true
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if updated.(Model).pauseConfirm {
+		t.Fatal("Ctrl+P should be ignored once the pipeline is done")
 	}
 }
 

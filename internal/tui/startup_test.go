@@ -124,62 +124,62 @@ func TestStartupPicker_EscReturnsToHome(t *testing.T) {
 // or its SQLite index. Memory is institutional knowledge accumulated across
 // many tasks — a "reset" should not erase it.
 func TestCleanWorkspacePreservesMemory(t *testing.T) {
-ws := t.TempDir()
+	ws := t.TempDir()
 
-disposable := []string{
-artifacts.VisionFile,
-artifacts.ArchitectureFile,
-artifacts.ImplementationPlanFile,
-artifacts.ChangesFile,
-artifacts.SummaryFile,
-}
-for _, f := range disposable {
-if err := os.WriteFile(filepath.Join(ws, f), []byte("x"), 0o600); err != nil {
-t.Fatal(err)
-}
-}
+	disposable := []string{
+		artifacts.VisionFile,
+		artifacts.ArchitectureFile,
+		artifacts.ImplementationPlanFile,
+		artifacts.ChangesFile,
+		artifacts.SummaryFile,
+	}
+	for _, f := range disposable {
+		if err := os.WriteFile(filepath.Join(ws, f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-preserved := []string{
-artifacts.ProjectConfigFile,
-artifacts.RequirementsFile,
-artifacts.MemoryDBFile,
-artifacts.MemoryDBFile + "-wal",
-artifacts.MemoryDBFile + "-shm",
-}
-for _, f := range preserved {
-if err := os.WriteFile(filepath.Join(ws, f), []byte("x"), 0o600); err != nil {
-t.Fatal(err)
-}
-}
-memDir := filepath.Join(ws, artifacts.MemoryDirName)
-if err := os.MkdirAll(filepath.Join(memDir, "daily"), 0o750); err != nil {
-t.Fatal(err)
-}
-memoryFile := filepath.Join(memDir, "MEMORY.md")
-if err := os.WriteFile(memoryFile, []byte("- pinned fact"), 0o600); err != nil {
-t.Fatal(err)
-}
-dailyFile := filepath.Join(memDir, "daily", "2026-05-19.md")
-if err := os.WriteFile(dailyFile, []byte("# day log"), 0o600); err != nil {
-t.Fatal(err)
-}
+	preserved := []string{
+		artifacts.ProjectConfigFile,
+		artifacts.RequirementsFile,
+		artifacts.MemoryDBFile,
+		artifacts.MemoryDBFile + "-wal",
+		artifacts.MemoryDBFile + "-shm",
+	}
+	for _, f := range preserved {
+		if err := os.WriteFile(filepath.Join(ws, f), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	memDir := filepath.Join(ws, artifacts.MemoryDirName)
+	if err := os.MkdirAll(filepath.Join(memDir, "daily"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	memoryFile := filepath.Join(memDir, "MEMORY.md")
+	if err := os.WriteFile(memoryFile, []byte("- pinned fact"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dailyFile := filepath.Join(memDir, "daily", "2026-05-19.md")
+	if err := os.WriteFile(dailyFile, []byte("# day log"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-cleanWorkspace(ws, true)
+	cleanWorkspace(ws, true)
 
-for _, f := range disposable {
-if _, err := os.Stat(filepath.Join(ws, f)); !os.IsNotExist(err) {
-t.Errorf("expected %s removed, got err=%v", f, err)
-}
-}
-for _, f := range preserved {
-if _, err := os.Stat(filepath.Join(ws, f)); err != nil {
-t.Errorf("expected %s preserved, got err=%v", f, err)
-}
-}
-if _, err := os.Stat(memoryFile); err != nil {
-t.Errorf("expected memory/MEMORY.md preserved, got err=%v", err)
-}
-if _, err := os.Stat(dailyFile); err != nil {
-t.Errorf("expected memory/daily/* preserved, got err=%v", err)
-}
+	for _, f := range disposable {
+		if _, err := os.Stat(filepath.Join(ws, f)); !os.IsNotExist(err) {
+			t.Errorf("expected %s removed, got err=%v", f, err)
+		}
+	}
+	for _, f := range preserved {
+		if _, err := os.Stat(filepath.Join(ws, f)); err != nil {
+			t.Errorf("expected %s preserved, got err=%v", f, err)
+		}
+	}
+	if _, err := os.Stat(memoryFile); err != nil {
+		t.Errorf("expected memory/MEMORY.md preserved, got err=%v", err)
+	}
+	if _, err := os.Stat(dailyFile); err != nil {
+		t.Errorf("expected memory/daily/* preserved, got err=%v", err)
+	}
 }

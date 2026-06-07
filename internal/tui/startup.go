@@ -220,31 +220,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else {
 				// Project Setup: only save per-agent overrides, don't touch global config.
-				projectAgents := make(map[string]config.AgentConfig)
-				for role, ov := range msg.agentOverrides {
-					ac := config.AgentConfig{}
-					if ov.runner != "" {
-						ac.Runner = ov.runner
-					}
-					if ov.model != "" {
-						ac.Model = ov.model
-					}
-					projectAgents[role] = ac
-				}
-
-				projectCfg := config.LoadProject(m.root)
-				if len(projectAgents) > 0 {
-					projectCfg.Agents = projectAgents
-				} else {
-					projectCfg.Agents = nil
-				}
-				if msg.progLanguage != "" {
-					projectCfg.Project.Language = msg.progLanguage
-				}
-				_ = config.Save(m.root, projectCfg)
-
-				// Reload full config to get correct merge of defaults + global + project.
-				if reloaded, err := config.Load(m.root); err == nil {
+				if reloaded, ok := applyProjectSetup(m.root, msg); ok {
 					m.cfg = reloaded
 				}
 			}

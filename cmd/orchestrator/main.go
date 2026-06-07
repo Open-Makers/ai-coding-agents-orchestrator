@@ -286,7 +286,22 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 	}
 
 	final, ok := result.(tui.Model)
-	if !ok || !final.ReturnToMenu() {
+	if !ok {
+		return
+	}
+
+	// Pause-to-change-model: show the per-agent setup screen, then resume the
+	// interrupted task with the updated config.
+	if final.PauseForModelChange() {
+		newCfg, setupErr := tui.RunModelSetup(root, cfg)
+		if setupErr != nil {
+			fatal(fmt.Errorf("model setup: %w", setupErr))
+		}
+		runTaskFlow(root, "", "", uiMode, newCfg, ws, true)
+		return
+	}
+
+	if !final.ReturnToMenu() {
 		return
 	}
 
