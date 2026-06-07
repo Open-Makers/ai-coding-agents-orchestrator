@@ -248,9 +248,16 @@ func runnerModelFromConfig(cfg config.Config) (string, string) {
 // runnerModelForRole returns the runner and model configured for a given agent role.
 // Falls back to the global default (most common pair) when the role has no explicit config.
 func runnerModelForRole(agents map[string]config.AgentConfig, role bus.AgentRole) (string, string) {
+	return runnerModelForKey(agents, string(role))
+}
+
+// runnerModelForKey resolves the runner and model for a config key (e.g. an
+// agent role or a sub-role such as "coder_fixer"). Falls back to the global
+// default when the key has no explicit config.
+func runnerModelForKey(agents map[string]config.AgentConfig, key string) (string, string) {
 	defaultRunner, defaultModel := detectDefaultRunnerModel(agents)
 
-	ac, ok := agents[string(role)]
+	ac, ok := agents[key]
 	if !ok {
 		return defaultRunner, defaultModel
 	}
@@ -264,6 +271,16 @@ func runnerModelForRole(agents map[string]config.AgentConfig, role bus.AgentRole
 		mdl = defaultModel
 	}
 	return r, mdl
+}
+
+// configKeyForState maps a pipeline state to the agent config key whose
+// runner/model should be displayed. Most states map to their bus role, but the
+// fix loop uses the dedicated "coder_fixer" config when present.
+func configKeyForState(state string) string {
+	if state == "coder_fixer" {
+		return "coder_fixer"
+	}
+	return string(stateToRole(state))
 }
 
 func (m Model) Init() tea.Cmd {
@@ -330,7 +347,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Switch active panel based on pipeline state changes.
 				if role := stateToRole(s); role != "" {
 					m.activeRole = role
-					r, mdl := runnerModelForRole(m.agentConfigs, role)
+					r, mdl := runnerModelForKey(m.agentConfigs, configKeyForState(s))
 					m.statusbar = m.statusbar.WithRunnerModel(r, mdl)
 				}
 				for _, ps := range []string{"negotiating", "pm", "planner", "coder", "coder_fixer", "qa_tests", "qa_review", "tester", "reviewer", "ux_reviewer", "security", "done"} {

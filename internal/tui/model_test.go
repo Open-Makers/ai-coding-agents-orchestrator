@@ -166,6 +166,40 @@ func TestRunnerModelForRole_EmptyAgentConfig(t *testing.T) {
 	}
 }
 
+// During the build-fix loop the coder emits a "coder_fixer" state. The status
+// bar must surface the coder_fixer model, not the coder model.
+func TestConfigKeyForState_CoderFixer(t *testing.T) {
+	if got := configKeyForState("coder_fixer"); got != "coder_fixer" {
+		t.Errorf("coder_fixer state should map to coder_fixer key, got %q", got)
+	}
+	if got := configKeyForState("coder"); got != "coder" {
+		t.Errorf("coder state should map to coder key, got %q", got)
+	}
+	if got := configKeyForState("qa_tests"); got != "qa" {
+		t.Errorf("qa_tests state should map to qa role key, got %q", got)
+	}
+}
+
+func TestRunnerModelForState_CoderFixerDistinctModel(t *testing.T) {
+	agents := map[string]config.AgentConfig{
+		"pm":          {Runner: "mlx", Model: "gemma"},
+		"qa":          {Runner: "mlx", Model: "gemma"},
+		"coder":       {Runner: "mlx", Model: "gemma"},
+		"coder_fixer": {Runner: "lmstudio", Model: "qwen-coder"},
+	}
+
+	r, mdl := runnerModelForKey(agents, configKeyForState("coder_fixer"))
+	if r != "lmstudio" || mdl != "qwen-coder" {
+		t.Errorf("expected lmstudio/qwen-coder for coder_fixer, got %s/%s", r, mdl)
+	}
+
+	// Plain coder state must still show the coder model.
+	r, mdl = runnerModelForKey(agents, configKeyForState("coder"))
+	if r != "mlx" || mdl != "gemma" {
+		t.Errorf("expected mlx/gemma for coder, got %s/%s", r, mdl)
+	}
+}
+
 func TestRunnerModelFromConfig(t *testing.T) {
 	cfg := config.Config{
 		Agents: map[string]config.AgentConfig{
