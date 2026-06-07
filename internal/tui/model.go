@@ -573,7 +573,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			if m.llm != nil {
 				systemPrompt := m.buildPMChatPrompt()
-				chat := NewChat(m.llm, systemPrompt)
+				chat := NewChat(m.llm, systemPrompt).WithFileContext(m.root)
 				chat.SetSize(m.contentWidth(), m.height)
 				m.overlayChat = chat
 				m.overlay = overlayChat

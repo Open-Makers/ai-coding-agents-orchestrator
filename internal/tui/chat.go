@@ -36,6 +36,11 @@ type ChatModel struct {
 	systemPrompt string
 	reviseFn     ReviseFunc // called when PM decides to revise an artifact
 	revising     bool       // true while a revision is in progress
+
+	root     string           // repo root, used to discover .md files
+	attached []chatAttachment // markdown files added to the chat context
+	picking  bool             // true while the .md picker overlay is open
+	picker   mdPicker
 }
 
 // NewChat creates a ChatModel with the given LLMRunner.
@@ -57,6 +62,12 @@ func NewChat(llm runner.LLMRunner, systemContext string) ChatModel {
 // WithReviseFn sets a callback for artifact revision (PM chat mode).
 func (m ChatModel) WithReviseFn(fn ReviseFunc) ChatModel {
 	m.reviseFn = fn
+	return m
+}
+
+// WithFileContext enables the .md attach picker, rooted at the repo directory.
+func (m ChatModel) WithFileContext(root string) ChatModel {
+	m.root = root
 	return m
 }
 
@@ -104,7 +115,20 @@ type chatRawToken struct {
 
 func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case mdPickerDoneMsg:
+		m.picking = false
+		if !msg.cancel {
+			m.attached = loadAttachments(m.root, msg.selected)
+		}
+		m.refreshViewport()
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.picking {
+			var cmd tea.Cmd
+			m.picker, cmd = m.picker.Update(msg)
+			return m, cmd
+		}
 		if m.waiting {
 			// Only allow cancel while waiting.
 			if msg.String() == "ctrl+c" || msg.String() == "esc" {
@@ -121,6 +145,12 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 		case "esc":
 			m.cancelFn()
 			return m, func() tea.Msg { return ChatClosedMsg{} }
+		case "ctrl+f":
+			if m.root != "" {
+				m.picker = newMDPicker(m.root, m.attached, m.vp.Width, m.vp.Height)
+				m.picking = true
+			}
+			return m, nil
 		case "enter":
 			if m.input == "" {
 				break
@@ -132,7 +162,7 @@ func (m ChatModel) Update(msg tea.Msg) (ChatModel, tea.Cmd) {
 			m.lines = append(m.lines, chatLine{role: "user", content: userMsg})
 			m.waiting = true
 			m.refreshViewport()
-			return m, chatSendCmd(m.llm, m.ctx, m.systemPrompt, m.history)
+			return m, chatSendCmd(m.llm, m.ctx, m.systemPrompt+attachmentBlock(m.attached), m.history)
 		case "left":
 			if m.cursor > 0 {
 				m.cursor--
@@ -251,9 +281,22 @@ func (m ChatModel) View() string {
 
 	sep := strings.Repeat("─", m.width)
 
+	if m.picking {
+		return strings.Join([]string{
+			titleStyle.Render("Chat") + "  " + dimStyle.Render("attach context"),
+			sep,
+			m.picker.View(),
+		}, "\n")
+	}
+
 	title := "Chat with PM"
 	if m.reviseFn == nil {
 		title = "Chat"
+	}
+
+	hints := "Esc close  Enter send"
+	if m.root != "" {
+		hints += "  Ctrl+F attach .md"
 	}
 
 	var statusLine string
@@ -265,8 +308,17 @@ func (m ChatModel) View() string {
 		statusLine = inputStyle.Render("› ") + renderInputWithCursor(m.input, m.cursor)
 	}
 
+	header := titleStyle.Render(title) + "  " + dimStyle.Render(hints)
+	if len(m.attached) > 0 {
+		names := make([]string, len(m.attached))
+		for i, a := range m.attached {
+			names[i] = a.rel
+		}
+		header += "\n" + dimStyle.Render("  📎 "+strings.Join(names, ", "))
+	}
+
 	return strings.Join([]string{
-		titleStyle.Render(title) + "  " + dimStyle.Render("Esc close  Enter send"),
+		header,
 		sep,
 		m.vp.View(),
 		sep,

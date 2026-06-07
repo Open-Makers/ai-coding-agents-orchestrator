@@ -130,7 +130,7 @@ func (m ControlModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "ctrl+c":
 			if m.llm != nil {
-				chat := NewChat(m.llm, "")
+				chat := NewChat(m.llm, "").WithFileContext(m.root)
 				chat.SetSize(m.width, m.height)
 				m.overlayChat = chat
 				m.overlay = overlayChat
