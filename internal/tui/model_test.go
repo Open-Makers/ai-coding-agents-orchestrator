@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -32,6 +33,44 @@ func TestModel_PMConversationSeedsTaskInput(t *testing.T) {
 	if !strings.Contains(view, "What grid size?") {
 		t.Errorf("expected PM message shown:\n%s", view)
 	}
+}
+
+func TestModel_TabEntersTreeBrowsingAndEscExits(t *testing.T) {
+	root := setupTreeRoot(t)
+	m := New(nil, root, filepath.Join(root, ".orchestrator"), nil, config.Config{})
+	m.width, m.height = 160, 40 // wide enough for sysmon
+	m.layout()
+	m.sysmon.SetProjectRoot(root)
+
+	if !m.canBrowseTree() {
+		t.Fatal("expected tree browsing to be available at width 160")
+	}
+
+	// Tab enters browsing.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got := updated.(Model)
+	if !got.treeBrowsing || !got.sysmon.TreeFocused() {
+		t.Fatalf("Tab should enter tree browsing: browsing=%v focused=%v", got.treeBrowsing, got.sysmon.TreeFocused())
+	}
+
+	// Arrow keys move the selection without leaving browse mode.
+	got, _ = mustUpdate(t, got, tea.KeyMsg{Type: tea.KeyDown})
+	if !got.treeBrowsing {
+		t.Fatal("down arrow should stay in browse mode")
+	}
+
+	// Esc exits browsing.
+	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got = updated.(Model)
+	if got.treeBrowsing || got.sysmon.TreeFocused() {
+		t.Fatalf("Esc should exit tree browsing: browsing=%v focused=%v", got.treeBrowsing, got.sysmon.TreeFocused())
+	}
+}
+
+func mustUpdate(t *testing.T, m Model, msg tea.Msg) (Model, tea.Cmd) {
+	t.Helper()
+	updated, cmd := m.Update(msg)
+	return updated.(Model), cmd
 }
 
 func TestRunnerModelForRole_ExplicitConfig(t *testing.T) {

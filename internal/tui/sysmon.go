@@ -84,29 +84,31 @@ type SysmonModel struct {
 	netRecvHist   []float64
 	netSentHist   []float64
 
-	cpuPercent       float64
-	perCore          []float64
-	memPercent       float64
-	memUsed          uint64
-	memTotal         uint64
-	memAvail         uint64
-	memCached        uint64
-	swapPercent      float64
-	swapUsed         uint64
-	swapTotal        uint64
-	goroutines       int
-	hostUptime       uint64
-	loadAvg          [3]float64
-	cpuTempAvg       float64
-	cpuTempMax       float64
-	recvRate         float64
-	sentRate         float64
-	prevNetRecv      uint64
-	prevNetSent      uint64
-	startTime        time.Time
-	projectRoot      string
+	cpuPercent        float64
+	perCore           []float64
+	memPercent        float64
+	memUsed           uint64
+	memTotal          uint64
+	memAvail          uint64
+	memCached         uint64
+	swapPercent       float64
+	swapUsed          uint64
+	swapTotal         uint64
+	goroutines        int
+	hostUptime        uint64
+	loadAvg           [3]float64
+	cpuTempAvg        float64
+	cpuTempMax        float64
+	recvRate          float64
+	sentRate          float64
+	prevNetRecv       uint64
+	prevNetSent       uint64
+	startTime         time.Time
+	projectRoot       string
 	projectTree       []projectTreeEntry
 	treeScrollOffset  int
+	treeFocused       bool // true when the user is navigating the tree (Tab)
+	treeCursor        int  // selected entry index while focused
 	activeFiles       map[string]fileActivity
 	agentUsage        map[bus.AgentRole]bus.AgentUsage
 	agentScrollOffset int
@@ -261,8 +263,8 @@ func (m SysmonModel) Update(msg tea.Msg) (SysmonModel, tea.Cmd) {
 	m.pruneFileActivity(time.Now())
 	m.refreshProjectTree()
 
-	// Auto-advance tree scroll on each tick.
-	if len(m.projectTree) > 0 {
+	// Auto-advance tree scroll on each tick (paused while the user navigates).
+	if len(m.projectTree) > 0 && !m.treeFocused {
 		m.treeScrollOffset = (m.treeScrollOffset + 1) % len(m.projectTree)
 	}
 
@@ -350,6 +352,53 @@ func resizeHistory(history []float64, target int) []float64 {
 func (m *SysmonModel) SetProjectRoot(root string) {
 	m.projectRoot = root
 	m.refreshProjectTree()
+}
+
+// FocusTree enters tree-navigation mode, pausing auto-scroll and placing the
+// cursor on the first selectable file (falling back to the first entry).
+func (m *SysmonModel) FocusTree() {
+	m.treeFocused = true
+	m.treeCursor = m.firstFileIndex()
+}
+
+// BlurTree leaves tree-navigation mode.
+func (m *SysmonModel) BlurTree() { m.treeFocused = false }
+
+// TreeFocused reports whether the tree is being navigated.
+func (m SysmonModel) TreeFocused() bool { return m.treeFocused }
+
+// MoveTreeCursor moves the selection by delta, clamped to the tree bounds.
+func (m *SysmonModel) MoveTreeCursor(delta int) {
+	if len(m.projectTree) == 0 {
+		return
+	}
+	m.treeCursor += delta
+	if m.treeCursor < 0 {
+		m.treeCursor = 0
+	}
+	if m.treeCursor >= len(m.projectTree) {
+		m.treeCursor = len(m.projectTree) - 1
+	}
+}
+
+// SelectedTreeEntry returns the currently highlighted entry's repo-relative
+// path and whether it is a directory. ok is false when the tree is empty.
+func (m SysmonModel) SelectedTreeEntry() (relPath string, isDir bool, ok bool) {
+	if len(m.projectTree) == 0 || m.treeCursor < 0 || m.treeCursor >= len(m.projectTree) {
+		return "", false, false
+	}
+	e := m.projectTree[m.treeCursor]
+	return e.relPath, e.isDir, true
+}
+
+// firstFileIndex returns the index of the first non-directory entry, or 0.
+func (m SysmonModel) firstFileIndex() int {
+	for i, e := range m.projectTree {
+		if !e.isDir {
+			return i
+		}
+	}
+	return 0
 }
 
 // ObserveBusMessage updates active-file hints for the project tree.
@@ -572,7 +621,11 @@ func (m SysmonModel) View() string {
 
 	// ── TREE ── (fixed height: always 10 content rows)
 	const treeFixedRows = 10
-	addSection("TREE")
+	if m.treeFocused {
+		addSection("TREE  [browsing]")
+	} else {
+		addSection("TREE")
+	}
 	treeLines := m.renderProjectTree(contentW, treeFixedRows)
 	rendered := 0
 	if len(treeLines) == 0 {
@@ -692,11 +745,35 @@ func (m SysmonModel) renderProjectTree(contentW, maxRows int) []string {
 	total := len(m.projectTree)
 	dimSt := lipgloss.NewStyle().Foreground(crt.dim)
 
+	// Focused navigation: window the list around the cursor and highlight it.
+	if m.treeFocused {
+		cursor := m.treeCursor
+		if cursor >= total {
+			cursor = total - 1
+		}
+		start := cursor - maxRows/2
+		if start < 0 {
+			start = 0
+		}
+		if start > total-maxRows {
+			start = total - maxRows
+		}
+		if start < 0 {
+			start = 0
+		}
+		var lines []string
+		for i := 0; i < maxRows && start+i < total; i++ {
+			idx := start + i
+			lines = append(lines, m.renderTreeEntry(m.projectTree[idx], contentW, idx == cursor))
+		}
+		return lines
+	}
+
 	if total <= maxRows {
 		// All entries fit — no scrolling needed.
 		var lines []string
 		for _, entry := range m.projectTree {
-			lines = append(lines, m.renderTreeEntry(entry, contentW))
+			lines = append(lines, m.renderTreeEntry(entry, contentW, false))
 		}
 		return lines
 	}
@@ -706,7 +783,7 @@ func (m SysmonModel) renderProjectTree(contentW, maxRows int) []string {
 	var lines []string
 	for i := 0; i < maxRows; i++ {
 		idx := (offset + i) % total
-		lines = append(lines, m.renderTreeEntry(m.projectTree[idx], contentW))
+		lines = append(lines, m.renderTreeEntry(m.projectTree[idx], contentW, false))
 	}
 	// Scroll indicator in the last slot.
 	indicator := dimSt.Render(fmt.Sprintf("  ↕ %d/%d", offset+1, total))
@@ -714,7 +791,7 @@ func (m SysmonModel) renderProjectTree(contentW, maxRows int) []string {
 	return lines
 }
 
-func (m SysmonModel) renderTreeEntry(entry projectTreeEntry, contentW int) string {
+func (m SysmonModel) renderTreeEntry(entry projectTreeEntry, contentW int, selected bool) string {
 	indent := strings.Repeat("  ", entry.depth)
 	prefix := indent
 	if entry.depth > 0 {
@@ -735,6 +812,10 @@ func (m SysmonModel) renderTreeEntry(entry projectTreeEntry, contentW int) strin
 				break
 			}
 		}
+	}
+
+	if selected {
+		return lipgloss.NewStyle().Reverse(true).Bold(true).Render(label)
 	}
 
 	if entry.isDir {

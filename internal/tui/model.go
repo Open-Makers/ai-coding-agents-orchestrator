@@ -161,6 +161,11 @@ type Model struct {
 	// taskInput is the requirements/description submitted for this run. Shown
 	// at the top of the PM conversation so the user sees what they submitted.
 	taskInput string
+
+	// treeBrowsing is true while the user navigates the System Monitor tree
+	// (entered with Tab); the active agent panel is replaced by filePreview.
+	treeBrowsing bool
+	filePreview  FilePreviewModel
 }
 
 // WithTaskInput sets the submitted requirements shown in the PM conversation.
@@ -492,7 +497,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Tree-browsing mode: navigate the System Monitor file tree and preview
+		// the selected file in place of the agent output.
+		if m.treeBrowsing {
+			switch msg.String() {
+			case "esc", "tab", "q":
+				m.treeBrowsing = false
+				m.sysmon.BlurTree()
+			case "up", "k":
+				m.sysmon.MoveTreeCursor(-1)
+				m.syncTreePreview()
+			case "down", "j":
+				m.sysmon.MoveTreeCursor(1)
+				m.syncTreePreview()
+			case "pgup":
+				m.filePreview.ScrollUp()
+			case "pgdown":
+				m.filePreview.ScrollDown()
+			case "enter", "right", "l":
+				m.syncTreePreview()
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
+		case "tab":
+			if m.canBrowseTree() {
+				m.treeBrowsing = true
+				m.sysmon.FocusTree()
+				m.filePreview = NewFilePreview(m.root, m.contentWidth(), m.height-3)
+				m.syncTreePreview()
+			}
+			return m, nil
 		case "q", "Q":
 			m.confirmQuit = true
 		case "m", "M":
@@ -770,9 +806,16 @@ func (m Model) View() string {
 			parts = append(parts, agentView)
 		}
 	} else {
-		p := m.panels[m.activeRole]
-		p.SetSize(agentW, panelH)
-		agentView := p.View()
+		var agentView string
+		if m.treeBrowsing {
+			// Replace the agent output with the selected file's preview.
+			m.filePreview.SetSize(agentW, panelH)
+			agentView = m.filePreview.View()
+		} else {
+			p := m.panels[m.activeRole]
+			p.SetSize(agentW, panelH)
+			agentView = p.View()
+		}
 
 		if sysmonW > 0 {
 			m.sysmon.SetSize(sysmonW, panelH)
@@ -1125,6 +1168,21 @@ func (m Model) styleDurationLine(line string, lStyle, vStyle lipgloss.Style) str
 		}
 	}
 	return indent + lStyle.Render(fmt.Sprintf("%-12s", label)) + " " + vStyle.Render(value)
+}
+
+// canBrowseTree reports whether the System Monitor tree can be navigated:
+// the monitor must be visible (it hosts the tree).
+func (m Model) canBrowseTree() bool {
+	return m.sysmonWidth() > 0
+}
+
+// syncTreePreview loads the currently selected tree entry into the file preview.
+func (m *Model) syncTreePreview() {
+	rel, isDir, ok := m.sysmon.SelectedTreeEntry()
+	if !ok {
+		return
+	}
+	m.filePreview.Show(rel, isDir)
 }
 
 // withSysmon composites the sysmon panel to the right of the given view
