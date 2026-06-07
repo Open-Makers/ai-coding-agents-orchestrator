@@ -32,8 +32,9 @@ func Available() bool {
 }
 
 // Create registers a new issue and returns its ID. Output is parsed from
-// `bd q` (quick capture) which prints only the issue ID.
-func Create(ctx context.Context, root, title, description string, priority int) (string, error) {
+// `bd q` (quick capture) which prints only the issue ID. labels are attached
+// at creation time (may be empty).
+func Create(ctx context.Context, root, title, description string, priority int, labels ...string) (string, error) {
 	if !Available() {
 		return "", fmt.Errorf("bd not installed")
 	}
@@ -42,6 +43,9 @@ func Create(ctx context.Context, root, title, description string, priority int) 
 		"--description", description,
 		"--type", "task",
 		"--priority", fmt.Sprintf("%d", priority),
+	}
+	if len(labels) > 0 {
+		args = append(args, "--labels", strings.Join(labels, ","))
 	}
 	out, err := runCmd(ctx, root, args...)
 	if err != nil {
@@ -52,6 +56,36 @@ func Create(ctx context.Context, root, title, description string, priority int) 
 		return "", fmt.Errorf("bd create: empty id")
 	}
 	return id, nil
+}
+
+// Link records a typed relationship between two issues, e.g. parent-child:
+//
+//	bd link <child> <parent> --type parent-child
+//
+// Best-effort: a no-op when bd is unavailable or an id is empty.
+func Link(ctx context.Context, root, child, parent, linkType string) error {
+	if !Available() || child == "" || parent == "" {
+		return nil
+	}
+	if linkType == "" {
+		linkType = "parent-child"
+	}
+	_, err := runCmd(ctx, root, "link", child, parent, "--type", linkType)
+	return err
+}
+
+// SetMetadata attaches custom key/value metadata to an issue via
+// `bd update <id> --set-metadata k=v`. Best-effort.
+func SetMetadata(ctx context.Context, root, id string, kv map[string]string) error {
+	if !Available() || id == "" || len(kv) == 0 {
+		return nil
+	}
+	args := []string{"update", id}
+	for k, v := range kv {
+		args = append(args, "--set-metadata", k+"="+v)
+	}
+	_, err := runCmd(ctx, root, args...)
+	return err
 }
 
 // Claim transitions an issue to in-progress for the current actor.

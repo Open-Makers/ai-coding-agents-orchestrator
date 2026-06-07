@@ -2,6 +2,8 @@ package orchestrator
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +54,12 @@ type TaskRunner struct {
 	// for scoped-context shadow measurement during review. Best-effort.
 	projCtx   appctx.ProjectContext
 	taskQuery string // task description used as the semantic-search query
+
+	// taskBeadID is the top-level orchestrator-task bead for this run; sub-task
+	// beads are linked as its children. runID identifies the run for resume
+	// detection (stored as bead metadata and in task_spec.json).
+	taskBeadID string
+	runID      string
 
 	// humanCh carries replies from the user during negotiation.
 	humanCh chan string
@@ -151,6 +159,9 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string) (retErr error) 
 		curSpec  agent.TaskSpec
 	)
 	curSpec.Title = strings.TrimSpace(firstLine(taskInput))
+	if tr.runID == "" {
+		tr.runID = newRunID()
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			retErr = fmt.Errorf("panic at stage %s: %v", curStage, r)
@@ -422,12 +433,20 @@ func (tr *TaskRunner) createSubTaskBeads(ctx context.Context, tasks []agent.SubT
 	}
 	idByKey := make(map[string]string, len(tasks))
 	for _, t := range tasks {
-		id, err := beads.Create(ctx, tr.root, t.Title, t.Description, t.Priority)
+		id, err := beads.Create(ctx, tr.root, t.Title, t.Description, t.Priority, labelOrchestratorSubtask)
 		if err != nil {
 			tr.event(fmt.Sprintf("warning: bd create %s: %v", t.Key, err))
 			continue
 		}
 		idByKey[t.Key] = id
+		// Link the sub-task as a child of the top-level task bead so the task's
+		// sub-tasks can be listed and execution can be scoped with --parent.
+		if tr.taskBeadID != "" {
+			if err := beads.Link(ctx, tr.root, id, tr.taskBeadID, "parent-child"); err != nil {
+				tr.event(fmt.Sprintf("warning: bd link %s→%s (parent-child): %v", id, tr.taskBeadID, err))
+			}
+		}
+		// Sibling ordering: a sub-task depends on (is blocked by) its DependsOn.
 		for _, depKey := range t.DependsOn {
 			parentID, ok := idByKey[depKey]
 			if !ok {
@@ -837,8 +856,26 @@ func (tr *TaskRunner) bootstrapForTDD(spec agent.TaskSpec) {
 	}
 }
 
+// Beads labels used to identify orchestrator-managed work for resume detection.
+const (
+	labelOrchestratorTask    = "orchestrator-task"
+	labelOrchestratorSubtask = "orchestrator-subtask"
+)
+
+// newRunID returns a short random identifier for a pipeline run, used to tie a
+// top-level bead to its workspace artifacts for resume detection.
+func newRunID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // registerBead creates a durable Beads issue for the approved task. Returns
-// the bead id (empty when `bd` is unavailable or fails).
+// the bead id (empty when `bd` is unavailable or fails). The top-level bead is
+// labelled orchestrator-task and tagged with the run id so an interrupted task
+// can be found and resumed.
 func (tr *TaskRunner) registerBead(ctx context.Context, spec agent.TaskSpec) string {
 	if !beads.Available() {
 		return ""
@@ -847,14 +884,20 @@ func (tr *TaskRunner) registerBead(ctx context.Context, spec agent.TaskSpec) str
 	if len(spec.AcceptanceCriteria) > 0 {
 		desc += "\n\nAcceptance criteria:\n- " + strings.Join(spec.AcceptanceCriteria, "\n- ")
 	}
-	id, err := beads.Create(ctx, tr.root, spec.Title, desc, 2)
+	id, err := beads.Create(ctx, tr.root, spec.Title, desc, 2, labelOrchestratorTask)
 	if err != nil {
 		tr.event(fmt.Sprintf("warning: bd create: %v", err))
 		return ""
 	}
+	if tr.runID != "" {
+		if err := beads.SetMetadata(ctx, tr.root, id, map[string]string{"run_id": tr.runID}); err != nil {
+			tr.event(fmt.Sprintf("warning: bd set-metadata %s: %v", id, err))
+		}
+	}
 	if err := beads.Claim(ctx, tr.root, id); err != nil {
 		tr.event(fmt.Sprintf("warning: bd claim %s: %v", id, err))
 	}
+	tr.taskBeadID = id
 	tr.event(fmt.Sprintf("registered task in beads as %s", id))
 	return id
 }
