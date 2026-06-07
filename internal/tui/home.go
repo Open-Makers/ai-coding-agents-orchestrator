@@ -23,6 +23,7 @@ const (
 	homeActionNewTask homeAction = iota
 	homeActionRunPipeline
 	homeActionResume
+	homeActionDoneTasks
 	homeActionOpenProject
 	homeActionGlobalSettings
 	homeActionSetup
@@ -136,6 +137,18 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
 		{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports — keeps code, config, and project memory", action: homeActionClean, key: "c"},
 		{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
+	}
+
+	// Show completed-task history when there is any.
+	if done := orchestrator.DoneTasks(context.Background(), root); len(done) > 0 {
+		historyItem := homeMenuItem{
+			icon:   "🗸",
+			label:  "Done Tasks",
+			desc:   fmt.Sprintf("Review %d completed task(s)", len(done)),
+			action: homeActionDoneTasks,
+			key:    "d",
+		}
+		items = append([]homeMenuItem{historyItem}, items...)
 	}
 
 	// Offer Resume at the top when an interrupted task is detected.
@@ -959,7 +972,7 @@ func requiresProject(action homeAction) bool {
 	switch action {
 	case homeActionNewTask, homeActionRunPipeline, homeActionResume, homeActionSetup, homeActionClean:
 		return true
-	case homeActionOpenProject, homeActionGlobalSettings, homeActionQuit:
+	case homeActionOpenProject, homeActionGlobalSettings, homeActionDoneTasks, homeActionQuit:
 		return false
 	}
 	return false

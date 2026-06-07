@@ -128,6 +128,26 @@ type ResumableTask struct {
 	Title     string
 }
 
+// DoneTask is a completed top-level orchestrator task (history entry).
+type DoneTask struct {
+	ID    string
+	Title string
+}
+
+// DoneTasks returns completed orchestrator tasks for the project, newest first
+// as reported by beads. Returns nil when bd is unavailable or there are none.
+func DoneTasks(ctx context.Context, root string) []DoneTask {
+	issues, err := beads.ClosedTasks(ctx, root, labelOrchestratorTask)
+	if err != nil || len(issues) == 0 {
+		return nil
+	}
+	out := make([]DoneTask, 0, len(issues))
+	for _, i := range issues {
+		out = append(out, DoneTask{ID: i.ID, Title: i.Title})
+	}
+	return out
+}
+
 // Resumable reports whether root has an interrupted orchestrator task that can
 // be resumed: an in_progress top-level orchestrator-task bead whose id matches
 // the run-state sidecar, with the spec and sub-task plan still present.

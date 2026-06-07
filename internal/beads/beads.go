@@ -167,6 +167,27 @@ func ActiveTasks(ctx context.Context, root, label string) ([]Issue, error) {
 	return issues, nil
 }
 
+// ClosedTasks lists completed top-level orchestrator task beads (history). Uses
+// `bd list --no-parent --label orchestrator-task --status closed --json`.
+func ClosedTasks(ctx context.Context, root, label string) ([]Issue, error) {
+	if !Available() {
+		return nil, nil
+	}
+	if label == "" {
+		label = "orchestrator-task"
+	}
+	out, err := runCmd(ctx, root,
+		"list", "--no-parent", "--label", label, "--status", "closed", "--json")
+	if err != nil {
+		return nil, err
+	}
+	var issues []Issue
+	if err := json.Unmarshal([]byte(out), &issues); err != nil {
+		return nil, fmt.Errorf("bd list closed: parse json: %w", err)
+	}
+	return issues, nil
+}
+
 // (e.g. "in_progress", "open"). Returns nil when bd is unavailable or parent
 // is empty.
 func Children(ctx context.Context, root, parent string, statuses ...string) ([]Issue, error) {

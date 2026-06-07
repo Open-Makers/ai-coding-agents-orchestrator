@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/gitclient"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/orchestrator"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/safefile"
 )
 
@@ -26,6 +28,7 @@ const (
 	startupPhaseEditor                          // inline requirements editor (legacy)
 	startupPhaseOpenProject                     // project directory browser
 	startupPhaseProjectList                     // recent projects + browse
+	startupPhaseHistory                         // completed-task history
 )
 
 // startupModel is a standalone Bubble Tea model shown when the orchestrator is
@@ -35,6 +38,7 @@ type startupModel struct {
 	phase         startupPhase
 	projectPicker ProjectPickerModel
 	dirBrowser    DirBrowserModel
+	taskHistory   TaskHistoryModel
 	home          HomeModel
 	setup         SetupModel
 	moduleInput   textinput.Model
@@ -92,6 +96,8 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dirBrowser.SetSize(wm.Width, wm.Height)
 		case startupPhaseProjectList:
 			m.projectPicker, _ = m.projectPicker.Update(msg)
+		case startupPhaseHistory:
+			m.taskHistory.SetSize(wm.Width, wm.Height)
 		}
 	}
 
@@ -124,6 +130,12 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// (the sub-task plan and run-state must survive).
 				m.resume = true
 				return m, tea.Quit
+			case homeActionDoneTasks:
+				hist := NewTaskHistory(orchestrator.DoneTasks(context.Background(), m.root))
+				hist.SetSize(m.width, m.height)
+				m.taskHistory = hist
+				m.phase = startupPhaseHistory
+				return m, m.taskHistory.Init()
 			case homeActionOpenProject:
 				picker := NewProjectPicker(m.root)
 				picker.width, picker.height = m.width, m.height
@@ -336,6 +348,16 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.dirBrowser, cmd = m.dirBrowser.Update(msg)
 		return m, cmd
+
+	case startupPhaseHistory:
+		switch msg.(type) {
+		case TaskHistoryClosedMsg:
+			m.phase = startupPhaseHome
+			return m, m.home.Init()
+		}
+		var cmd tea.Cmd
+		m.taskHistory, cmd = m.taskHistory.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -396,6 +418,8 @@ func (m startupModel) View() string {
 		return m.projectPicker.View()
 	case startupPhaseOpenProject:
 		return m.dirBrowser.View()
+	case startupPhaseHistory:
+		return m.taskHistory.View()
 	default:
 		return m.home.View()
 	}
