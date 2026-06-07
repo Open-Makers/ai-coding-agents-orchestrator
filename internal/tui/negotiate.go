@@ -75,6 +75,15 @@ func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return NegotiateClosedMsg{} }
+		case "ctrl+c":
+			// Clear the currently typed text (like Claude/Codex), without
+			// closing the conversation.
+			m.input = ""
+			m.cursor = 0
+		case "ctrl+u":
+			// Clear from the start of the line to the cursor.
+			m.input = string([]rune(m.input)[m.cursor:])
+			m.cursor = 0
 		case "ctrl+a":
 			userMsg := negotiateAcceptNowMessage
 			m.input = ""
@@ -175,7 +184,7 @@ func (m NegotiateModel) View() string {
 	}
 
 	return strings.Join([]string{
-		titleStyle.Render("PM Requirements Conversation") + "  " + dimStyle.Render("Esc close  Enter send  Ctrl+A accept now"),
+		titleStyle.Render("PM Requirements Conversation") + "  " + dimStyle.Render("Esc close  Enter send  Ctrl+A accept now  Ctrl+C clear"),
 		sep,
 		m.vp.View(),
 		sep,

@@ -24,10 +24,13 @@ type ConvMessage struct {
 
 // Token is a single streaming chunk from an LLM.
 type Token struct {
-	Text  string
-	Done  bool
-	Error error
-	Usage *TokenUsage // non-nil only on the Done token
+	Text string
+	// Reasoning is display-only chain-of-thought from reasoning models. It is
+	// shown live in the UI but NOT included in the returned/parsed result.
+	Reasoning string
+	Done      bool
+	Error     error
+	Usage     *TokenUsage // non-nil only on the Done token
 }
 
 // CompletionRequest describes what to send to the LLM.

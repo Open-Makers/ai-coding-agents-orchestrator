@@ -63,8 +63,16 @@ func (a *BaseAgent) collectStream(ch <-chan runner.Token) (string, error) {
 			}
 			break
 		}
-		a.emitToken(tok.Text, false)
-		sb.WriteString(tok.Text)
+		// Reasoning is shown live but never accumulated into the result, so a
+		// reasoning model's chain-of-thought is visible during work without
+		// corrupting the parsed output (file blocks, TASKSPEC, etc).
+		if tok.Reasoning != "" {
+			a.emitToken(tok.Reasoning, false)
+		}
+		if tok.Text != "" {
+			a.emitToken(tok.Text, false)
+			sb.WriteString(tok.Text)
+		}
 	}
 	a.emitToken("", true)
 	return sb.String(), nil

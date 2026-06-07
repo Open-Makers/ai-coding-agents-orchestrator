@@ -43,10 +43,11 @@ func (r *LMStudioRunner) Complete(ctx context.Context, req CompletionRequest) (<
 	}
 
 	body := lmStudioChatRequest{
-		Model:     model,
-		Messages:  r.buildMessages(req),
-		Stream:    true,
-		MaxTokens: lmStudioMaxTokens,
+		Model:         model,
+		Messages:      r.buildMessages(req),
+		Stream:        true,
+		MaxTokens:     lmStudioMaxTokens,
+		StreamOptions: &lmStudioStreamOptions{IncludeUsage: true},
 	}
 
 	payload, err := json.Marshal(body)
@@ -100,30 +101,34 @@ func (r *LMStudioRunner) buildMessages(req CompletionRequest) []lmStudioChatMess
 
 func (r *LMStudioRunner) streamResponse(body io.ReadCloser, inputText string, ch chan<- Token) {
 	defer func() { _ = body.Close() }()
-	data, err := io.ReadAll(body)
-	if err != nil {
-		ch <- Token{Error: fmt.Errorf("lmstudio: read stream: %w", err)}
-		ch <- Token{Done: true}
-		close(ch)
-		return
-	}
-	r.streamResponseFromBytes(data, inputText, ch)
+	// Scan the live body so content/reasoning deltas are emitted as they
+	// arrive, giving live output in the UI instead of one block at the end.
+	r.streamFromReader(body, inputText, ch)
 }
 
-// streamResponseFromBytes parses an OpenAI-style SSE stream:
+// streamResponseFromBytes parses a complete SSE buffer. Used by tests; the live
+// path uses streamFromReader directly via streamResponse.
+func (r *LMStudioRunner) streamResponseFromBytes(data []byte, inputText string, ch chan<- Token) {
+	r.streamFromReader(bytes.NewReader(data), inputText, ch)
+}
+
+// streamFromReader parses an OpenAI-style SSE stream, emitting each content
+// delta as a Token immediately (live), and each reasoning delta as a
+// display-only Token.Reasoning:
 //
 //	data: {"choices":[{"delta":{"content":"hi"}}], ...}
+//	data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}
 //	data: {"choices":[{"finish_reason":"stop"}], "usage": {...}}
 //	data: [DONE]
-func (r *LMStudioRunner) streamResponseFromBytes(data []byte, inputText string, ch chan<- Token) {
+func (r *LMStudioRunner) streamFromReader(reader io.Reader, inputText string, ch chan<- Token) {
 	defer close(ch)
 
-	var buf strings.Builder
-	var reasoning strings.Builder
 	var usage *TokenUsage
+	contentLen := 0
+	reasoningLen := 0
 	sawChunk := false
 
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -144,13 +149,15 @@ func (r *LMStudioRunner) streamResponseFromBytes(data []byte, inputText string, 
 		sawChunk = true
 		for _, c := range chunk.Choices {
 			if c.Delta.Content != "" {
-				buf.WriteString(c.Delta.Content)
+				ch <- Token{Text: c.Delta.Content}
+				contentLen += len(c.Delta.Content)
 			}
-			// Reasoning models (e.g. gemma "thinking", deepseek-r1) stream their
-			// chain-of-thought in reasoning_content; track it so an answer made
-			// up of reasoning only can be reported instead of looking empty.
+			// Reasoning models (gemma "thinking", deepseek-r1) stream their
+			// chain-of-thought in reasoning_content. Show it live (display-only)
+			// so the model visibly works, without polluting the parsed result.
 			if c.Delta.Reasoning != "" {
-				reasoning.WriteString(c.Delta.Reasoning)
+				ch <- Token{Reasoning: c.Delta.Reasoning}
+				reasoningLen += len(c.Delta.Reasoning)
 			}
 		}
 		if chunk.Usage != nil {
@@ -162,20 +169,24 @@ func (r *LMStudioRunner) streamResponseFromBytes(data []byte, inputText string, 
 		}
 	}
 
-	output := unwrapJSONResponse(buf.String())
-	if output == "" {
-		// LM Studio answers an over-long prompt (or a model that failed to
-		// load) with HTTP 200 and an empty stream. Surface a descriptive error
-		// instead of silently returning nothing, which downstream agents would
-		// misreport (e.g. coder: "no file blocks found").
-		ch <- Token{Error: r.emptyResponseError(inputText, sawChunk, reasoning.Len() > 0)}
+	if err := scanner.Err(); err != nil {
+		ch <- Token{Error: fmt.Errorf("lmstudio: read stream: %w", err)}
 		ch <- Token{Done: true}
 		return
 	}
 
-	ch <- Token{Text: output}
+	if contentLen == 0 {
+		// LM Studio answers an over-long prompt (or a model that failed to
+		// load) with HTTP 200 and an empty content stream. Surface a
+		// descriptive error instead of silently returning nothing, which
+		// downstream agents would misreport (e.g. coder: "no file blocks").
+		ch <- Token{Error: r.emptyResponseError(inputText, sawChunk, reasoningLen > 0)}
+		ch <- Token{Done: true}
+		return
+	}
+
 	if usage == nil {
-		usage = estimatedUsage(inputText, output)
+		usage = estimatedUsage(inputText, strings.Repeat("x", contentLen))
 	}
 	ch <- Token{Done: true, Usage: usage}
 }
@@ -242,10 +253,18 @@ func (r *LMStudioRunner) baseURL() string {
 
 // lmStudioChatRequest is the OpenAI-compatible payload for /v1/chat/completions.
 type lmStudioChatRequest struct {
-	Model     string                `json:"model"`
-	Messages  []lmStudioChatMessage `json:"messages"`
-	Stream    bool                  `json:"stream"`
-	MaxTokens int                   `json:"max_tokens,omitempty"`
+	Model         string                 `json:"model"`
+	Messages      []lmStudioChatMessage  `json:"messages"`
+	Stream        bool                   `json:"stream"`
+	MaxTokens     int                    `json:"max_tokens,omitempty"`
+	StreamOptions *lmStudioStreamOptions `json:"stream_options,omitempty"`
+}
+
+// lmStudioStreamOptions requests a final usage chunk in the SSE stream so token
+// counts are reported (OpenAI-compatible servers omit usage when streaming
+// unless include_usage is set).
+type lmStudioStreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 type lmStudioChatMessage struct {

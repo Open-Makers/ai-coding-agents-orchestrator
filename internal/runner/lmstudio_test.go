@@ -109,6 +109,46 @@ func TestLMStudioStreamResponse_ReasoningOnlyIsError(t *testing.T) {
 	}
 }
 
+func TestLMStudioStreamResponse_StreamsContentAndReasoning(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"think"}}]}`,
+		`data: {"choices":[{"delta":{"content":"pack"}}]}`,
+		`data: {"choices":[{"delta":{"content":"age"},"finish_reason":"stop"}]}`,
+		`data: {"choices":[],"usage":{"prompt_tokens":9,"completion_tokens":2}}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	r := NewLMStudioRunner("")
+	ch := make(chan Token, 16)
+	go r.streamResponseFromBytes([]byte(stream), "in", ch)
+
+	var content, reasoning string
+	var contentTokens int
+	var done Token
+	for tok := range ch {
+		if tok.Text != "" {
+			content += tok.Text
+			contentTokens++
+		}
+		reasoning += tok.Reasoning
+		if tok.Done {
+			done = tok
+		}
+	}
+	if content != "package" {
+		t.Errorf("content: want %q, got %q", "package", content)
+	}
+	if contentTokens != 2 {
+		t.Errorf("expected content streamed as 2 deltas, got %d", contentTokens)
+	}
+	if reasoning != "think" {
+		t.Errorf("reasoning: want %q, got %q", "think", reasoning)
+	}
+	if done.Usage == nil || done.Usage.InputTokens != 9 || done.Usage.OutputTokens != 2 || done.Usage.Estimated {
+		t.Errorf("usage: want 9/2 exact, got %+v", done.Usage)
+	}
+}
+
 func TestLMStudioRunner_SendsExpectedRequest(t *testing.T) {
 	var captured lmStudioChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +181,9 @@ func TestLMStudioRunner_SendsExpectedRequest(t *testing.T) {
 	}
 	if !captured.Stream {
 		t.Error("expected stream=true")
+	}
+	if captured.StreamOptions == nil || !captured.StreamOptions.IncludeUsage {
+		t.Error("expected stream_options.include_usage=true so token usage is reported")
 	}
 	if len(captured.Messages) != 2 || captured.Messages[0].Role != "system" || captured.Messages[1].Content != "hi" {
 		t.Errorf("unexpected messages: %+v", captured.Messages)
