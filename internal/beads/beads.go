@@ -120,18 +120,48 @@ func Close(ctx context.Context, root, id, reason string) error {
 	return err
 }
 
-// Ready returns issues that are unblocked and ready to be picked up.
-func Ready(ctx context.Context, root string) ([]Issue, error) {
+// Ready returns issues that are unblocked and ready to be picked up. When
+// parent is non-empty, results are scoped to descendants of that bead/epic
+// (`bd ready --parent`). Note: `bd ready` excludes in_progress issues, so an
+// interrupted (claimed-but-open) sub-task will NOT appear here — callers that
+// need to resume such work should use Children(..., "in_progress").
+func Ready(ctx context.Context, root, parent string) ([]Issue, error) {
 	if !Available() {
 		return nil, nil
 	}
-	out, err := runCmd(ctx, root, "ready", "--json")
+	args := []string{"ready", "--json"}
+	if parent != "" {
+		args = append(args, "--parent", parent)
+	}
+	out, err := runCmd(ctx, root, args...)
 	if err != nil {
 		return nil, err
 	}
 	var issues []Issue
 	if err := json.Unmarshal([]byte(out), &issues); err != nil {
 		return nil, fmt.Errorf("bd ready: parse json: %w", err)
+	}
+	return issues, nil
+}
+
+// Children lists the children of parent, optionally filtered by status
+// (e.g. "in_progress", "open"). Returns nil when bd is unavailable or parent
+// is empty.
+func Children(ctx context.Context, root, parent string, statuses ...string) ([]Issue, error) {
+	if !Available() || parent == "" {
+		return nil, nil
+	}
+	args := []string{"list", "--parent", parent, "--json"}
+	if len(statuses) > 0 {
+		args = append(args, "--status", strings.Join(statuses, ","))
+	}
+	out, err := runCmd(ctx, root, args...)
+	if err != nil {
+		return nil, err
+	}
+	var issues []Issue
+	if err := json.Unmarshal([]byte(out), &issues); err != nil {
+		return nil, fmt.Errorf("bd list: parse json: %w", err)
 	}
 	return issues, nil
 }

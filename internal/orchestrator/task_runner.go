@@ -462,40 +462,104 @@ func (tr *TaskRunner) createSubTaskBeads(ctx context.Context, tasks []agent.SubT
 	return idByKey
 }
 
-// executeBeads drives implementation by polling `bd ready`, claiming beads,
-// and running a QA-tests → Coder loop per bead. Falls back to in-order
-// execution when the `bd` binary is unavailable.
+// executeBeads drives implementation by polling the task's ready sub-task beads,
+// claiming them, and running a QA-tests → Coder loop per bead. Interrupted
+// (claimed-but-open) sub-tasks are resumed first, then newly-ready ones.
+// Execution is scoped to the top-level task bead so other tasks' beads are not
+// interleaved. Falls back to in-order execution when `bd` is unavailable.
 func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctxFragment string, tasks []agent.SubTask, idByKey map[string]string) error {
 	if !beads.Available() || len(idByKey) == 0 {
 		return tr.executeSubTasksInOrder(ctx, spec, ctxFragment, tasks)
 	}
 
+	// Resolve a bead's title/description from the decomposed sub-tasks; `bd
+	// ready` does not return descriptions, so without this lookup the coder
+	// would receive only the title.
+	subByID := make(map[string]agent.SubTask, len(tasks))
+	for _, t := range tasks {
+		if id, ok := idByKey[t.Key]; ok {
+			subByID[id] = t
+		}
+	}
+	resolve := func(b beads.Issue) (title, desc string) {
+		if st, ok := subByID[b.ID]; ok {
+			return st.Title, st.Description
+		}
+		return b.Title, ""
+	}
+
 	total := len(tasks)
 	done := 0
+	processed := make(map[string]bool)
 	for {
-		ready, err := beads.Ready(ctx, tr.root)
+		bead, resumed, ok, err := tr.nextBead(ctx, processed)
 		if err != nil {
-			tr.event(fmt.Sprintf("warning: bd ready: %v — falling back to in-order execution", err))
+			tr.event(fmt.Sprintf("warning: %v — falling back to in-order execution", err))
 			return tr.executeSubTasksInOrder(ctx, spec, ctxFragment, tasks)
 		}
-		if len(ready) == 0 {
-			return nil
+		if !ok {
+			return nil // no interrupted and no ready sub-tasks left
 		}
 
-		bead := ready[0]
-		if err := beads.Claim(ctx, tr.root, bead.ID); err != nil {
-			tr.event(fmt.Sprintf("warning: bd claim %s: %v", bead.ID, err))
-		}
 		done++
-		tr.event(fmt.Sprintf("── Sub-task %d/%d (%s): %s ──", done, total, bead.ID, bead.Title))
+		title, desc := resolve(bead)
+		if resumed {
+			tr.event(fmt.Sprintf("── Sub-task %d/%d (%s, resumed): %s ──", done, total, bead.ID, title))
+		} else {
+			tr.event(fmt.Sprintf("── Sub-task %d/%d (%s): %s ──", done, total, bead.ID, title))
+		}
 
-		if err := tr.executeBead(ctx, ctxFragment, bead.Title, bead.Description); err != nil {
+		if err := tr.executeBead(ctx, ctxFragment, title, desc); err != nil {
 			return fmt.Errorf("bead %s: %w", bead.ID, err)
 		}
+		processed[bead.ID] = true
 		if err := beads.Close(ctx, tr.root, bead.ID, "Completed by orchestrator"); err != nil {
 			tr.event(fmt.Sprintf("warning: bd close %s: %v", bead.ID, err))
 		}
 	}
+}
+
+// nextBead selects the next sub-task bead to run for the current task: an
+// interrupted (in_progress) child first, otherwise the next ready child (which
+// it claims). processed guards against an in_progress bead that fails to close,
+// which would otherwise loop forever. ok is false when no work remains.
+func (tr *TaskRunner) nextBead(ctx context.Context, processed map[string]bool) (bead beads.Issue, resumed, ok bool, err error) {
+	if tr.taskBeadID != "" {
+		inprog, lerr := beads.Children(ctx, tr.root, tr.taskBeadID, "in_progress")
+		if lerr == nil && len(inprog) > 0 {
+			if ip, found := pickInProgress(inprog, processed); found {
+				return ip, true, true, nil
+			}
+			// All in_progress beads were already executed but did not close.
+			tr.event("warning: in_progress sub-task(s) did not close after execution — stopping to avoid a loop")
+			return beads.Issue{}, false, false, nil
+		}
+	}
+
+	ready, rerr := beads.Ready(ctx, tr.root, tr.taskBeadID)
+	if rerr != nil {
+		return beads.Issue{}, false, false, fmt.Errorf("bd ready: %w", rerr)
+	}
+	if len(ready) == 0 {
+		return beads.Issue{}, false, false, nil
+	}
+	bead = ready[0]
+	if cerr := beads.Claim(ctx, tr.root, bead.ID); cerr != nil {
+		tr.event(fmt.Sprintf("warning: bd claim %s: %v", bead.ID, cerr))
+	}
+	return bead, false, true, nil
+}
+
+// pickInProgress returns the first in_progress bead not already processed this
+// run. found is false when every in_progress bead was already executed (which
+// means a close failed) — the caller must stop to avoid an infinite loop.
+func pickInProgress(inprog []beads.Issue, processed map[string]bool) (beads.Issue, bool) {
+	for _, ip := range inprog {
+		if !processed[ip.ID] {
+			return ip, true
+		}
+	}
+	return beads.Issue{}, false
 }
 
 // executeSubTasksInOrder runs sub-tasks sequentially when `bd` is unavailable.
