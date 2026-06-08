@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/artifacts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 )
 
@@ -761,4 +762,36 @@ func stripAnsi(s string) string {
 		i++
 	}
 	return out.String()
+}
+
+func TestNewHomeModel_OffersResumeProjectWhenArtifactsExist(t *testing.T) {
+	root := t.TempDir()
+	ws, err := artifacts.EnsureWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ws.WriteFile(artifacts.SummaryFile, []byte("partial progress")); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewHomeModel(newTestConfig(), root)
+
+	found := false
+	for _, it := range m.items {
+		if it.action == homeActionResumeProject {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected a Resume Project menu item when .orchestrator artifacts exist")
+	}
+}
+
+func TestNewHomeModel_NoResumeProjectWithoutArtifacts(t *testing.T) {
+	m := NewHomeModel(newTestConfig(), t.TempDir())
+	for _, it := range m.items {
+		if it.action == homeActionResumeProject {
+			t.Error("did not expect Resume Project without any artifacts")
+		}
+	}
 }

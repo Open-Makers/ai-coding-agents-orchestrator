@@ -180,6 +180,12 @@ func runCmd(args []string) {
 			// User chose to resume the interrupted task.
 			runTaskFlow(root, "", *branch, *ui, cfg, ws, true)
 			return
+		} else if result.ReviewProject {
+			// User chose "Resume Project": seed the PM with a digest of the
+			// existing .orchestrator artifacts so it plans the remaining work.
+			seed := orchestrator.BuildProjectReviewSeed(root)
+			runTaskFlow(root, seed, *branch, *ui, cfg, ws, false)
+			return
 		} else if result.ChatMode {
 			// User picked "New Task" — route to the brownfield-aware TaskRunner
 			// (PM negotiation gathers the description from the user).
@@ -329,6 +335,11 @@ func runTaskFlow(root, taskInput, branch, uiMode string, cfg config.Config, ws a
 	}
 	if startupResult.Resume {
 		runTaskFlow(root, "", "", uiMode, cfg, ws, true)
+		return
+	}
+	if startupResult.ReviewProject {
+		seed := orchestrator.BuildProjectReviewSeed(root)
+		runTaskFlow(root, seed, "", uiMode, cfg, ws, false)
 		return
 	}
 	if startupResult.ChatMode {

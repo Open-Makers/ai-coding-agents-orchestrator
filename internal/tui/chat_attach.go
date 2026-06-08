@@ -23,14 +23,21 @@ type chatAttachment struct {
 }
 
 // mdPicker is a compact multi-select list of markdown files used to attach
-// repository context to the PM chat.
+// repository context to the PM chat. Beyond the discovered files, the user can
+// type an arbitrary path (Ctrl+O) to attach any .md file, including ones
+// outside the repository.
 type mdPicker struct {
 	root     string
-	files    []string        // relative paths
-	selected map[string]bool // keyed by relative path
+	files    []string        // relative paths (discovered) + manually-added paths
+	selected map[string]bool // keyed by path as listed in files
 	cursor   int
 	width    int
 	height   int
+
+	entering    bool   // true while typing a manual path
+	entry       string // the manual path being typed
+	entryCursor int    // rune index in entry
+	entryErr    string // last manual-entry error (e.g. file not found)
 }
 
 // mdPickerDoneMsg is emitted when the user confirms or cancels the picker.
@@ -86,9 +93,48 @@ func (m mdPicker) Update(msg tea.Msg) (mdPicker, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
+
+	// Manual path entry mode: type any .md path (relative to root or absolute).
+	if m.entering {
+		switch key.String() {
+		case "esc":
+			m.entering = false
+			m.entry = ""
+			m.entryCursor = 0
+			m.entryErr = ""
+		case "enter":
+			m = m.commitManualEntry()
+		case "left":
+			if m.entryCursor > 0 {
+				m.entryCursor--
+			}
+		case "right":
+			if m.entryCursor < runeLen(m.entry) {
+				m.entryCursor++
+			}
+		case "home":
+			m.entryCursor = 0
+		case "end":
+			m.entryCursor = runeLen(m.entry)
+		case "backspace":
+			m.entry, m.entryCursor = runeDeleteBefore(m.entry, m.entryCursor)
+		case "ctrl+u":
+			m.entry = string([]rune(m.entry)[m.entryCursor:])
+			m.entryCursor = 0
+		default:
+			if len(key.Runes) > 0 {
+				m.entry, m.entryCursor = runeInsert(m.entry, m.entryCursor, key.Runes)
+			}
+		}
+		return m, nil
+	}
+
 	switch key.String() {
 	case "esc":
 		return m, func() tea.Msg { return mdPickerDoneMsg{cancel: true} }
+	case "ctrl+o":
+		m.entering = true
+		m.entryErr = ""
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -118,6 +164,66 @@ func (m mdPicker) Update(msg tea.Msg) (mdPicker, tea.Cmd) {
 	return m, nil
 }
 
+// commitManualEntry validates the typed path, adds it to the file list, selects
+// it, and exits entry mode. On error it keeps entry mode open with a message.
+func (m mdPicker) commitManualEntry() mdPicker {
+	p := strings.TrimSpace(m.entry)
+	if p == "" {
+		m.entering = false
+		return m
+	}
+	// Expand a leading ~ to the user's home directory for convenience.
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	full := p
+	if !filepath.IsAbs(p) {
+		full = filepath.Join(m.root, p)
+	}
+	info, err := os.Stat(full)
+	if err != nil || info.IsDir() {
+		m.entryErr = "not a readable file: " + p
+		return m
+	}
+	// Store the listing key: a path relative to root when possible (nicer
+	// display and consistent with discovered entries), otherwise the absolute
+	// path so files outside the repo still work.
+	key := full
+	if rel, rerr := filepath.Rel(m.root, full); rerr == nil && !strings.HasPrefix(rel, "..") {
+		key = rel
+	}
+	if !sliceContains(m.files, key) {
+		m.files = append([]string{key}, m.files...)
+	}
+	m.selected[key] = true
+	m.cursor = sliceIndexOf(m.files, key)
+	m.entering = false
+	m.entry = ""
+	m.entryCursor = 0
+	m.entryErr = ""
+	return m
+}
+
+func sliceContains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func sliceIndexOf(ss []string, s string) int {
+	for i, v := range ss {
+		if v == s {
+			return i
+		}
+	}
+	return 0
+}
+
 func (m mdPicker) View() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
 	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
@@ -125,17 +231,35 @@ func (m mdPicker) View() string {
 
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Attach .md context"))
-	sb.WriteString("  " + dimStyle.Render("Space toggle  Enter confirm  Esc cancel"))
+	sb.WriteString("  " + dimStyle.Render("Space toggle  Enter confirm  Ctrl+O type path  Esc cancel"))
 	sb.WriteString("\n")
 	sb.WriteString(strings.Repeat("─", m.width))
 	sb.WriteString("\n")
 
+	// Manual path entry line.
+	if m.entering {
+		sb.WriteString(brightStyle.Render("path › ") + renderInputWithCursor(m.entry, m.entryCursor))
+		sb.WriteString("\n")
+		if m.entryErr != "" {
+			sb.WriteString(dimStyle.Render("  " + m.entryErr))
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString(dimStyle.Render("  type any .md path (relative or absolute), Enter to add, Esc to cancel"))
+			sb.WriteString("\n")
+		}
+	}
+
 	if len(m.files) == 0 {
-		sb.WriteString(dimStyle.Render("  no markdown files found"))
+		if !m.entering {
+			sb.WriteString(dimStyle.Render("  no markdown files found — press Ctrl+O to type a path"))
+		}
 		return sb.String()
 	}
 
 	rows := m.height - 4
+	if m.entering {
+		rows -= 2
+	}
 	if rows < 3 {
 		rows = 3
 	}
@@ -163,18 +287,21 @@ func (m mdPicker) View() string {
 	return sb.String()
 }
 
-// loadAttachments reads selected relative paths into chatAttachment values,
-// truncating oversized files to keep the prompt bounded.
-func loadAttachments(root string, rels []string) []chatAttachment {
+// loadAttachments reads selected paths into chatAttachment values, truncating
+// oversized files to keep the prompt bounded. A path is either relative to root
+// (discovered files) or absolute (manually entered, possibly outside the repo).
+func loadAttachments(root string, paths []string) []chatAttachment {
 	var out []chatAttachment
-	for _, rel := range rels {
-		// rel originates from findMarkdownFiles (paths discovered under root);
-		// reject any traversal attempt defensively before reading.
-		full := filepath.Join(root, rel)
-		if !strings.HasPrefix(full, filepath.Clean(root)+string(os.PathSeparator)) {
-			continue
+	for _, p := range paths {
+		full := p
+		if !filepath.IsAbs(p) {
+			full = filepath.Join(root, p)
+			// Relative paths must stay within root (defensive: reject traversal).
+			if !strings.HasPrefix(full, filepath.Clean(root)+string(os.PathSeparator)) {
+				continue
+			}
 		}
-		data, err := os.ReadFile(full) // #nosec G304 -- path constrained to root above
+		data, err := os.ReadFile(full) // #nosec G304 -- user explicitly selected this path
 		if err != nil {
 			continue
 		}
@@ -182,7 +309,7 @@ func loadAttachments(root string, rels []string) []chatAttachment {
 		if len(content) > maxAttachBytes {
 			content = content[:maxAttachBytes] + "\n…(truncated)"
 		}
-		out = append(out, chatAttachment{rel: rel, content: content})
+		out = append(out, chatAttachment{rel: p, content: content})
 	}
 	return out
 }

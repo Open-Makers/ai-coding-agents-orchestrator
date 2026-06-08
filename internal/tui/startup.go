@@ -51,6 +51,7 @@ type startupModel struct {
 	reqPath       string     // result — non-empty when resolved (legacy pipeline)
 	chatMode      bool       // result — true when PM chat-based requirements gathering was selected
 	resume        bool       // result — true when the user chose to resume an interrupted task
+	reviewProject bool       // result — true when the user chose "Resume Project" (PM review)
 	pendingAction homeAction // action to resume after module path input
 	width         int
 	height        int
@@ -129,6 +130,15 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Resume the interrupted task — do NOT clean the workspace
 				// (the sub-task plan and run-state must survive).
 				m.resume = true
+				return m, tea.Quit
+			case homeActionResumeProject:
+				// PM re-reads .orchestrator artifacts and plans the remaining
+				// work. Keep the workspace intact so the PM can read it.
+				if m.needsModulePath() {
+					m.pendingAction = homeActionResumeProject
+					return m, m.showModulePathInput()
+				}
+				m.reviewProject = true
 				return m, tea.Quit
 			case homeActionDoneTasks:
 				hist := NewTaskHistory(orchestrator.DoneTasks(context.Background(), m.root))
@@ -467,6 +477,9 @@ func (m *startupModel) resumePendingAction() tea.Cmd {
 		return tea.Quit
 	case homeActionRunPipeline:
 		return m.showPicker()
+	case homeActionResumeProject:
+		m.reviewProject = true
+		return tea.Quit
 	default:
 		return m.transitionToHome()
 	}
@@ -651,10 +664,11 @@ func pairLess(r1, m1, r2, m2 string) bool {
 
 // StartupResult holds the outcome of the startup flow.
 type StartupResult struct {
-	ReqPath  string        // non-empty when legacy pipeline was selected
-	ChatMode bool          // true when PM chat-based requirements gathering was selected
-	Resume   bool          // true when the user chose to resume an interrupted task
-	Cfg      config.Config // possibly updated config
+	ReqPath       string        // non-empty when legacy pipeline was selected
+	ChatMode      bool          // true when PM chat-based requirements gathering was selected
+	Resume        bool          // true when the user chose to resume an interrupted task
+	ReviewProject bool          // true when the user chose "Resume Project" (PM reviews .orchestrator)
+	Cfg           config.Config // possibly updated config
 }
 
 // RunStartup shows the home/picker/editor flow and returns the result.
@@ -671,10 +685,11 @@ func RunStartup(root, wsReqPath string, cfg config.Config) (StartupResult, error
 		return StartupResult{Cfg: cfg}, nil
 	}
 	return StartupResult{
-		ReqPath:  final.reqPath,
-		ChatMode: final.chatMode,
-		Resume:   final.resume,
-		Cfg:      final.cfg,
+		ReqPath:       final.reqPath,
+		ChatMode:      final.chatMode,
+		Resume:        final.resume,
+		ReviewProject: final.reviewProject,
+		Cfg:           final.cfg,
 	}, nil
 }
 

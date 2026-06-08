@@ -23,6 +23,7 @@ const (
 	homeActionNewTask homeAction = iota
 	homeActionRunPipeline
 	homeActionResume
+	homeActionResumeProject
 	homeActionDoneTasks
 	homeActionOpenProject
 	homeActionGlobalSettings
@@ -148,6 +149,21 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 			key:    "d",
 		}
 		items = append([]homeMenuItem{historyItem}, items...)
+	}
+
+	// Offer "Resume Project" when planning artifacts exist but no strictly
+	// resumable (in-progress) task is detected — the PM re-reads .orchestrator
+	// and plans only the remaining work.
+	_, strictResumable := orchestrator.Resumable(context.Background(), root)
+	if !strictResumable && orchestrator.HasReviewableArtifacts(root) {
+		reviewItem := homeMenuItem{
+			icon:   "↺",
+			label:  "Resume Project",
+			desc:   "PM reviews .orchestrator artifacts and plans the remaining work",
+			action: homeActionResumeProject,
+			key:    "r",
+		}
+		items = append([]homeMenuItem{reviewItem}, items...)
 	}
 
 	// Offer Resume at the top when an interrupted task is detected.
@@ -958,7 +974,7 @@ func isValidProjectRoot(root string) bool {
 // requiresProject returns true for actions that need a valid project directory.
 func requiresProject(action homeAction) bool {
 	switch action {
-	case homeActionNewTask, homeActionRunPipeline, homeActionResume, homeActionSetup, homeActionClean:
+	case homeActionNewTask, homeActionRunPipeline, homeActionResume, homeActionResumeProject, homeActionSetup, homeActionClean:
 		return true
 	case homeActionOpenProject, homeActionGlobalSettings, homeActionDoneTasks, homeActionQuit:
 		return false

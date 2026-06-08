@@ -110,3 +110,52 @@ func mustWrite(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+func TestMDPicker_ManualPathEntryOutsideRoot(t *testing.T) {
+	root := t.TempDir()
+	// A description file living OUTSIDE the repo root.
+	outside := t.TempDir()
+	descPath := filepath.Join(outside, "PROJECT.md")
+	mustWrite(t, descPath, "external project description")
+
+	p := newMDPicker(root, nil, 80, 24)
+
+	// Enter manual-path mode and type the absolute path.
+	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	if !p.entering {
+		t.Fatal("expected Ctrl+O to enter manual path mode")
+	}
+	for _, r := range descPath {
+		p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if p.entering {
+		t.Fatal("expected entry mode to close after a valid path")
+	}
+	if !p.selected[descPath] {
+		t.Fatalf("expected the manual path to be selected, files=%v", p.files)
+	}
+
+	// Confirming yields the path, and loadAttachments reads it from outside root.
+	att := loadAttachments(root, []string{descPath})
+	if len(att) != 1 || !strings.Contains(att[0].content, "external project description") {
+		t.Fatalf("expected to load the outside file, got %+v", att)
+	}
+}
+
+func TestMDPicker_ManualPathEntryRejectsMissing(t *testing.T) {
+	p := newMDPicker(t.TempDir(), nil, 80, 24)
+	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyCtrlO})
+	for _, r := range "does-not-exist.md" {
+		p, _ = p.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	p, _ = p.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if !p.entering {
+		t.Error("expected to stay in entry mode on a missing file")
+	}
+	if p.entryErr == "" {
+		t.Error("expected an error message for a missing file")
+	}
+}
