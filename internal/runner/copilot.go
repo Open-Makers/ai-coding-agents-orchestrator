@@ -200,7 +200,10 @@ func (r CopilotRunner) Complete(ctx context.Context, req CompletionRequest) (<-c
 	ch := make(chan Token, 16)
 	fullInput := req.SystemPrompt + "\n\n" + userContent.String()
 	go streamCopilotOutput(cmd, stdout, stderr, fullInput, ch)
-	return ch, nil
+	// The Copilot CLI (`-p` mode) does its agentic work silently and only
+	// prints the final answer, so wrap the stream with a heartbeat to show the
+	// run is alive during long silent stretches.
+	return withHeartbeat(ch, defaultHeartbeatInterval), nil
 }
 
 func (r CopilotRunner) startStreamingProcess(ctx context.Context, prompt, systemPrompt, model string) (*exec.Cmd, io.ReadCloser, *bytes.Buffer, error) {

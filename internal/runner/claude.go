@@ -45,7 +45,9 @@ func (r ClaudeRunner) Complete(ctx context.Context, req CompletionRequest) (<-ch
 
 	ch := make(chan Token, 16)
 	go streamClaudeOutput(cmd, stdout, stderr, req, prompt, ch)
-	return ch, nil
+	// Claude streams tool-use steps, but stretches of silent work still happen;
+	// a heartbeat keeps the UI alive so the run never looks frozen.
+	return withHeartbeat(ch, defaultHeartbeatInterval), nil
 }
 
 func buildClaudePrompt(messages []ConvMessage) string {
@@ -127,6 +129,12 @@ func streamClaudeOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr *bytes.Buffe
 				ch <- Token{Text: delta}
 				emitted.WriteString(delta)
 			}
+			// Surface tool invocations (read/edit/bash/…) as display-only
+			// notices so the user sees the agent is actively working during
+			// the (otherwise silent) tool phase.
+			for _, note := range toolUseNotices(evt.Message.Content) {
+				ch <- Token{Reasoning: note}
+			}
 		case "result":
 			if evt.Result != "" {
 				delta := computeDelta(emitted.String(), evt.Result)
@@ -195,8 +203,10 @@ type claudeStreamMessage struct {
 }
 
 type claudeStreamContent struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	Name  string          `json:"name"`  // tool name when Type == "tool_use"
+	Input json.RawMessage `json:"input"` // tool input when Type == "tool_use"
 }
 
 type claudeStreamUsageFields struct {
@@ -220,6 +230,65 @@ func assistantText(content []claudeStreamContent) string {
 		}
 	}
 	return sb.String()
+}
+
+// toolUseNotices returns a short, display-only line for each tool_use block in
+// an assistant event (e.g. "⚙ Read path/to/file.go"), so the UI reflects the
+// agent's silent tool activity during running/fixing.
+func toolUseNotices(content []claudeStreamContent) []string {
+	var out []string
+	for _, c := range content {
+		if c.Type != "tool_use" || c.Name == "" {
+			continue
+		}
+		notice := "⚙ " + c.Name
+		if detail := toolInputSummary(c.Input); detail != "" {
+			notice += " " + detail
+		}
+		out = append(out, notice+"\n")
+	}
+	return out
+}
+
+// toolInputSummary extracts a compact, human-meaningful detail from a tool's
+// input JSON (file path or command), or "" when none is obvious.
+func toolInputSummary(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var fields struct {
+		FilePath    string `json:"file_path"`
+		Path        string `json:"path"`
+		Command     string `json:"command"`
+		Pattern     string `json:"pattern"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(input, &fields); err != nil {
+		return ""
+	}
+	switch {
+	case fields.FilePath != "":
+		return fields.FilePath
+	case fields.Path != "":
+		return fields.Path
+	case fields.Command != "":
+		return truncateInline(fields.Command, 60)
+	case fields.Pattern != "":
+		return truncateInline(fields.Pattern, 60)
+	case fields.Description != "":
+		return truncateInline(fields.Description, 60)
+	}
+	return ""
+}
+
+// truncateInline shortens s to max runes, appending "…" when cut.
+func truncateInline(s string, max int) string {
+	s = strings.TrimSpace(strings.ReplaceAll(s, "\n", " "))
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
 }
 
 // claudeJSONResult is the shape of claude --output-format json stdout.

@@ -383,6 +383,15 @@ func (a *CoderAgent) streamAndWriteFiles(ch <-chan runner.Token) ([]string, stri
 			}
 			break
 		}
+		// Reasoning is display-only (heartbeats, tool-use notices). Show it so
+		// the user sees activity during fixing, but never accumulate it into
+		// the parsed file output.
+		if tok.Reasoning != "" {
+			a.emitToken(tok.Reasoning, false)
+		}
+		if tok.Text == "" {
+			continue
+		}
 		a.emitToken(tok.Text, false)
 		lineBuf.WriteString(tok.Text)
 
