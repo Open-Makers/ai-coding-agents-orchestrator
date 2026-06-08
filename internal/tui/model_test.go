@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -331,7 +332,15 @@ func TestModel_EscAfterPipelineReturnsToMenu(t *testing.T) {
 }
 
 func TestModel_CtrlPDuringPipelineOpensPauseConfirm(t *testing.T) {
-	m := New(nil, "", "", nil, config.Config{})
+	// Pause is only offered once the run is resumable: spec + run-state + plan
+	// sidecars must be present on disk.
+	ws := t.TempDir()
+	for _, f := range []string{artifacts.TaskSpecFile, artifacts.RunStateFile, artifacts.SubTasksFile} {
+		if err := os.WriteFile(filepath.Join(ws, f), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := New(nil, "", ws, nil, config.Config{})
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
 	if cmd != nil {
@@ -343,6 +352,20 @@ func TestModel_CtrlPDuringPipelineOpensPauseConfirm(t *testing.T) {
 	}
 	if model.pauseForModel {
 		t.Fatal("should not flag pause before confirmation")
+	}
+}
+
+func TestModel_CtrlPBeforeResumableDoesNotPause(t *testing.T) {
+	// No resume sidecars yet (e.g. during planning) → pausing is blocked so we
+	// never resume into a "no resumable task found" error.
+	m := New(nil, "", t.TempDir(), nil, config.Config{})
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlP})
+	if cmd != nil {
+		t.Fatal("expected no command when pause is not allowed")
+	}
+	if updated.(Model).pauseConfirm {
+		t.Fatal("expected Ctrl+P to be ignored before the run is resumable")
 	}
 }
 

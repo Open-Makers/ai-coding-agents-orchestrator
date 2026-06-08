@@ -130,8 +130,7 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 	}
 
 	items := []homeMenuItem{
-		{icon: "▶", label: "New Task", desc: "Start a PM chat to define a new task before execution", action: homeActionNewTask, key: "Enter"},
-		{icon: "📋", label: "Run Pipeline", desc: "Choose a requirements file and run the full pipeline", action: homeActionRunPipeline, key: "r"},
+		{icon: "▶", label: "New Task", desc: "Start a PM chat to define a task — attach existing .md with Ctrl+F", action: homeActionNewTask, key: "Enter"},
 		{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
 		{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
 		{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
@@ -230,11 +229,6 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			} else {
 				return m, m.selectAction(selected)
 			}
-		case "r", "R":
-			if !m.projectValid {
-				return m, m.selectAction(homeActionOpenProject)
-			}
-			return m, m.selectAction(homeActionRunPipeline)
 		case "s", "S":
 			if !m.projectValid {
 				return m, m.selectAction(homeActionOpenProject)
@@ -266,25 +260,20 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			}
 			return m, m.selectAction(homeActionNewTask)
 		case "2":
-			if !m.projectValid {
-				return m, m.selectAction(homeActionOpenProject)
-			}
-			return m, m.selectAction(homeActionRunPipeline)
-		case "3":
 			return m, m.selectAction(homeActionOpenProject)
-		case "4":
+		case "3":
 			return m, m.selectAction(homeActionGlobalSettings)
-		case "5":
+		case "4":
 			if !m.projectValid {
 				return m, m.selectAction(homeActionOpenProject)
 			}
 			return m, m.selectAction(homeActionSetup)
-		case "6":
+		case "5":
 			if !m.projectValid {
 				return m, m.selectAction(homeActionOpenProject)
 			}
 			return m, m.selectAction(homeActionClean)
-		case "7":
+		case "6":
 			m.confirmQuit = true
 		}
 	}
@@ -658,7 +647,6 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 	// Each menu item gets its own accent color.
 	itemColors := []lipgloss.Color{
 		p.green,  // New Task
-		p.cyan,   // Run Pipeline
 		p.accent, // Open Project
 		p.cyan,   // Global Settings
 		p.gold,   // Project Setup

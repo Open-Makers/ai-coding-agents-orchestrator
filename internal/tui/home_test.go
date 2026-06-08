@@ -135,13 +135,12 @@ func TestNewHomeModel_MenuItems(t *testing.T) {
 	root := t.TempDir()
 	m := NewHomeModel(newTestConfig(), root)
 
-	if len(m.items) != 7 {
-		t.Fatalf("expected 7 menu items, got %d", len(m.items))
+	if len(m.items) != 6 {
+		t.Fatalf("expected 6 menu items, got %d", len(m.items))
 	}
 
 	expectedActions := []homeAction{
 		homeActionNewTask,
-		homeActionRunPipeline,
 		homeActionOpenProject,
 		homeActionGlobalSettings,
 		homeActionSetup,
@@ -375,10 +374,10 @@ func TestHomeModel_NumberShortcuts(t *testing.T) {
 	m.width, m.height = 120, 40
 	m.syncViewport()
 
-	// '7' should trigger quit confirmation.
-	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'7'}})
+	// '6' should trigger quit confirmation.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
 	if !m.confirmQuit {
-		t.Error("expected confirmQuit after pressing '7'")
+		t.Error("expected confirmQuit after pressing '6'")
 	}
 }
 

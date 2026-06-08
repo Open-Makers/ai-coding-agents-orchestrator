@@ -189,6 +189,22 @@ func (m Model) PauseForModelChange() bool {
 	return m.pauseForModel
 }
 
+// resumeReady reports whether the run has persisted the artifacts needed to
+// resume: the approved task spec, the run-state sidecar, and the sub-task plan.
+// These are written only after planning/decomposition, so pausing before that
+// would leave nothing to resume.
+func (m Model) resumeReady() bool {
+	if m.wsPath == "" {
+		return false
+	}
+	for _, f := range []string{artifacts.TaskSpecFile, artifacts.RunStateFile, artifacts.SubTasksFile} {
+		if _, err := os.Stat(filepath.Join(m.wsPath, f)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // buildResumeFn returns a closure that re-runs the coder's build-and-fix loop.
 // Returns nil when no runner is available (nothing to resume).
 func (m Model) buildResumeFn() func(context.Context) error {
@@ -589,9 +605,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+a":
 			m.approveCurrentGate("shortcut")
 		case "ctrl+p":
-			// Pause the running task to change the model, then resume.
+			// Pause the running task to change the model, then resume. Only
+			// allow this once the run is resumable (spec + plan persisted),
+			// otherwise resume would fail with "no resumable task found".
 			if !m.pipelineDone {
-				m.pauseConfirm = true
+				if m.resumeReady() {
+					m.pauseConfirm = true
+				} else {
+					m.statusbar = m.statusbar.WithState("⏸ can't pause yet — wait until planning completes")
+				}
 			}
 		case "ctrl+e":
 			if m.pipelineFailed && !m.pipelineResuming {
