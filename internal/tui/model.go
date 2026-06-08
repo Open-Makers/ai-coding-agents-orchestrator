@@ -167,7 +167,10 @@ type Model struct {
 	// treeBrowsing is true while the user navigates the System Monitor tree
 	// (entered with Tab); the active agent panel is replaced by filePreview.
 	treeBrowsing bool
-	filePreview  FilePreviewModel
+	// treePreviewFocused is true once the user opens a file (Enter) while
+	// browsing: arrows then scroll the file content instead of the tree.
+	treePreviewFocused bool
+	filePreview        FilePreviewModel
 }
 
 // WithTaskInput sets the submitted requirements shown in the PM conversation.
@@ -203,6 +206,20 @@ func (m Model) resumeReady() bool {
 		}
 	}
 	return true
+}
+
+// negotiateSeed returns the content to show at the top of the PM conversation:
+// the task input submitted for this run (e.g. the Resume Project brief), or the
+// workspace requirements file when no task input was provided.
+func (m Model) negotiateSeed() string {
+	if strings.TrimSpace(m.taskInput) != "" {
+		return m.taskInput
+	}
+	ws := artifacts.Workspace{Dir: m.wsPath}
+	if data, err := ws.ReadFile(artifacts.RequirementsFile); err == nil {
+		return string(data)
+	}
+	return ""
 }
 
 // buildResumeFn returns a closure that re-runs the coder's build-and-fix loop.
@@ -387,6 +404,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 							neg := NewNegotiate(sendFn, m.root)
 							neg.SetSize(m.contentWidth(), m.height)
+							// Seed with the submitted task input so the user sees
+							// what's being negotiated (e.g. the Resume Project
+							// brief), and show a waiting indicator until the PM
+							// produces its first response — otherwise the pane
+							// looks blank/broken while a slow local model thinks.
+							if seed := m.negotiateSeed(); strings.TrimSpace(seed) != "" {
+								neg.SeedContext(seed)
+								neg.SetWaiting()
+							}
 							m.overlayNegotiate = neg
 							m.overlay = overlayNegotiate
 						}
@@ -431,19 +457,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					neg := NewNegotiate(sendFn, m.root)
 					neg.SetSize(m.contentWidth(), m.height)
-					// Seed with the submitted requirements so the conversation
-					// shows the file from the first step — the user can review it
-					// and either refine it via chat or accept (Ctrl+A). Falls
-					// back to the workspace requirements file if no task input
-					// was provided (e.g. a resumed run).
-					seed := m.taskInput
-					if strings.TrimSpace(seed) == "" {
-						ws := artifacts.Workspace{Dir: m.wsPath}
-						if data, err := ws.ReadFile(artifacts.RequirementsFile); err == nil {
-							seed = string(data)
-						}
-					}
-					neg.SeedContext(seed)
+					// Seed with the submitted task input so the conversation
+					// shows the brief from the first step — the user can review
+					// it and either refine it via chat or accept (Ctrl+A). Falls
+					// back to the workspace requirements file when no task input
+					// was provided (e.g. a plain resumed run).
+					neg.SeedContext(m.negotiateSeed())
 					m.overlayNegotiate = neg
 					m.overlay = overlayNegotiate
 				}
@@ -559,6 +578,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Tree-browsing mode: navigate the System Monitor file tree and preview
 		// the selected file in place of the agent output.
 		if m.treeBrowsing {
+			// Preview-focused sub-mode: arrows scroll the open file instead of
+			// moving the tree selection, so long files are fully readable.
+			if m.treePreviewFocused {
+				switch msg.String() {
+				case "esc", "left", "h":
+					m.treePreviewFocused = false
+				case "tab", "q":
+					m.treeBrowsing = false
+					m.treePreviewFocused = false
+					m.sysmon.BlurTree()
+				case "up", "k":
+					m.filePreview.ScrollUp()
+				case "down", "j":
+					m.filePreview.ScrollDown()
+				case "pgup":
+					m.filePreview.PageUp()
+				case "pgdown", " ":
+					m.filePreview.PageDown()
+				case "home", "g":
+					m.filePreview.GotoTop()
+				case "end", "G":
+					m.filePreview.GotoBottom()
+				}
+				return m, nil
+			}
 			switch msg.String() {
 			case "esc", "tab", "q":
 				m.treeBrowsing = false
@@ -575,6 +619,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.filePreview.ScrollDown()
 			case "enter", "right", "l":
 				m.syncTreePreview()
+				// Opening a file focuses the preview for scrolling; directories
+				// stay in tree-navigation mode.
+				if _, isDir, ok := m.sysmon.SelectedTreeEntry(); ok && !isDir {
+					m.treePreviewFocused = true
+				}
 			}
 			return m, nil
 		}
@@ -583,6 +632,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			if m.canBrowseTree() {
 				m.treeBrowsing = true
+				m.treePreviewFocused = false
 				m.sysmon.FocusTree()
 				m.filePreview = NewFilePreview(m.root, m.contentWidth(), m.height-3)
 				m.syncTreePreview()
@@ -881,6 +931,7 @@ func (m Model) View() string {
 		if m.treeBrowsing {
 			// Replace the agent output with the selected file's preview.
 			m.filePreview.SetSize(agentW, panelH)
+			m.filePreview.SetFocused(m.treePreviewFocused)
 			agentView = m.filePreview.View()
 		} else {
 			p := m.panels[m.activeRole]

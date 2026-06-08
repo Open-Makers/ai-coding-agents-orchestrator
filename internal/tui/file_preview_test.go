@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -90,5 +91,48 @@ func TestFilePreview_DirectoryShowsHint(t *testing.T) {
 	p.Show("internal", true)
 	if !strings.Contains(stripANSI(p.vp.View()), "select a file") {
 		t.Errorf("expected directory hint, got:\n%s", p.vp.View())
+	}
+}
+
+func TestFilePreview_ScrollsLongFile(t *testing.T) {
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	if err := os.WriteFile(filepath.Join(root, "big.txt"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := NewFilePreview(root, 60, 20)
+	p.Show("big.txt", false)
+
+	if p.vp.YOffset != 0 {
+		t.Fatalf("expected to start at top, got offset %d", p.vp.YOffset)
+	}
+	p.ScrollDown()
+	if p.vp.YOffset == 0 {
+		t.Error("expected ScrollDown to advance the viewport")
+	}
+	top := p.vp.YOffset
+	p.PageDown()
+	if p.vp.YOffset <= top {
+		t.Errorf("expected PageDown to scroll further than a line, got %d after %d", p.vp.YOffset, top)
+	}
+	p.GotoBottom()
+	bottom := p.vp.YOffset
+	p.GotoTop()
+	if p.vp.YOffset != 0 {
+		t.Errorf("expected GotoTop to return to 0, got %d", p.vp.YOffset)
+	}
+	if bottom == 0 {
+		t.Error("expected a non-zero bottom offset for a long file")
+	}
+}
+
+func TestFilePreview_FocusedHint(t *testing.T) {
+	p := NewFilePreview(t.TempDir(), 60, 20)
+	p.SetFocused(true)
+	if !strings.Contains(p.View(), "scroll") {
+		t.Errorf("expected scroll hint when focused:\n%s", p.View())
 	}
 }

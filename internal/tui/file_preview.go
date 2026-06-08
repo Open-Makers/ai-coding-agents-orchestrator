@@ -19,12 +19,13 @@ const maxPreviewBytes = 256 * 1024
 // file. It replaces the active agent panel while the user browses the project
 // tree in the System Monitor.
 type FilePreviewModel struct {
-	root   string
-	path   string // repo-relative path of the previewed file ("" = none)
-	vp     viewport.Model
-	width  int
-	height int
-	errMsg string
+	root    string
+	path    string // repo-relative path of the previewed file ("" = none)
+	vp      viewport.Model
+	width   int
+	height  int
+	errMsg  string
+	focused bool // true when arrows scroll the file (vs. navigate the tree)
 }
 
 // NewFilePreview creates an empty preview rooted at root.
@@ -117,6 +118,18 @@ func (m *FilePreviewModel) load(relPath string) {
 func (m *FilePreviewModel) ScrollUp()   { m.vp.ScrollUp(3) }
 func (m *FilePreviewModel) ScrollDown() { m.vp.ScrollDown(3) }
 
+// PageUp / PageDown scroll by a full viewport page.
+func (m *FilePreviewModel) PageUp()   { m.vp.ScrollUp(m.vp.Height) }
+func (m *FilePreviewModel) PageDown() { m.vp.ScrollDown(m.vp.Height) }
+
+// GotoTop / GotoBottom jump to the start/end of the file.
+func (m *FilePreviewModel) GotoTop()    { m.vp.GotoTop() }
+func (m *FilePreviewModel) GotoBottom() { m.vp.GotoBottom() }
+
+// SetFocused toggles the preview-scroll hint. When focused, arrow keys scroll
+// the file; otherwise they navigate the tree.
+func (m *FilePreviewModel) SetFocused(b bool) { m.focused = b }
+
 func (m FilePreviewModel) View() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(crt.primary)
 	dimStyle := lipgloss.NewStyle().Foreground(crt.dim)
@@ -126,7 +139,12 @@ func (m FilePreviewModel) View() string {
 		title += "  " + m.path
 	}
 
-	hint := dimStyle.Render("↑↓ select file · PgUp/PgDn scroll · Esc back to agent output")
+	var hint string
+	if m.focused {
+		hint = dimStyle.Render("↑↓/jk scroll · PgUp/PgDn page · g/G top/bottom · Esc back to file list")
+	} else {
+		hint = dimStyle.Render("↑↓ select file · Enter open & scroll · Esc back to agent output")
+	}
 
 	return strings.Join([]string{
 		titleStyle.Render(title),

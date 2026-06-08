@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -413,5 +414,24 @@ func TestRenderSegmentedBarEdgeCases(t *testing.T) {
 	fullBar := renderSegmentedBar(100, 20)
 	if fullBar == "" {
 		t.Error("segmented bar at 100% should not be empty")
+	}
+}
+
+func TestSysmonClip_KeepsTreeVisibleWhenFocused(t *testing.T) {
+	var entries []projectTreeEntry
+	for i := 0; i < 20; i++ {
+		entries = append(entries, projectTreeEntry{name: fmt.Sprintf("file%02d.go", i), depth: 1})
+	}
+	m := SysmonModel{projectTree: entries, treeFocused: true, treeCursor: 18}
+	m.SetSize(60, 24) // panel taller than 24 → clipping happens
+
+	out := m.View()
+	lines := strings.Split(out, "\n")
+	if len(lines) > 24 {
+		t.Fatalf("expected clipped to <=24 lines, got %d", len(lines))
+	}
+	// The focused tree must keep its footer (bottom) visible.
+	if !strings.Contains(out, "Session:") {
+		t.Errorf("expected the bottom (Session footer + tree) to remain visible while browsing:\n%s", out)
 	}
 }

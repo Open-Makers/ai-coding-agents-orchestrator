@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -61,5 +63,27 @@ func TestBuildProjectReviewSeed(t *testing.T) {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed missing %q:\n%s", want, seed)
 		}
+	}
+}
+
+func TestHasReviewableArtifacts_DetectsMemoryOnly(t *testing.T) {
+	// A project whose only artifacts are persisted task memory (the common case
+	// after a run finishes/fails) must still be reviewable.
+	root := t.TempDir()
+	ws, _ := artifacts.EnsureWorkspace(root)
+	memTasks := filepath.Join(ws.Dir, artifacts.MemoryDirName, "tasks")
+	if err := os.MkdirAll(memTasks, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(memTasks, "20260608-1144-task.md"), []byte("PM decided X"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !HasReviewableArtifacts(root) {
+		t.Error("expected memory-only project to be reviewable")
+	}
+	seed := BuildProjectReviewSeed(root)
+	if !strings.Contains(seed, "PM decided X") {
+		t.Errorf("expected memory content in seed:\n%s", seed)
 	}
 }

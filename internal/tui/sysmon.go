@@ -656,7 +656,14 @@ func (m SysmonModel) View() string {
 	totalLines := len(lines)
 	if m.height > 0 && totalLines > m.height {
 		clipped := strings.Split(result, "\n")
-		result = strings.Join(clipped[:m.height], "\n")
+		if m.treeFocused {
+			// While browsing the tree, keep the BOTTOM of the panel visible so
+			// the (near-bottom) TREE section and its cursor aren't clipped off
+			// — otherwise scrolling down makes the selection disappear.
+			result = strings.Join(clipped[len(clipped)-m.height:], "\n")
+		} else {
+			result = strings.Join(clipped[:m.height], "\n")
+		}
 	} else if m.height > totalLines {
 		topPad := (m.height - totalLines) / 2
 		result = strings.Repeat("\n", topPad) + result

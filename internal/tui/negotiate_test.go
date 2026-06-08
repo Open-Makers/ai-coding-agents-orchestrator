@@ -145,3 +145,17 @@ func TestNegotiate_AttachInjectsFileThenClears(t *testing.T) {
 		t.Errorf("expected attachments cleared after send, got %d", len(m.attached))
 	}
 }
+
+func TestNegotiate_SetWaitingShowsThinking(t *testing.T) {
+	m := NewNegotiate(nil, "")
+	m.SetSize(80, 24)
+	m.SeedContext("Resume this project. Plan the remaining work.")
+	m.SetWaiting()
+
+	if !strings.Contains(m.View(), "PM is thinking") {
+		t.Errorf("expected a thinking indicator while waiting:\n%s", m.View())
+	}
+	if !strings.Contains(m.vp.View(), "Resume this project") {
+		t.Errorf("expected the seeded brief to be visible:\n%s", m.vp.View())
+	}
+}

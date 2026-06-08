@@ -72,6 +72,14 @@ func (m *NegotiateModel) SetReady() {
 	m.refreshViewport()
 }
 
+// SetWaiting shows the "PM is thinking…" indicator. Used when the conversation
+// opens with a pending PM analysis (e.g. a seeded resume brief) so the pane
+// doesn't look blank while a slow local model works.
+func (m *NegotiateModel) SetWaiting() {
+	m.waiting = true
+	m.refreshViewport()
+}
+
 func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case mdPickerDoneMsg:
