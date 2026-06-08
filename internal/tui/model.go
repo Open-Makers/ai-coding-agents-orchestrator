@@ -193,14 +193,15 @@ func (m Model) PauseForModelChange() bool {
 }
 
 // resumeReady reports whether the run has persisted the artifacts needed to
-// resume: the approved task spec, the run-state sidecar, and the sub-task plan.
-// These are written only after planning/decomposition, so pausing before that
-// would leave nothing to resume.
+// resume: the approved task spec and the sub-task plan. These are written after
+// planning/decomposition, so pausing before that would leave nothing to resume.
+// The run-state sidecar is intentionally NOT required — it only carries bead
+// linkage and may be absent when bd is unavailable, but resume works without it.
 func (m Model) resumeReady() bool {
 	if m.wsPath == "" {
 		return false
 	}
-	for _, f := range []string{artifacts.TaskSpecFile, artifacts.RunStateFile, artifacts.SubTasksFile} {
+	for _, f := range []string{artifacts.TaskSpecFile, artifacts.SubTasksFile} {
 		if _, err := os.Stat(filepath.Join(m.wsPath, f)); err != nil {
 			return false
 		}

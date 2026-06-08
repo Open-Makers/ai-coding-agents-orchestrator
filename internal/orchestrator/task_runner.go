@@ -288,6 +288,12 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 		if err := tr.writeSubTasks(subTasks, subBeadIDs); err != nil {
 			tr.event(fmt.Sprintf("warning: write sub-task plan: %v", err))
 		}
+		// Persist the run-state sidecar so the run can be paused/resumed. This
+		// is written unconditionally — even when bd is unavailable and no top
+		// bead was registered — so resume never depends on a working bd.
+		if err := tr.writeRunState(spec.Title); err != nil {
+			tr.event(fmt.Sprintf("warning: write run state: %v", err))
+		}
 	}
 
 	// ── Phase 3+4: Implement + Quality Review loop ──
@@ -1090,11 +1096,6 @@ func (tr *TaskRunner) registerBead(ctx context.Context, spec agent.TaskSpec) str
 		tr.event(fmt.Sprintf("warning: bd claim %s: %v", id, err))
 	}
 	tr.taskBeadID = id
-	// Persist the run-state sidecar so an interrupted run can be matched to its
-	// top-level bead on resume.
-	if err := tr.writeRunState(spec.Title); err != nil {
-		tr.event(fmt.Sprintf("warning: write run state: %v", err))
-	}
 	tr.event(fmt.Sprintf("registered task in beads as %s", id))
 	return id
 }

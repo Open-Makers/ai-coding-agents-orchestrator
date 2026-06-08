@@ -98,12 +98,10 @@ func (tr *TaskRunner) readSpec() (agent.TaskSpec, bool) {
 }
 
 // loadResumeState reads the spec, run-state, and sub-task plan needed to resume
-// an interrupted run. Returns an error when any required artifact is missing.
+// an interrupted run. The spec and sub-task plan are required; the run-state
+// sidecar (and its bead linkage) is optional so runs resume even when bd is
+// unavailable. Returns an error when a required artifact is missing.
 func (tr *TaskRunner) loadResumeState() (agent.TaskSpec, runState, subTaskPlan, error) {
-	st, ok := tr.readRunState()
-	if !ok || st.TopBeadID == "" {
-		return agent.TaskSpec{}, runState{}, subTaskPlan{}, errNoResumableTask
-	}
 	spec, ok := tr.readSpec()
 	if !ok {
 		return agent.TaskSpec{}, runState{}, subTaskPlan{}, errNoResumableTask
@@ -112,6 +110,9 @@ func (tr *TaskRunner) loadResumeState() (agent.TaskSpec, runState, subTaskPlan, 
 	if !ok {
 		return agent.TaskSpec{}, runState{}, subTaskPlan{}, errNoResumableTask
 	}
+	// run-state is best-effort: it carries the bead id / run id when present,
+	// but a missing or bead-less sidecar still resumes from spec + sub-tasks.
+	st, _ := tr.readRunState()
 	return spec, st, plan, nil
 }
 

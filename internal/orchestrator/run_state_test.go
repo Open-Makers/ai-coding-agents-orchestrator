@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/agent"
@@ -73,5 +74,29 @@ func TestLoadResumeState_ErrorWhenMissing(t *testing.T) {
 	tr := &TaskRunner{ws: ws}
 	if _, _, _, err := tr.loadResumeState(); err == nil {
 		t.Error("expected an error when resume artifacts are missing")
+	}
+}
+
+func TestLoadResumeState_WorksWithoutRunState(t *testing.T) {
+	// bd-less runs never write run_state.json; resume must still work from the
+	// spec + sub-task plan alone.
+	ws, _ := artifacts.EnsureWorkspace(t.TempDir())
+	tr := &TaskRunner{ws: ws}
+
+	spec := agent.TaskSpec{Title: "T", Description: "d"}
+	specData, _ := json.Marshal(spec)
+	if err := ws.WriteFile(artifacts.TaskSpecFile, specData); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.writeSubTasks([]agent.SubTask{{Key: "T1", Title: "x"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	gotSpec, st, plan, err := tr.loadResumeState()
+	if err != nil {
+		t.Fatalf("expected resume without run_state, got %v", err)
+	}
+	if gotSpec.Title != "T" || len(plan.Tasks) != 1 || st.TopBeadID != "" {
+		t.Errorf("unexpected resume state: spec=%+v st=%+v plan=%+v", gotSpec, st, plan)
 	}
 }
