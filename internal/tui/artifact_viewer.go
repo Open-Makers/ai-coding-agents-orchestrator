@@ -92,9 +92,17 @@ func newArtifactViewer(wsDir, hint string, w, h int, revise func(string, string)
 	m.artifacts, m.artifactIdx = discoverArtifacts(wsDir, filename)
 	m.vp = viewport.New(w-4, m.vpHeight(false))
 	m.rawContent = content
-	m.vp.SetContent(wrapContent(content, w-6))
+	m.applyContent()
 	m.ready = true
 	return m
+}
+
+// applyContent wraps the current raw content to the viewport width and applies
+// artifact styling (markdown colouring or JSON highlighting), then sets it on
+// the viewport.
+func (m *ArtifactViewerModel) applyContent() {
+	wrapped := wrapContent(m.rawContent, m.width-6)
+	m.vp.SetContent(styleArtifactContent(m.filename, wrapped))
 }
 
 func extractMDFilename(hint string) string {
@@ -269,7 +277,7 @@ func (m *ArtifactViewerModel) reloadContent() {
 	data, err := safefile.ReadFile(m.wsDir, m.filename)
 	if err == nil {
 		m.rawContent = renderArtifact(m.filename, data)
-		m.vp.SetContent(wrapContent(m.rawContent, m.width-6))
+		m.applyContent()
 		m.vp.GotoTop()
 	}
 }
@@ -277,7 +285,7 @@ func (m *ArtifactViewerModel) reloadContent() {
 // rewrapContent re-wraps the current raw content to the new width.
 func (m *ArtifactViewerModel) rewrapContent() {
 	if m.rawContent != "" {
-		m.vp.SetContent(wrapContent(m.rawContent, m.width-6))
+		m.applyContent()
 	}
 }
 
