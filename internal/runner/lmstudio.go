@@ -20,8 +20,12 @@ import (
 // a model in LM Studio (or LM Studio JIT-loads the requested model on the first
 // request when that option is enabled).
 const (
-	lmStudioBaseURL   = "http://localhost:1234"
-	lmStudioMaxTokens = 8192
+	lmStudioBaseURL = "http://localhost:1234"
+	// lmStudioMaxTokens caps the response length. -1 means "no limit" in LM
+	// Studio: generate until the model emits a stop token or the loaded context
+	// is exhausted. A fixed cap (e.g. 8192) starves reasoning models — they can
+	// spend the whole budget on reasoning_content and emit zero answer tokens.
+	lmStudioMaxTokens = -1
 )
 
 // LMStudioRunner calls the LM Studio OpenAI-compatible REST API directly. The
@@ -198,7 +202,7 @@ func (r *LMStudioRunner) streamFromReader(reader io.Reader, inputText string, ch
 func (r *LMStudioRunner) emptyResponseError(inputText string, sawChunk, sawReasoning bool) error {
 	promptTokens := tokenutil.EstimateTokens(inputText)
 	if sawReasoning {
-		return fmt.Errorf("lmstudio: model produced only reasoning and no answer for a ~%d-token prompt — increase the model's max_tokens / response length in LM Studio", promptTokens)
+		return fmt.Errorf("lmstudio: model spent its entire response on reasoning and produced no answer for a ~%d-token prompt — the reasoning filled the model's loaded context. Increase the context length in LM Studio (model load settings) and reload, use a smaller/less verbose prompt, or switch to a non-reasoning model", promptTokens)
 	}
 	if ctxLen := r.loadedContextLength(); ctxLen > 0 && promptTokens > ctxLen {
 		return fmt.Errorf("lmstudio: empty response — the prompt (~%d tokens) exceeds the model's loaded context length (%d); raise the context length in LM Studio (the model's load settings) and reload, or reduce max_context_tokens", promptTokens, ctxLen)

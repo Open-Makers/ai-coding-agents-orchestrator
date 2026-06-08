@@ -189,3 +189,33 @@ func TestLMStudioRunner_SendsExpectedRequest(t *testing.T) {
 		t.Errorf("unexpected messages: %+v", captured.Messages)
 	}
 }
+
+func TestLMStudioRunner_SendsUnlimitedMaxTokens(t *testing.T) {
+	// A fixed max_tokens cap starves reasoning models, so the runner must send
+	// the LM Studio "unlimited" sentinel (-1) and let the loaded context bound
+	// generation instead.
+	var captured lmStudioChatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&captured)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\ndata: [DONE]\n"))
+	}))
+	defer srv.Close()
+
+	r := &LMStudioRunner{Model: "test-model", BaseURL: srv.URL}
+	ch, err := r.Complete(context.Background(), CompletionRequest{
+		Messages: []ConvMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	for range ch {
+	}
+
+	if captured.MaxTokens != lmStudioMaxTokens {
+		t.Errorf("max_tokens: want %d, got %d", lmStudioMaxTokens, captured.MaxTokens)
+	}
+	if captured.MaxTokens != -1 {
+		t.Errorf("expected unlimited max_tokens (-1), got %d", captured.MaxTokens)
+	}
+}
