@@ -17,24 +17,31 @@ const negotiateAcceptNowMessage = "Tak, to się zgadza. Nie zadawaj więcej pyta
 
 // NegotiateModel is the PM conversation overlay for requirements gathering.
 type NegotiateModel struct {
-	lines   []chatLine
-	input   string
-	cursor  int // rune index in input
-	vp      viewport.Model
-	sendFn  SendHumanReplyFunc
-	waiting bool // true while waiting for PM response
-	width   int
-	height  int
+	lines    []chatLine
+	input    string
+	cursor   int // rune index in input
+	vp       viewport.Model
+	sendFn   SendHumanReplyFunc
+	waiting  bool // true while waiting for PM response
+	width    int
+	height   int
+	root     string           // repo root for the .md attach picker
+	attached []chatAttachment // .md files to inject into the next message
+	picking  bool             // true while the .md picker overlay is open
+	picker   mdPicker
 }
 
-// NewNegotiate creates a NegotiateModel with the given reply callback.
-func NewNegotiate(sendFn SendHumanReplyFunc) NegotiateModel {
+// NewNegotiate creates a NegotiateModel with the given reply callback. root
+// enables the Ctrl+F .md attach picker so users can feed existing project
+// description files into the conversation instead of retyping them.
+func NewNegotiate(sendFn SendHumanReplyFunc, root string) NegotiateModel {
 	vp := viewport.New(76, 18)
 	return NegotiateModel{
 		vp:     vp,
 		sendFn: sendFn,
 		width:  80,
 		height: 24,
+		root:   root,
 	}
 }
 
@@ -67,7 +74,20 @@ func (m *NegotiateModel) SetReady() {
 
 func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case mdPickerDoneMsg:
+		m.picking = false
+		if !msg.cancel {
+			m.attached = loadAttachments(m.root, msg.selected)
+		}
+		m.refreshViewport()
+		return m, nil
+
 	case tea.KeyMsg:
+		if m.picking {
+			var cmd tea.Cmd
+			m.picker, cmd = m.picker.Update(msg)
+			return m, cmd
+		}
 		if m.waiting {
 			return m, nil
 		}
@@ -75,6 +95,12 @@ func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 		switch msg.String() {
 		case "esc":
 			return m, func() tea.Msg { return NegotiateClosedMsg{} }
+		case "ctrl+f":
+			if m.root != "" {
+				m.picker = newMDPicker(m.root, m.attached, m.vp.Width, m.vp.Height)
+				m.picking = true
+			}
+			return m, nil
 		case "ctrl+c":
 			// Clear the currently typed text (like Claude/Codex), without
 			// closing the conversation.
@@ -85,28 +111,15 @@ func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 			m.input = string([]rune(m.input)[m.cursor:])
 			m.cursor = 0
 		case "ctrl+a":
-			userMsg := negotiateAcceptNowMessage
-			m.input = ""
-			m.cursor = 0
-			m.lines = append(m.lines, chatLine{role: "user", content: userMsg})
-			m.waiting = true
-			m.refreshViewport()
-			if m.sendFn != nil {
-				m.sendFn(userMsg)
-			}
+			m.sendToPM(negotiateAcceptNowMessage)
 		case "enter":
-			if m.input == "" {
+			if m.input == "" && len(m.attached) == 0 {
 				break
 			}
 			userMsg := m.input
 			m.input = ""
 			m.cursor = 0
-			m.lines = append(m.lines, chatLine{role: "user", content: userMsg})
-			m.waiting = true
-			m.refreshViewport()
-			if m.sendFn != nil {
-				m.sendFn(userMsg)
-			}
+			m.sendToPM(userMsg)
 		case "left":
 			if m.cursor > 0 {
 				m.cursor--
@@ -133,6 +146,40 @@ func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.vp, cmd = m.vp.Update(msg)
 	return m, cmd
+}
+
+// sendToPM records the visible user message, sends it to the PM, and injects
+// any attached .md files into the payload once. Attachments are cleared after
+// sending so large project files aren't re-sent on every turn (which would
+// bloat the prompt). The visible chat line shows only a compact note of which
+// files were attached, not their full contents.
+func (m *NegotiateModel) sendToPM(visible string) {
+	m.input = ""
+	m.cursor = 0
+
+	payload := visible
+	display := visible
+	if len(m.attached) > 0 {
+		names := make([]string, len(m.attached))
+		for i, a := range m.attached {
+			names[i] = a.rel
+		}
+		payload += attachmentBlock(m.attached)
+		note := "📎 attached: " + strings.Join(names, ", ")
+		if strings.TrimSpace(display) == "" {
+			display = note
+		} else {
+			display += "\n" + note
+		}
+		m.attached = nil
+	}
+
+	m.lines = append(m.lines, chatLine{role: "user", content: display})
+	m.waiting = true
+	m.refreshViewport()
+	if m.sendFn != nil {
+		m.sendFn(payload)
+	}
 }
 
 func (m *NegotiateModel) refreshViewport() {
@@ -176,6 +223,15 @@ func (m NegotiateModel) View() string {
 
 	sep := strings.Repeat("─", m.width)
 
+	// The .md attach picker takes over the body while open.
+	if m.picking {
+		return strings.Join([]string{
+			titleStyle.Render("PM Requirements Conversation") + "  " + dimStyle.Render("attach project files"),
+			sep,
+			m.picker.View(),
+		}, "\n")
+	}
+
 	var statusLine string
 	if m.waiting {
 		statusLine = dimStyle.Render("  PM is thinking…")
@@ -183,13 +239,27 @@ func (m NegotiateModel) View() string {
 		statusLine = inputStyle.Render("› ") + renderInputWithCursor(m.input, m.cursor)
 	}
 
-	return strings.Join([]string{
-		titleStyle.Render("PM Requirements Conversation") + "  " + dimStyle.Render("Esc close  Enter send  Ctrl+A accept now  Ctrl+C clear"),
+	hints := "Esc close  Enter send  Ctrl+A accept now  Ctrl+C clear"
+	if m.root != "" {
+		hints += "  Ctrl+F attach .md"
+	}
+
+	lines := []string{
+		titleStyle.Render("PM Requirements Conversation") + "  " + dimStyle.Render(hints),
 		sep,
 		m.vp.View(),
 		sep,
-		statusLine,
-	}, "\n")
+	}
+	if len(m.attached) > 0 {
+		names := make([]string, len(m.attached))
+		for i, a := range m.attached {
+			names[i] = a.rel
+		}
+		lines = append(lines, dimStyle.Render("📎 "+strings.Join(names, ", ")))
+	}
+	lines = append(lines, statusLine)
+
+	return strings.Join(lines, "\n")
 }
 
 // NegotiateClosedMsg is sent when the user closes the negotiate overlay.

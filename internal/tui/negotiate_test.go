@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -8,7 +10,7 @@ import (
 )
 
 func TestNegotiate_SeedContextShowsRequirements(t *testing.T) {
-	m := NewNegotiate(nil)
+	m := NewNegotiate(nil, "")
 	m.SetSize(80, 24)
 	m.SeedContext("# Task\nBuild a thing")
 
@@ -21,7 +23,7 @@ func TestNegotiate_SeedContextShowsRequirements(t *testing.T) {
 }
 
 func TestNegotiate_SeedContextIgnoresEmpty(t *testing.T) {
-	m := NewNegotiate(nil)
+	m := NewNegotiate(nil, "")
 	m.SetSize(80, 24)
 	m.SeedContext("   ")
 	if len(m.lines) != 0 {
@@ -30,7 +32,7 @@ func TestNegotiate_SeedContextIgnoresEmpty(t *testing.T) {
 }
 
 func TestNegotiate_CtrlCClearsInput(t *testing.T) {
-	m := NewNegotiate(nil)
+	m := NewNegotiate(nil, "")
 	m.SetSize(80, 24)
 	for _, r := range "hello" {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -48,7 +50,7 @@ func TestNegotiate_CtrlCClearsInput(t *testing.T) {
 }
 
 func TestNegotiate_ArrowKeysMoveCursor(t *testing.T) {
-	m := NewNegotiate(nil)
+	m := NewNegotiate(nil, "")
 	m.SetSize(80, 24)
 	for _, r := range "abc" {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -76,7 +78,7 @@ func TestNegotiate_ArrowKeysMoveCursor(t *testing.T) {
 }
 
 func TestNegotiate_CtrlUClearsToStart(t *testing.T) {
-	m := NewNegotiate(nil)
+	m := NewNegotiate(nil, "")
 	m.SetSize(80, 24)
 	for _, r := range "abcd" {
 		m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
@@ -91,7 +93,7 @@ func TestNegotiate_CtrlUClearsToStart(t *testing.T) {
 }
 
 func TestNegotiate_SetReadyDoesNotAddBlankLine(t *testing.T) {
-	m := NewNegotiate(nil)
+	m := NewNegotiate(nil, "")
 	m.SetSize(80, 24)
 	m.SeedContext("requirements here")
 	before := len(m.lines)
@@ -103,5 +105,43 @@ func TestNegotiate_SetReadyDoesNotAddBlankLine(t *testing.T) {
 	}
 	if m.waiting {
 		t.Error("SetReady should clear the waiting state so the user can act")
+	}
+}
+
+func TestNegotiate_AttachInjectsFileThenClears(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "PROJECT.md"), []byte("existing project description"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var sent string
+	m := NewNegotiate(func(msg string) { sent = msg }, root)
+	m.SetSize(80, 24)
+
+	// Open the picker, confirm the discovered .md file.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlF})
+	if !m.picking {
+		t.Fatal("expected Ctrl+F to open the attach picker")
+	}
+	m, _ = m.Update(mdPickerDoneMsg{selected: []string{"PROJECT.md"}})
+	if m.picking {
+		t.Fatal("expected picker to close after confirm")
+	}
+	if len(m.attached) != 1 {
+		t.Fatalf("expected one attachment, got %d", len(m.attached))
+	}
+
+	// Sending injects the file content into the PM payload.
+	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if !strings.Contains(sent, "existing project description") {
+		t.Errorf("expected attached file content in payload, got %q", sent)
+	}
+	if !strings.Contains(sent, "PROJECT.md") {
+		t.Errorf("expected attached file name in payload, got %q", sent)
+	}
+
+	// Attachments are cleared so they aren't re-sent on the next turn.
+	if len(m.attached) != 0 {
+		t.Errorf("expected attachments cleared after send, got %d", len(m.attached))
 	}
 }

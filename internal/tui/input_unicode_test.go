@@ -7,7 +7,7 @@ import (
 )
 
 func TestNegotiateModel_AllowsDiacritics(t *testing.T) {
-	m := NewNegotiate(nil)
+	m := NewNegotiate(nil, "")
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ąćńźż")})
 
@@ -38,7 +38,7 @@ func TestChatModel_AllowsDiacritics(t *testing.T) {
 
 func TestNegotiateModel_CtrlAAcceptsImmediately(t *testing.T) {
 	var sent string
-	m := NewNegotiate(func(msg string) { sent = msg })
+	m := NewNegotiate(func(msg string) { sent = msg }, "")
 
 	m, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
 

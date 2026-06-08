@@ -385,7 +385,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 									m.taskRunner.SendHumanReply(msg)
 								}
 							}
-							neg := NewNegotiate(sendFn)
+							neg := NewNegotiate(sendFn, m.root)
 							neg.SetSize(m.contentWidth(), m.height)
 							m.overlayNegotiate = neg
 							m.overlay = overlayNegotiate
@@ -429,7 +429,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.taskRunner.SendHumanReply(msg)
 						}
 					}
-					neg := NewNegotiate(sendFn)
+					neg := NewNegotiate(sendFn, m.root)
 					neg.SetSize(m.contentWidth(), m.height)
 					// Seed with the submitted requirements so the conversation
 					// shows the file from the first step — the user can review it

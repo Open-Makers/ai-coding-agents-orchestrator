@@ -438,7 +438,7 @@ func TestModel_NegotiateEscReturnsToMenuBeforePMStarts(t *testing.T) {
 	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	m.overlay = overlayNegotiate
 	m.phase = "negotiating"
-	m.overlayNegotiate = NewNegotiate(nil)
+	m.overlayNegotiate = NewNegotiate(nil, "")
 
 	cancelled := false
 	m.cancelFunc = func() { cancelled = true }
@@ -464,7 +464,7 @@ func TestModel_NegotiateEscReturnsToMenuDuringPipelineNegotiation(t *testing.T) 
 	m := New(nil, "/tmp/project", "/tmp/project/.orchestrator", nil, config.Config{})
 	m.overlay = overlayNegotiate
 	m.phase = "negotiating"
-	m.overlayNegotiate = NewNegotiate(nil)
+	m.overlayNegotiate = NewNegotiate(nil, "")
 	m.overlayNegotiate.lines = []chatLine{{role: "assistant", content: "Which files should change?"}}
 
 	cancelled := false
