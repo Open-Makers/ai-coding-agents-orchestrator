@@ -30,7 +30,6 @@ const (
 	startupPhaseProjectList                     // recent projects + browse
 	startupPhaseHistory                         // completed-task history
 	startupPhaseModelMemory                     // global RAM/context limit setting
-	startupPhaseProjectName                     // project display-name input
 )
 
 // startupModel is a standalone Bubble Tea model shown when the orchestrator is
@@ -44,7 +43,6 @@ type startupModel struct {
 	home          HomeModel
 	setup         SetupModel
 	modelMemory   modelMemoryModel
-	projectName   projectNameModel
 	moduleInput   textinput.Model
 	picker        PickerModel
 	editor        EditorModel
@@ -105,8 +103,6 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.taskHistory.SetSize(wm.Width, wm.Height)
 		case startupPhaseModelMemory:
 			m.modelMemory, _ = m.modelMemory.Update(msg)
-		case startupPhaseProjectName:
-			m.projectName, _ = m.projectName.Update(msg)
 		}
 	}
 
@@ -175,7 +171,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if projectCfg.Agents != nil {
 					projectOverrides = projectCfg.Agents
 				}
-				setup := NewSetupModelWithOverrides(currentRunner, currentModel, m.cfg.PromptLanguage, m.cfg.Project.Language, projectOverrides)
+				setup := NewSetupModelWithOverrides(currentRunner, currentModel, m.cfg.PromptLanguage, m.cfg.Project.Language, m.cfg.Project.Name, projectOverrides)
 				setup.root = m.root
 				setup.width, setup.height = m.width, m.height
 				setup.syncViewport()
@@ -197,12 +193,6 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.modelMemory = mm
 				m.phase = startupPhaseModelMemory
 				return m, m.modelMemory.Init()
-			case homeActionSetProjectName:
-				pn := newProjectNameModel(m.cfg.Project.Name)
-				pn.width, pn.height = m.width, m.height
-				m.projectName = pn
-				m.phase = startupPhaseProjectName
-				return m, m.projectName.Init()
 			}
 		}
 		var cmd tea.Cmd
@@ -382,26 +372,6 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.modelMemory, cmd = m.modelMemory.Update(msg)
 		return m, cmd
-
-	case startupPhaseProjectName:
-		switch msg := msg.(type) {
-		case projectNameDoneMsg:
-			projectCfg := config.LoadProject(m.root)
-			projectCfg.Project.Name = msg.name
-			_ = config.Save(m.root, projectCfg)
-			m.cfg.Project.Name = msg.name
-			m.phase = startupPhaseHome
-			m.home = NewHomeModel(m.cfg, m.root)
-			m.home.width, m.home.height = m.width, m.height
-			m.home.syncViewport()
-			return m, m.home.Init()
-		case projectNameCancelledMsg:
-			m.phase = startupPhaseHome
-			return m, m.home.Init()
-		}
-		var cmd tea.Cmd
-		m.projectName, cmd = m.projectName.Update(msg)
-		return m, cmd
 	}
 
 	return m, nil
@@ -466,8 +436,6 @@ func (m startupModel) View() string {
 		return m.taskHistory.View()
 	case startupPhaseModelMemory:
 		return m.modelMemory.View()
-	case startupPhaseProjectName:
-		return m.projectName.View()
 	default:
 		return m.home.View()
 	}

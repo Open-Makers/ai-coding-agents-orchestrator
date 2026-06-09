@@ -28,7 +28,6 @@ const (
 	homeActionOpenProject
 	homeActionGlobalSettings
 	homeActionModelMemory
-	homeActionSetProjectName
 	homeActionSetup
 	homeActionClean
 	homeActionQuit
@@ -138,7 +137,6 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
 		{icon: "🧠", label: "Model Memory", desc: "Cap local-model RAM or context size (auto RAM→context per agent)", action: homeActionModelMemory, key: "m"},
 		{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
-		{icon: "📛", label: "Project Name", desc: "Set this project's display name (.orchestrator/project.yaml)", action: homeActionSetProjectName, key: "n"},
 		{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports — keeps code, config, and project memory", action: homeActionClean, key: "c"},
 		{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
 	}
@@ -258,11 +256,6 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			return m, m.selectAction(homeActionGlobalSettings)
 		case "m", "M":
 			return m, m.selectAction(homeActionModelMemory)
-		case "n", "N":
-			if !m.projectValid {
-				return m, m.selectAction(homeActionOpenProject)
-			}
-			return m, m.selectAction(homeActionSetProjectName)
 		case "o", "O":
 			return m, m.selectAction(homeActionOpenProject)
 		case "c", "C":
@@ -686,8 +679,6 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 			return p.gold
 		case homeActionSetup:
 			return p.red
-		case homeActionSetProjectName:
-			return p.accent
 		case homeActionClean:
 			return p.gold
 		case homeActionDoneTasks:
@@ -1000,7 +991,7 @@ func isValidProjectRoot(root string) bool {
 // requiresProject returns true for actions that need a valid project directory.
 func requiresProject(action homeAction) bool {
 	switch action {
-	case homeActionNewTask, homeActionRunPipeline, homeActionResume, homeActionResumeProject, homeActionSetup, homeActionSetProjectName, homeActionClean:
+	case homeActionNewTask, homeActionRunPipeline, homeActionResume, homeActionResumeProject, homeActionSetup, homeActionClean:
 		return true
 	case homeActionOpenProject, homeActionGlobalSettings, homeActionModelMemory, homeActionDoneTasks, homeActionQuit:
 		return false

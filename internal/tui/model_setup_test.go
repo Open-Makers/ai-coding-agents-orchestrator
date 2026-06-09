@@ -15,6 +15,7 @@ func TestApplyProjectSetup_PersistsAndReloads(t *testing.T) {
 	}
 
 	msg := setupDoneMsg{
+		projectName: "My Project",
 		agentOverrides: map[string]agentSetupOverride{
 			"coder": {runner: "lmstudio", model: "qwen-coder"},
 		},
@@ -33,5 +34,8 @@ func TestApplyProjectSetup_PersistsAndReloads(t *testing.T) {
 	proj := config.LoadProject(root)
 	if proj.Agents["coder"].Model != "qwen-coder" {
 		t.Fatalf("override not persisted, got %q", proj.Agents["coder"].Model)
+	}
+	if proj.Project.Name != "My Project" {
+		t.Fatalf("project name not persisted, got %q", proj.Project.Name)
 	}
 }

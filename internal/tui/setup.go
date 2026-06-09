@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -81,6 +82,7 @@ const (
 	sectionLanguage
 	sectionProgLang
 	sectionAgentSetup
+	sectionProjectName
 )
 
 // ── per-agent override ───────────────────────────────────────────────────────
@@ -97,6 +99,7 @@ type setupDoneMsg struct {
 	model          string
 	promptLanguage string
 	progLanguage   string
+	projectName    string
 	agentOverrides map[string]agentSetupOverride
 }
 
@@ -186,6 +189,9 @@ type SetupModel struct {
 	progLanguages []string
 	progLangIdx   int
 
+	// Project display name (project setup only).
+	projectNameInput textinput.Model
+
 	// Per-agent configuration.
 	agentRoles     []string
 	agentOverrides map[string]agentSetupOverride
@@ -226,6 +232,11 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(homePalette.accent)
 
+	nameInput := textinput.New()
+	nameInput.CharLimit = 80
+	nameInput.Prompt = ""
+	nameInput.Placeholder = "(unnamed)"
+
 	languages := config.SupportedLanguages
 	langIdx := 0
 	if currentLanguage != "" {
@@ -256,6 +267,7 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 		languages:             languages,
 		languageIdx:           langIdx,
 		progLanguages:         config.SupportedProgrammingLanguages,
+		projectNameInput:      nameInput,
 		agentRoles:            setupAgentRoles,
 		agentOverrides:        make(map[string]agentSetupOverride),
 		spinner:               sp,
@@ -292,8 +304,10 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 // NewSetupModelWithOverrides creates a setup model pre-populated with explicit
 // project-level overrides (from project.yaml), instead of detecting them from
 // merged config.
-func NewSetupModelWithOverrides(currentRunner, currentModel, currentLanguage, currentProgLang string, projectAgents map[string]config.AgentConfig) SetupModel {
+func NewSetupModelWithOverrides(currentRunner, currentModel, currentLanguage, currentProgLang, currentProjectName string, projectAgents map[string]config.AgentConfig) SetupModel {
 	m := NewSetupModel(currentRunner, currentModel, currentLanguage, nil)
+	m.projectNameInput.SetValue(currentProjectName)
+	m.projectNameInput.CursorEnd()
 	// Pre-select programming language.
 	if currentProgLang != "" {
 		for i, pl := range m.progLanguages {
@@ -315,8 +329,9 @@ func NewSetupModelWithOverrides(currentRunner, currentModel, currentLanguage, cu
 			m.agentOverrides[role] = ov
 		}
 	}
-	// In project setup (non-global), start on the agent overrides section.
-	m.section = sectionAgentSetup
+	// In project setup (non-global), start on the project name section.
+	m.section = sectionProjectName
+	m.projectNameInput.Focus()
 	return m
 }
 
@@ -537,6 +552,7 @@ func (m SetupModel) Update(msg tea.Msg) (SetupModel, tea.Cmd) {
 		prevEditStep := m.agentEditStep
 		m, cmd = m.handleKey(msg)
 		cmds = append(cmds, cmd)
+		m.syncProjectNameFocus()
 
 		// Update viewport content after key handling.
 		if m.ready {
@@ -592,8 +608,46 @@ func (m SetupModel) handleKey(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		return m.handleProgLangKeys(msg)
 	case sectionAgentSetup:
 		return m.handleAgentSetupKeys(msg)
+	case sectionProjectName:
+		return m.handleProjectNameKeys(msg)
 	}
 	return m, nil
+}
+
+// syncProjectNameFocus keeps the project-name text input focused only while its
+// section is active, so the cursor blinks there and nowhere else.
+func (m *SetupModel) syncProjectNameFocus() {
+	if m.section == sectionProjectName {
+		if !m.projectNameInput.Focused() {
+			m.projectNameInput.Focus()
+		}
+		return
+	}
+	if m.projectNameInput.Focused() {
+		m.projectNameInput.Blur()
+	}
+}
+
+// handleProjectNameKeys handles navigation and text editing for the project name
+// field. Navigation keys move between sections; all other keys edit the text.
+func (m SetupModel) handleProjectNameKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
+	switch msg.String() {
+	case "tab", "down":
+		m.section = sectionAgentSetup
+		m.agentCursor = 0
+		m.ensureSectionVisible()
+		return m, nil
+	case "shift+tab", "up":
+		m.section = sectionLanguage
+		m.languageIdx = len(m.languages) - 1
+		m.ensureSectionVisible()
+		return m, nil
+	case "enter":
+		return m.startValidation()
+	}
+	var cmd tea.Cmd
+	m.projectNameInput, cmd = m.projectNameInput.Update(msg)
+	return m, cmd
 }
 
 func (m SetupModel) handleProviderKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
@@ -671,8 +725,7 @@ func (m SetupModel) handleLanguageKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		}
 	case "tab":
 		if !m.globalOnly {
-			m.section = sectionAgentSetup
-			m.agentCursor = 0
+			m.section = sectionProjectName
 			m.ensureSectionVisible()
 		} else {
 			m.section = sectionProvider
@@ -728,7 +781,7 @@ func (m SetupModel) handleAgentSetupKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		if m.agentCursor > 0 {
 			m.agentCursor--
 		} else {
-			m.section = sectionLanguage
+			m.section = sectionProjectName
 			m.ensureSectionVisible()
 		}
 	case "down", "j":
@@ -758,8 +811,7 @@ func (m SetupModel) handleAgentSetupKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		m.progLangIdx = 0
 		m.ensureSectionVisible()
 	case "shift+tab":
-		m.section = sectionLanguage
-		m.languageIdx = len(m.languages) - 1
+		m.section = sectionProjectName
 		m.ensureSectionVisible()
 	}
 	return m, nil
@@ -846,6 +898,7 @@ func (m SetupModel) startValidation() (SetupModel, tea.Cmd) {
 		model:          model,
 		promptLanguage: promptLang,
 		progLanguage:   progLang,
+		projectName:    strings.TrimSpace(m.projectNameInput.Value()),
 		agentOverrides: overrides,
 	}
 	m.pingTesting = true
@@ -952,12 +1005,15 @@ func (m SetupModel) renderContent() string {
 
 	var parts []string
 	if !m.globalOnly {
+		projectNameCard := m.renderProjectNameCard(contentWidth, labelStyle, focusLabelStyle, dimStyle)
 		progLangCard := m.renderProgLangCard(contentWidth, labelStyle, focusLabelStyle, activeItemStyle, inactiveItemStyle, dimStyle)
 		agentCard := m.renderAgentCard(contentWidth, labelStyle, focusLabelStyle, activeItemStyle, inactiveItemStyle, dimStyle)
 		projectHeader := sectionHeaderStyle.Render("  ◆ Project Overrides") + dimStyle.Render("  — saved to .orchestrator/project.yaml")
 		parts = []string{
 			"",
 			projectHeader,
+			projectNameCard,
+			sep,
 			agentCard,
 			sep,
 			progLangCard,
@@ -1129,6 +1185,28 @@ func (m SetupModel) renderLanguageCard(contentWidth int, label, focusLabel, acti
 	lines = append(lines, "")
 
 	lines = append(lines, renderWindowedList(m.languages, m.languageIdx, isFocused, active, inactive, dim)...)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.border).
+		Padding(0, 1).
+		Width(contentWidth - 2).
+		Render(strings.Join(lines, "\n"))
+}
+
+func (m SetupModel) renderProjectNameCard(contentWidth int, label, focusLabel, dim lipgloss.Style) string {
+	p := homePalette
+	isFocused := m.section == sectionProjectName
+
+	var lines []string
+	nameLabel := label.Render(" Project Name")
+	if isFocused {
+		nameLabel = focusLabel.Render(" ◆ Project Name")
+	}
+	lines = append(lines, nameLabel)
+	lines = append(lines, dim.Render("  Display name for this project:"))
+	lines = append(lines, "")
+	lines = append(lines, "  "+m.projectNameInput.View())
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1468,6 +1546,13 @@ func (m SetupModel) renderFooter(style lipgloss.Style) string {
 			hint("Tab", "provider"),
 			hint("Ctrl+S", "save"),
 		}
+	case m.section == sectionProjectName:
+		hints = []string{
+			hint("type", "edit name"),
+			hint("Tab", "agents"),
+			hint("Ctrl+S", "save"),
+			hint("Esc", "back"),
+		}
 	}
 
 	left := strings.Join(hints, "  ")
@@ -1610,6 +1695,12 @@ func (m *SetupModel) ensureSectionVisible() {
 		}
 	case sectionProgLang:
 		targetLine = findLineContaining(lines, "Programming Language")
+	case sectionProjectName:
+		targetLine = findLineContaining(lines, "Project Name")
+		if targetLine < 0 {
+			m.viewport.SetYOffset(0)
+			return
+		}
 	case sectionProvider:
 		targetLine = findLineContaining(lines, "Default Provider")
 		if targetLine < 0 {
