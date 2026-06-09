@@ -136,8 +136,8 @@ func TestNewHomeModel_MenuItems(t *testing.T) {
 	root := t.TempDir()
 	m := NewHomeModel(newTestConfig(), root)
 
-	if len(m.items) != 7 {
-		t.Fatalf("expected 7 menu items, got %d", len(m.items))
+	if len(m.items) != 8 {
+		t.Fatalf("expected 8 menu items, got %d", len(m.items))
 	}
 
 	expectedActions := []homeAction{
@@ -146,6 +146,7 @@ func TestNewHomeModel_MenuItems(t *testing.T) {
 		homeActionGlobalSettings,
 		homeActionModelMemory,
 		homeActionSetup,
+		homeActionSetProjectName,
 		homeActionClean,
 		homeActionQuit,
 	}
