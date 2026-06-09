@@ -63,11 +63,7 @@ See [`doc/tui.md`](doc/tui.md) for a full reference of every panel, status indic
 </p>
 
 <p align="center">
-  <img src="doc/images/tester.png" width="700" alt="QA — Test Generation">
-</p>
-
-<p align="center">
-  <img src="doc/images/reviewer.png" width="700" alt="QA — Code Review">
+  <img src="doc/images/artifact-viewer.png" width="700" alt="Artifact / File Viewer">
 </p>
 
 <p align="center">
@@ -105,6 +101,10 @@ Each agent can use a different runner and model — configure globally (`~/.orch
   <img src="doc/images/project-settings.png" width="700" alt="Project Settings">
 </p>
 
+<p align="center">
+  <img src="doc/images/model-memory.png" width="700" alt="Model Memory — local-model RAM / context cap">
+</p>
+
 ### Layered Configuration
 
 Three-layer config with sensible defaults:
@@ -112,6 +112,10 @@ Three-layer config with sensible defaults:
 1. **Built-in defaults** — works out of the box for Go projects
 2. **Global user config** (`~/.orchestrator/config.yaml`) — your preferred models and runners
 3. **Project config** (`.orchestrator/project.yaml`) — project-specific overrides (language, test commands, scoping)
+
+### Local Model Memory Cap
+
+When running local models (Ollama, LM Studio, MLX), the **Model Memory** screen lets you bound resource use: pick a **RAM limit** (auto-converted to a per-agent context window based on the model and your system RAM) or a fixed **context-token limit** applied verbatim to every agent. This keeps large local models from exhausting memory.
 
 ### Skills System
 
