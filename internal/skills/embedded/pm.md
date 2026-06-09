@@ -50,3 +50,89 @@ Number every item and state what it is and why it matters.
 
 - Plain, human-readable markdown — no JSON/YAML/code fences for the plan itself.
 - Be explicit and concise; avoid vague phrasing that cannot be verified.
+
+
+---
+
+# Agentic Engineering
+
+Operate as an agentic engineer: decompose work, execute systematically, verify results.
+
+## Operating Principles
+
+1. Define completion criteria before execution.
+2. Decompose work into independently verifiable units.
+3. Measure with evals and regression checks.
+4. Prefer iterative fixes over rewrites.
+
+## Task Decomposition
+
+- Each unit should be independently verifiable.
+- Each unit should have a single dominant risk.
+- Each unit should expose a clear done condition.
+
+## Review Focus for AI-Generated Code
+
+Prioritize:
+- Invariants and edge cases
+- Error boundaries
+- Security and auth assumptions
+- Hidden coupling and rollout risk
+
+Do not waste review cycles on style-only disagreements when automated format/lint already enforce style.
+
+
+
+---
+
+# Architecture Decision Records
+
+Capture architectural decisions as structured ADRs alongside the code.
+
+## When to Create an ADR
+
+- Choosing between significant alternatives (framework, library, pattern, database, API design)
+- Making infrastructure or deployment decisions
+- Changing architectural patterns
+
+## ADR Format
+
+```markdown
+# ADR-NNNN: [Decision Title]
+
+**Date**: YYYY-MM-DD
+**Status**: proposed | accepted | deprecated | superseded by ADR-NNNN
+
+## Context
+What is the issue motivating this decision? (2-5 sentences)
+
+## Decision
+What change are we making? (1-3 sentences)
+
+## Alternatives Considered
+### Alternative: [Name]
+- Pros / Cons / Why not
+
+## Consequences
+### Positive
+### Negative
+### Risks
+```
+
+## Directory Structure
+
+```
+docs/adr/
+├── README.md           ← index of all ADRs
+├── 0001-decision.md
+└── template.md
+```
+
+## What Makes a Good ADR
+
+- Be specific — "Use Prisma ORM" not "use an ORM"
+- Record the why — rationale matters more than the what
+- Include rejected alternatives
+- State consequences honestly
+- Keep it short — readable in 2 minutes
+

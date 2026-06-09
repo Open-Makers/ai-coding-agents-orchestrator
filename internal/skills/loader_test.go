@@ -9,16 +9,16 @@ import (
 func TestLoader_LoadEmbeddedSkill(t *testing.T) {
 	l := New("")
 
-	content, err := l.Load("golang-patterns")
+	content, err := l.Load("coder")
 	if err != nil {
 		t.Fatalf("Load error: %v", err)
 	}
 	if content == "" {
-		t.Fatal("expected non-empty content for golang-patterns")
+		t.Fatal("expected non-empty content for coder")
 	}
 
 	// Second load should hit in-memory cache.
-	content2, err := l.Load("golang-patterns")
+	content2, err := l.Load("coder")
 	if err != nil {
 		t.Fatalf("Load (cache hit) error: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestLoader_LoadEmbeddedSkill(t *testing.T) {
 func TestLoader_DefaultAgentSkillsAllLoad(t *testing.T) {
 	l := New("")
 	// Every skill referenced by the default per-agent layout must be embedded
-	// and loadable, including the project-manager skill for the PM agent.
+	// and loadable, including the consolidated per-agent skills (e.g. pm, coder).
 	for _, ac := range config.DefaultConfig().Agents {
 		for _, name := range ac.Skills {
 			content, err := l.Load(name)
@@ -43,8 +43,8 @@ func TestLoader_DefaultAgentSkillsAllLoad(t *testing.T) {
 		}
 	}
 
-	if _, err := l.Load("project-manager"); err != nil {
-		t.Errorf("project-manager skill must exist: %v", err)
+	if _, err := l.Load("pm"); err != nil {
+		t.Errorf("pm skill must exist: %v", err)
 	}
 }
 
@@ -60,12 +60,12 @@ func TestLoader_NotFound(t *testing.T) {
 func TestPrefetch(t *testing.T) {
 	l := New("")
 
-	err := l.Prefetch([]string{"golang-patterns", "golang-testing"})
+	err := l.Prefetch([]string{"coder", "qa"})
 	if err != nil {
 		t.Fatalf("Prefetch error: %v", err)
 	}
 
-	content, err := l.Load("golang-patterns")
+	content, err := l.Load("coder")
 	if err != nil {
 		t.Fatalf("Load after Prefetch error: %v", err)
 	}
@@ -77,7 +77,7 @@ func TestPrefetch(t *testing.T) {
 func TestPrefetch_WithMissing(t *testing.T) {
 	l := New("")
 
-	err := l.Prefetch([]string{"golang-patterns", "nonexistent"})
+	err := l.Prefetch([]string{"coder", "nonexistent"})
 	if err == nil {
 		t.Fatal("expected error for nonexistent skill in Prefetch")
 	}
@@ -93,12 +93,12 @@ func TestAvailable(t *testing.T) {
 
 	found := false
 	for _, name := range available {
-		if name == "golang-patterns" {
+		if name == "coder" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Errorf("golang-patterns not found in available skills: %v", available)
+		t.Errorf("coder not found in available skills: %v", available)
 	}
 }

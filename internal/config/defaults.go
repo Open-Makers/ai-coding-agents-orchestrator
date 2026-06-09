@@ -24,25 +24,25 @@ func DefaultConfig() Config {
 		},
 		Agents: map[string]AgentConfig{
 			"pm": {
-				Skills: []string{"project-manager", "agentic-engineering"},
+				Skills: []string{"pm"},
 			},
 			"coder": {
-				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},
+				Skills: []string{"coder"},
 			},
 			"coder_fixer": {
-				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},
+				Skills: []string{"coder"},
 			},
 			"qa": {
-				Skills: []string{"golang-testing", "tdd-workflow", "golang-patterns", "coding-standards"},
+				Skills: []string{"qa"},
 			},
 			"ux_reviewer": {
-				Skills: []string{"ux-review", "coding-standards"},
+				Skills: []string{"ux_reviewer"},
 			},
 			"security": {
-				Skills: []string{"security-scan", "security-review"},
+				Skills: []string{"security"},
 			},
 			"pr": {
-				Skills: []string{"git-workflow"},
+				Skills: []string{"pr"},
 			},
 		},
 	}
