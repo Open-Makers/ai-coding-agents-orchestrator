@@ -248,6 +248,10 @@ func TestExtractStageInfo(t *testing.T) {
 		{"── Stage 2/5: Must Have — Auth ──", "Stage 2/5: Must Have — Auth"},
 		{"── Stage 1/3: Core setup ──", "Stage 1/3: Core setup"},
 		{"Stage 4/4: Should Have — Stats", "Stage 4/4: Should Have — Stats"},
+		// Current unified sub-task banner format.
+		{"── Sub-task 2/5: Implement login ──", "Sub-task 2/5: Implement login"},
+		{"── Sub-task 2/5 (bead-x): Implement login ──", "Sub-task 2/5: Implement login"},
+		{"── Sub-task 3/3 (bead-y, resumed): Wire API ──", "Sub-task 3/3: Wire API"},
 		{"coding", ""},
 		{"all tests passed", ""},
 		{"", ""},
@@ -258,6 +262,27 @@ func TestExtractStageInfo(t *testing.T) {
 			result := extractStageInfo(tt.input)
 			if result != tt.expected {
 				t.Errorf("extractStageInfo(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseStageProgress(t *testing.T) {
+	tests := []struct {
+		input      string
+		idx, total int
+	}{
+		{"Stage 2/5: Must Have — Auth", 2, 5},
+		{"Sub-task 3/7: Implement login", 3, 7},
+		{"Sub-task 1/1: only", 1, 1},
+		{"not a stage", 0, 0},
+		{"", 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			idx, total := parseStageProgress(tt.input)
+			if idx != tt.idx || total != tt.total {
+				t.Errorf("parseStageProgress(%q) = (%d,%d), want (%d,%d)", tt.input, idx, total, tt.idx, tt.total)
 			}
 		})
 	}

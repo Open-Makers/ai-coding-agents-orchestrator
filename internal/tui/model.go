@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -1453,15 +1455,27 @@ func (m *Model) buildPMChatPrompt() string {
 	)
 }
 
-// extractStageInfo detects stage event messages and returns the stage label.
-// Matches patterns like "── Stage 2/5: Must Have — Auth ──".
+// stageBannerRe matches a unified pipeline stage banner emitted by the
+// orchestrator as a MsgEvent, with optional surrounding box-drawing characters
+// already stripped. It recognises both the legacy "Stage N/M: title" format and
+// the current "Sub-task N/M (bead): title" format (the parenthetical bead id /
+// "resumed" note is optional and dropped from the displayed label).
+//
+//	Stage 2/5: Must Have — Auth
+//	Sub-task 2/5 (bead-x): Implement login
+//	Sub-task 2/5 (bead-x, resumed): Implement login
+var stageBannerRe = regexp.MustCompile(`^(Stage|Sub-task) (\d+)/(\d+)(?: \([^)]*\))?: (.+)$`)
+
+// extractStageInfo detects a pipeline stage banner and returns a normalised,
+// scrollable label ("<kind> N/M: title") for the status bar, or "" when the
+// event is not a stage banner.
 func extractStageInfo(event string) string {
-	trimmed := strings.TrimLeft(event, "─ \t")
-	trimmed = strings.TrimRight(trimmed, "─ \t")
-	if strings.HasPrefix(trimmed, "Stage ") {
-		return trimmed
+	trimmed := strings.Trim(event, "─ \t")
+	m := stageBannerRe.FindStringSubmatch(trimmed)
+	if m == nil {
+		return ""
 	}
-	return ""
+	return fmt.Sprintf("%s %s/%s: %s", m[1], m[2], m[3], m[4])
 }
 
 // clipPhaseBar truncates a rendered phase bar to maxWidth visible chars, appending "…".
@@ -1482,27 +1496,20 @@ func clipPhaseBar(bar string, maxWidth int) string {
 	return "…"
 }
 
-// parseStageProgress extracts (currentIndex, total) from "Stage N/M: name".
-// Returns (0, 0) if the format is not recognised.
+// parseStageProgress extracts (currentIndex, total) from a normalised stage
+// label produced by extractStageInfo (e.g. "Sub-task 2/5: name" or
+// "Stage 2/5: name"). Returns (0, 0) if the format is not recognised.
 func parseStageProgress(stageInfo string) (int, int) {
-	// stageInfo looks like "Stage 2/5: Must Have — Auth"
-	rest := strings.TrimPrefix(stageInfo, "Stage ")
-	if rest == stageInfo {
+	m := stageBannerRe.FindStringSubmatch(stageInfo)
+	if m == nil {
 		return 0, 0
 	}
-	slash := strings.Index(rest, "/")
-	if slash < 0 {
+	idx, err := strconv.Atoi(m[2])
+	if err != nil {
 		return 0, 0
 	}
-	colon := strings.Index(rest[slash:], ":")
-	if colon < 0 {
-		return 0, 0
-	}
-	var idx, total int
-	if _, err := fmt.Sscanf(rest[:slash], "%d", &idx); err != nil {
-		return 0, 0
-	}
-	if _, err := fmt.Sscanf(rest[slash+1:slash+colon], "%d", &total); err != nil {
+	total, err := strconv.Atoi(m[3])
+	if err != nil {
 		return 0, 0
 	}
 	return idx, total
