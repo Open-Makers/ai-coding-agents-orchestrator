@@ -38,6 +38,11 @@ type modelMemoryModel struct {
 	value      textinput.Model
 	totalRAMGB float64
 
+	// Per-mode value memory so toggling between RAM and context modes preserves
+	// what the user typed in each, instead of resetting to the default.
+	ramValue string
+	ctxValue string
+
 	// Available local models discovered across backends, for the live
 	// RAM→context preview. Loaded asynchronously on Init.
 	localModels  []runner.LocalModel
@@ -85,12 +90,18 @@ func newModelMemoryModel(cfg config.Config) modelMemoryModel {
 		width:        80,
 		height:       24,
 	}
-	m.value.SetValue(m.initialValue(cfg))
+	// Seed both per-mode slots from saved config / defaults so switching modes
+	// always shows a sensible value, and the active mode's slot drives the input.
+	m.ramValue = m.valueForMode(cfg, mmModeRAM)
+	m.ctxValue = m.valueForMode(cfg, mmModeContext)
+	m.value.SetValue(m.currentValue())
 	return m
 }
 
-func (m modelMemoryModel) initialValue(cfg config.Config) string {
-	switch m.mode {
+// valueForMode returns the initial input string for a given mode, preferring a
+// saved config value and falling back to a sensible default.
+func (m modelMemoryModel) valueForMode(cfg config.Config, mode int) string {
+	switch mode {
 	case mmModeRAM:
 		if cfg.ModelMemory.MaxRAMGB > 0 {
 			return trimFloat(cfg.ModelMemory.MaxRAMGB)
@@ -103,6 +114,17 @@ func (m modelMemoryModel) initialValue(cfg config.Config) string {
 			return strconv.Itoa(cfg.ModelMemory.MaxContextTokens)
 		}
 		return "8192"
+	}
+	return ""
+}
+
+// currentValue returns the stored value for the active mode.
+func (m modelMemoryModel) currentValue() string {
+	switch m.mode {
+	case mmModeRAM:
+		return m.ramValue
+	case mmModeContext:
+		return m.ctxValue
 	}
 	return ""
 }
@@ -125,14 +147,17 @@ func (m modelMemoryModel) Update(msg tea.Msg) (modelMemoryModel, tea.Cmd) {
 		case "esc":
 			return m, func() tea.Msg { return modelMemoryCancelledMsg{} }
 		case "left", "h":
+			m.stashValue()
 			m.mode = (m.mode + len(mmModeKeys) - 1) % len(mmModeKeys)
-			m.value.SetValue(m.defaultForMode())
+			m.value.SetValue(m.currentValue())
 			return m, nil
 		case "right", "l":
+			m.stashValue()
 			m.mode = (m.mode + 1) % len(mmModeKeys)
-			m.value.SetValue(m.defaultForMode())
+			m.value.SetValue(m.currentValue())
 			return m, nil
 		case "enter", "ctrl+s":
+			m.stashValue()
 			return m, func() tea.Msg { return modelMemoryDoneMsg{cfg: m.result()} }
 		}
 	}
@@ -142,19 +167,19 @@ func (m modelMemoryModel) Update(msg tea.Msg) (modelMemoryModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.value, cmd = m.value.Update(msg)
 	m.value.SetValue(digitsOnly(m.value.Value(), m.mode == mmModeRAM))
+	m.stashValue()
 	return m, cmd
 }
 
-func (m modelMemoryModel) defaultForMode() string {
+// stashValue saves the current input text into the slot for the active mode so
+// it survives mode toggles.
+func (m *modelMemoryModel) stashValue() {
 	switch m.mode {
 	case mmModeRAM:
-		if m.totalRAMGB > 0 {
-			return trimFloat(roundHalf(m.totalRAMGB * 0.7))
-		}
+		m.ramValue = m.value.Value()
 	case mmModeContext:
-		return "8192"
+		m.ctxValue = m.value.Value()
 	}
-	return ""
 }
 
 func (m modelMemoryModel) result() config.ModelMemoryConfig {
