@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
 // oMLX local hosting (Apple Silicon) via the oMLX OpenAI-compatible API.
@@ -163,6 +165,8 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 
 	var buf strings.Builder
 	var usage *TokenUsage
+	reasoningLen := 0
+	sawChunk := false
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -182,10 +186,12 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 			ch <- Token{Done: true}
 			return
 		}
+		sawChunk = true
 		for _, c := range chunk.Choices {
 			if c.Delta.Content != "" {
 				buf.WriteString(c.Delta.Content)
 			}
+			reasoningLen += len(c.Delta.Reasoning)
 		}
 		if chunk.Usage != nil {
 			usage = &TokenUsage{
@@ -197,9 +203,16 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 	}
 
 	output := unwrapJSONResponse(buf.String())
-	if output != "" {
-		ch <- Token{Text: output}
+	if output == "" {
+		// An empty content stream (HTTP 200, no error) usually means the prompt
+		// exceeded the model's context window, or the model emitted only
+		// reasoning. Surface a descriptive error instead of returning nothing,
+		// which downstream agents misreport (e.g. coder: "no file blocks").
+		ch <- Token{Error: mlxEmptyResponseError(inputText, sawChunk, reasoningLen > 0)}
+		ch <- Token{Done: true}
+		return
 	}
+	ch <- Token{Text: output}
 	// Most oMLX builds do not include a `usage` block in streaming responses,
 	// so fall back to an estimated count instead of dropping usage entirely.
 	// The monitor needs *something* to surface for local-model agents.
@@ -207,6 +220,18 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 		usage = estimatedUsage(inputText, output)
 	}
 	ch <- Token{Done: true, Usage: usage}
+}
+
+// mlxEmptyResponseError builds a diagnostic error for an empty oMLX response.
+func mlxEmptyResponseError(inputText string, sawChunk, sawReasoning bool) error {
+	promptTokens := tokenutil.EstimateTokens(inputText)
+	if sawReasoning {
+		return fmt.Errorf("omlx: model produced only reasoning and no answer for a ~%d-token prompt — increase the model's max_tokens / context length in oMLX, or use a non-reasoning coder model", promptTokens)
+	}
+	if !sawChunk {
+		return fmt.Errorf("omlx: empty response for a ~%d-token prompt — the prompt may exceed the model's context length, or the model failed to load in oMLX", promptTokens)
+	}
+	return fmt.Errorf("omlx: model returned an empty answer for a ~%d-token prompt — the prompt likely exceeds the model's context length; use a model/quant with a larger context or shorten the task", promptTokens)
 }
 
 func (r *MLXRunner) baseURL() string {
@@ -234,6 +259,8 @@ type mlxChatChunk struct {
 	Choices []struct {
 		Delta struct {
 			Content string `json:"content"`
+			// Reasoning models stream their chain-of-thought here.
+			Reasoning string `json:"reasoning_content"`
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`

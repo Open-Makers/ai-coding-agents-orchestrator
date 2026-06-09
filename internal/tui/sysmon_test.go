@@ -143,6 +143,30 @@ func TestSysmonView_ShowsTree(t *testing.T) {
 	}
 }
 
+func TestSysmonViewKeepsTreeVisibleWhenOverflowing(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "game"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "game", "board.go"), []byte("package game\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sm := NewSysmon()
+	sm.SetProjectRoot(root)
+	// A short panel forces overflow clipping; the TREE section sits at the
+	// bottom and must not be clipped off when the tree is not focused.
+	sm.SetSize(44, 18)
+
+	out := sm.View()
+	if !strings.Contains(out, "TREE") {
+		t.Fatalf("TREE section clipped from overflowing panel:\n%s", out)
+	}
+	if !strings.Contains(out, "board.go") {
+		t.Fatalf("project tree entries not visible in overflowing panel:\n%s", out)
+	}
+}
+
 func TestSysmonObserveBusMessage_TracksActiveFiles(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "internal", "game"), 0o755); err != nil {

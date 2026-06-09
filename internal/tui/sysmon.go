@@ -620,6 +620,9 @@ func (m SysmonModel) View() string {
 	}
 
 	// ── TREE ── (fixed height: always 10 content rows)
+	// Remember where the tree block begins so overflow clipping can always keep
+	// it (plus the footer) visible — it carries the live file-activity view.
+	treeBlockStart := len(lines)
 	const treeFixedRows = 10
 	if m.treeFocused {
 		addSection("TREE  [browsing]")
@@ -662,7 +665,17 @@ func (m SysmonModel) View() string {
 			// — otherwise scrolling down makes the selection disappear.
 			result = strings.Join(clipped[len(clipped)-m.height:], "\n")
 		} else {
-			result = strings.Join(clipped[:m.height], "\n")
+			// Not browsing: keep the CPU headline at the top AND the TREE
+			// section (with its auto-scroll + active-file highlights) plus the
+			// footer at the bottom, dropping middle sections when space is
+			// tight. Otherwise the tree gets clipped off and looks frozen.
+			bottom := clipped[treeBlockStart:]
+			if len(bottom) >= m.height {
+				result = strings.Join(bottom[len(bottom)-m.height:], "\n")
+			} else {
+				top := clipped[:m.height-len(bottom)]
+				result = strings.Join(append(top, bottom...), "\n")
+			}
 		}
 	} else if m.height > totalLines {
 		topPad := (m.height - totalLines) / 2

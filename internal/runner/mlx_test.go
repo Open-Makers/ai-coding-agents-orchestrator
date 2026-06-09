@@ -73,3 +73,53 @@ func TestMLXRunner_SendsExpectedRequest(t *testing.T) {
 		t.Errorf("max_tokens: want %d, got %d", mlxMaxTokens, captured.MaxTokens)
 	}
 }
+
+func TestMLXStreamResponse_EmptyIsError(t *testing.T) {
+	// HTTP 200 with an empty content stream must surface a descriptive error,
+	// not a silent success (which downstream agents misreport).
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	r := NewMLXRunner("")
+	ch := make(chan Token, 16)
+	go r.streamResponseFromBytes([]byte(stream), "some prompt", ch)
+
+	var sawErr bool
+	for tok := range ch {
+		if tok.Error != nil {
+			sawErr = true
+			if !strings.Contains(tok.Error.Error(), "omlx") {
+				t.Errorf("expected an omlx-tagged error, got %q", tok.Error.Error())
+			}
+		}
+		if tok.Text != "" {
+			t.Errorf("empty response must not yield text, got %q", tok.Text)
+		}
+	}
+	if !sawErr {
+		t.Error("expected an error for an empty oMLX stream")
+	}
+}
+
+func TestMLXStreamResponse_ReasoningOnlyIsError(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"thinking…"}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	r := NewMLXRunner("")
+	ch := make(chan Token, 16)
+	go r.streamResponseFromBytes([]byte(stream), "p", ch)
+
+	var errMsg string
+	for tok := range ch {
+		if tok.Error != nil {
+			errMsg = tok.Error.Error()
+		}
+	}
+	if !strings.Contains(errMsg, "reasoning") {
+		t.Errorf("expected a reasoning-related error, got %q", errMsg)
+	}
+}
