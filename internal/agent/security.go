@@ -106,3 +106,31 @@ func parseSecurityReview(text string) SecurityResult {
 		RawOutput:  text,
 	}
 }
+
+// ReviewPlan audits an implementation plan (before any code exists) for security
+// risks. It returns the structured result so the caller can surface MUST-FIX
+// items to the human before the plan is approved.
+func (a *SecurityAgent) ReviewPlan(ctx context.Context, planText, projectCtx string) (SecurityResult, error) {
+	systemPrompt := prompts.MustLoad("security-plan-review")
+	userContent := planText
+	if projectCtx != "" {
+		userContent = "Project context:\n" + projectCtx + "\n\nImplementation plan:\n" + planText
+	}
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
+	})
+	if err != nil {
+		return SecurityResult{}, fmt.Errorf("security plan review: runner: %w", err)
+	}
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return SecurityResult{}, fmt.Errorf("security plan review: stream: %w", err)
+	}
+	return parseSecurityReview(output), nil
+}

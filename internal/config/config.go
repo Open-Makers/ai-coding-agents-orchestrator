@@ -26,6 +26,15 @@ type Config struct {
 	Agents         map[string]AgentConfig `yaml:"agents,omitempty"`
 	PromptLanguage string                 `yaml:"prompt_language,omitempty"`
 	ModelMemory    ModelMemoryConfig      `yaml:"model_memory,omitempty"`
+	Notifications  NotifyConfig           `yaml:"notifications,omitempty"`
+}
+
+// NotifyConfig controls external notifications (e.g. cmux alerts on approval
+// gates, completion, and errors). Notifications are enabled by default and only
+// fire when the target tool is actually running, so the opt-out is expressed as
+// a "disable" flag to fit the layered config's "true overrides" merge rule.
+type NotifyConfig struct {
+	DisableCMux bool `yaml:"disable_cmux,omitempty"` // true = never send cmux notifications
 }
 
 // ModelMemoryConfig bounds how much memory local models may use. The two modes
@@ -388,6 +397,10 @@ func merge(dst *Config, src Config) {
 	}
 	if src.ModelMemory.MaxContextTokens > 0 {
 		dst.ModelMemory.MaxContextTokens = src.ModelMemory.MaxContextTokens
+	}
+
+	if src.Notifications.DisableCMux {
+		dst.Notifications.DisableCMux = true
 	}
 
 	if src.Agents != nil {

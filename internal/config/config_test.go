@@ -365,3 +365,19 @@ func TestMerge_ModelMemory(t *testing.T) {
 		t.Errorf("empty layer should not clear mode, got %q", dst.ModelMemory.Mode)
 	}
 }
+
+func TestMerge_NotificationsDisableCMux(t *testing.T) {
+	dst := DefaultConfig()
+	if dst.Notifications.DisableCMux {
+		t.Fatal("cmux notifications should be enabled by default")
+	}
+	merge(&dst, Config{Notifications: NotifyConfig{DisableCMux: true}})
+	if !dst.Notifications.DisableCMux {
+		t.Error("disable_cmux=true should override")
+	}
+	// An empty later layer must not re-enable it.
+	merge(&dst, Config{})
+	if !dst.Notifications.DisableCMux {
+		t.Error("empty layer should not clear disable_cmux")
+	}
+}

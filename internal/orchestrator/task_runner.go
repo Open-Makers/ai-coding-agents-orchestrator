@@ -21,6 +21,7 @@ import (
 	appctx "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/context"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/gitclient"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/logging"
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/notify"
 	appprompts "github.com/Open-Makers/ai-coding-agents-orchestrator/internal/prompts"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/runner"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
@@ -150,9 +151,16 @@ func (tr *TaskRunner) Regenerate() {
 // 3. Execute: code → quality gate (fully autonomous)
 func (tr *TaskRunner) Run(ctx context.Context, taskInput string) error {
 	err := tr.run(ctx, taskInput, false)
-	if err != nil && errors.Is(err, runner.ErrRateLimited) && tr.state != PipelineRateLimited {
-		tr.setState(PipelineRateLimited)
-		tr.event(fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err))
+	if err != nil {
+		if errors.Is(err, runner.ErrRateLimited) && tr.state != PipelineRateLimited {
+			tr.setState(PipelineRateLimited)
+			tr.event(fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err))
+			tr.notify("Rate limited", "Quota hit — pipeline stopped")
+		} else {
+			tr.notify("Error", fmt.Sprintf("Pipeline failed: %v", err))
+		}
+	} else {
+		tr.notify("Complete", "Pipeline finished — review artifacts in .orchestrator/")
 	}
 	return err
 }
@@ -162,9 +170,16 @@ func (tr *TaskRunner) Run(ctx context.Context, taskInput string) error {
 // remaining (open or interrupted) sub-tasks. Use Resumable() to check first.
 func (tr *TaskRunner) Resume(ctx context.Context) error {
 	err := tr.run(ctx, "", true)
-	if err != nil && errors.Is(err, runner.ErrRateLimited) && tr.state != PipelineRateLimited {
-		tr.setState(PipelineRateLimited)
-		tr.event(fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err))
+	if err != nil {
+		if errors.Is(err, runner.ErrRateLimited) && tr.state != PipelineRateLimited {
+			tr.setState(PipelineRateLimited)
+			tr.event(fmt.Sprintf("⛔ rate limit / quota hit: %v — pipeline stopped", err))
+			tr.notify("Rate limited", "Quota hit — pipeline stopped")
+		} else {
+			tr.notify("Error", fmt.Sprintf("Pipeline failed: %v", err))
+		}
+	} else {
+		tr.notify("Complete", "Pipeline finished — review artifacts in .orchestrator/")
 	}
 	return err
 }
@@ -450,7 +465,11 @@ func (tr *TaskRunner) runDecomposeGate(ctx context.Context, spec agent.TaskSpec,
 		}
 		tr.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgResponse, fmt.Sprintf("decomposed into %d sub-tasks", len(tasks))))
 
-		if err := tr.ws.WriteFile(artifacts.TaskPlanFile, []byte(renderTaskPlan(tasks))); err != nil {
+		// Security + Quality review the plan BEFORE the human approval gate, so
+		// the human sees reviewer concerns alongside the plan.
+		planMD := renderTaskPlan(tasks)
+		reviewNotes := tr.reviewPlan(ctx, planMD, ctxFragment)
+		if err := tr.ws.WriteFile(artifacts.TaskPlanFile, []byte(planMD+reviewNotes)); err != nil {
 			return nil, fmt.Errorf("write task plan: %w", err)
 		}
 
@@ -464,6 +483,52 @@ func (tr *TaskRunner) runDecomposeGate(ctx context.Context, spec agent.TaskSpec,
 		tr.event("re-decomposing task…")
 		_ = removeWorkspaceFile(tr.ws, artifacts.TaskPlanFile)
 	}
+}
+
+// reviewPlan asks the Security and QA agents to audit the implementation plan
+// before the human approves it. It returns a markdown "Reviewer Notes" section
+// (empty when both reviewers are absent or have no concerns) to append to the
+// task plan shown at the approval gate. Best-effort: reviewer errors are logged
+// and do not block the gate.
+func (tr *TaskRunner) reviewPlan(ctx context.Context, planMD, ctxFragment string) string {
+	var sb strings.Builder
+
+	if sec, ok := tr.agents[bus.RoleSecurity].(*agent.SecurityAgent); ok {
+		tr.setState(PipelineSecurity)
+		tr.event("Security reviewing the plan…")
+		if res, err := sec.ReviewPlan(ctx, planMD, ctxFragment); err != nil {
+			tr.event(fmt.Sprintf("warning: security plan review: %v", err))
+		} else if len(res.MustFix) > 0 {
+			sb.WriteString("\n### Security\n\n")
+			for _, item := range res.MustFix {
+				fmt.Fprintf(&sb, "- %s\n", item)
+			}
+			tr.event(fmt.Sprintf("Security raised %d plan concern(s)", len(res.MustFix)))
+		} else {
+			tr.event("Security plan review: no concerns")
+		}
+	}
+
+	if qa, ok := tr.agents[bus.RoleQA].(*agent.QAAgent); ok {
+		tr.setState(PipelineQAReview)
+		tr.event("QA reviewing the plan…")
+		if res, err := qa.ReviewPlan(ctx, planMD, ctxFragment); err != nil {
+			tr.event(fmt.Sprintf("warning: qa plan review: %v", err))
+		} else if len(res.MustFix) > 0 {
+			sb.WriteString("\n### Quality\n\n")
+			for _, item := range res.MustFix {
+				fmt.Fprintf(&sb, "- %s\n", item)
+			}
+			tr.event(fmt.Sprintf("QA raised %d plan concern(s)", len(res.MustFix)))
+		} else {
+			tr.event("QA plan review: no concerns")
+		}
+	}
+
+	if sb.Len() == 0 {
+		return ""
+	}
+	return "\n---\n\n## Reviewer Notes\n\nRaised by Security & Quality before approval — consider addressing or accept as-is.\n" + sb.String()
 }
 
 // resumeDiffMaxTokens caps the size of the uncommitted-changes diff injected
@@ -601,6 +666,13 @@ func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctx
 		return b.Title, ""
 	}
 
+	// ── Phase A: QA writes tests for ALL sub-tasks first (TDD across the whole
+	// plan) before any implementation begins. ──
+	tr.generateAllTests(ctx, ctxFragment, tasks)
+
+	// ── Phase B: Coder implements ALL sub-tasks (bead-ordered), accumulating
+	// the produced files. No per-bead build/fix here — verification is global. ──
+	var implFiles []string
 	total := len(tasks)
 	done := 0
 	processed := make(map[string]bool)
@@ -610,11 +682,7 @@ func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctx
 			return fmt.Errorf("select next sub-task: %w", err)
 		}
 		if !ok {
-			// No interrupted or ready sub-tasks left. Confirm everything is
-			// actually closed before declaring the task done — otherwise a
-			// blocked/cyclic/orphaned child would be silently dropped and the
-			// resume sidecars removed.
-			return tr.verifySubtasksComplete(ctx)
+			break
 		}
 
 		done++
@@ -625,9 +693,11 @@ func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctx
 			tr.event(fmt.Sprintf("── Sub-task %d/%d (%s): %s ──", done, total, bead.ID, title))
 		}
 
-		if err := tr.executeBead(ctx, ctxFragment, title, desc); err != nil {
+		files, err := tr.implementBead(ctx, ctxFragment, title, desc)
+		if err != nil {
 			return fmt.Errorf("bead %s: %w", bead.ID, err)
 		}
+		implFiles = mergeFileList(implFiles, files)
 		processed[bead.ID] = true
 		if err := beads.Close(ctx, tr.root, bead.ID, "Completed by orchestrator"); err != nil {
 			// A failed close would leave the sub-task in_progress; don't proceed
@@ -635,6 +705,17 @@ func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctx
 			return fmt.Errorf("close sub-task %s: %w", bead.ID, err)
 		}
 	}
+
+	// Confirm everything is actually closed before declaring implementation
+	// done — otherwise a blocked/cyclic/orphaned child would be silently
+	// dropped and the resume sidecars removed.
+	if err := tr.verifySubtasksComplete(ctx); err != nil {
+		return err
+	}
+
+	// ── Phase C: one global build → test → fix loop over the whole project,
+	// only now that every stage is implemented. ──
+	return tr.globalBuildFix(ctx, ctxFragment, implFiles)
 }
 
 // verifySubtasksComplete returns an error if any child of the task bead is not
@@ -702,64 +783,82 @@ func pickInProgress(inprog []beads.Issue, processed map[string]bool) (beads.Issu
 	return beads.Issue{}, false
 }
 
-// executeSubTasksInOrder runs sub-tasks sequentially when `bd` is unavailable.
+// executeSubTasksInOrder runs sub-tasks sequentially when `bd` is unavailable,
+// using the same phased flow as the bead-backed path: all tests first, then all
+// implementations, then one global build/fix loop.
 func (tr *TaskRunner) executeSubTasksInOrder(ctx context.Context, spec agent.TaskSpec, ctxFragment string, tasks []agent.SubTask) error {
+	_ = spec
+	tr.generateAllTests(ctx, ctxFragment, tasks)
+
+	var implFiles []string
 	for i, t := range tasks {
 		tr.event(fmt.Sprintf("── Sub-task %d/%d: %s ──", i+1, len(tasks), t.Title))
-		if err := tr.executeBead(ctx, ctxFragment, t.Title, t.Description); err != nil {
+		files, err := tr.implementBead(ctx, ctxFragment, t.Title, t.Description)
+		if err != nil {
 			return fmt.Errorf("sub-task %s: %w", t.Key, err)
 		}
+		implFiles = mergeFileList(implFiles, files)
 	}
-	return nil
+	return tr.globalBuildFix(ctx, ctxFragment, implFiles)
 }
 
-// executeBead runs a single bead: QA writes tests (TDD), then Coder
-// implements in a loop until tests pass. If coder fails N times, QA
-// verifies whether the tests are correct.
-func (tr *TaskRunner) executeBead(ctx context.Context, ctxFragment, title, description string) error {
-	plan := title + "\n\n" + description
-
-	// Step 1: QA writes tests (TDD).
+// generateAllTests asks QA to write tests (TDD) for every sub-task up front,
+// before any implementation. Best-effort: a failure on one stage is logged and
+// the remaining stages still get tests. No-op when there is no QA agent.
+func (tr *TaskRunner) generateAllTests(ctx context.Context, ctxFragment string, tasks []agent.SubTask) {
 	qa, hasQA := tr.agents[bus.RoleQA].(*agent.QAAgent)
-	if hasQA {
-		tr.setState(PipelineQATests)
+	if !hasQA {
+		return
+	}
+	tr.setState(PipelineQATests)
+	total := len(tasks)
+	for i, t := range tasks {
+		tr.event(fmt.Sprintf("── Tests %d/%d: %s ──", i+1, total, t.Title))
 		tr.event("QA writing tests (TDD)…")
 		tr.b.Publish(bus.NewMessage(bus.RoleSystem, bus.RoleQA, bus.MsgRequest, "tdd-generate"))
 		if err := qa.GenerateTests(ctx, agent.QATestPayload{
-			Plan:           plan,
+			Plan:           t.Title + "\n\n" + t.Description,
 			ProjectContext: ctxFragment,
-			StageName:      title,
+			StageName:      t.Title,
 			Files:          collectProjectFilesFromRoot(nil, tr.root),
 		}); err != nil {
-			tr.event(fmt.Sprintf("warning: QA test generation: %v", err))
+			tr.event(fmt.Sprintf("warning: QA test generation (%s): %v", t.Title, err))
 		}
 		tr.b.Publish(bus.NewMessage(bus.RoleQA, "", bus.MsgResponse, "tests generated"))
 	}
+}
 
-	// Step 2: Coder implements.
+// implementBead runs the coder once for a single sub-task and returns the files
+// it produced. Tests are written separately (generateAllTests) and verification
+// happens globally (globalBuildFix), so this performs no build/fix loop.
+func (tr *TaskRunner) implementBead(ctx context.Context, ctxFragment, title, description string) ([]string, error) {
 	tr.setState(PipelineCoding)
 	if tr.codingStarted.IsZero() {
 		tr.codingStarted = time.Now()
 	}
-
-	coderResp, err := tr.runAgent(ctx, bus.RoleCoder, agent.CoderPayload{
-		Plan:           plan,
+	resp, err := tr.runAgent(ctx, bus.RoleCoder, agent.CoderPayload{
+		Plan:           title + "\n\n" + description,
 		ProjectContext: ctxFragment,
 		StageName:      title,
 		StageIndex:     1,
 		TotalStages:    1,
 	})
 	if err != nil {
-		return fmt.Errorf("coder: %w", err)
+		return nil, fmt.Errorf("coder: %w", err)
 	}
+	return extractCoderResult(resp).Files, nil
+}
 
-	coderResult := extractCoderResult(coderResp)
-
-	// Step 3: Build & test loop with QA escalation.
+// globalBuildFix runs one project-wide build → test → fix loop after all stages
+// are implemented. It uses the coder's build-fix loop and escalates to QA when
+// the coder repeatedly fails, exactly as the per-bead loop used to, but over the
+// whole accumulated file set instead of a single stage.
+func (tr *TaskRunner) globalBuildFix(ctx context.Context, ctxFragment string, files []string) error {
 	coder, hasCoder := tr.agents[bus.RoleCoder].(*agent.CoderAgent)
 	if !hasCoder {
 		return nil
 	}
+	qa, hasQA := tr.agents[bus.RoleQA].(*agent.QAAgent)
 
 	maxAttempts := defaultMaxCoderAttempts
 	if tr.cfg.Project.MaxFixAttempts > 0 {
@@ -770,7 +869,7 @@ func (tr *TaskRunner) executeBead(ctx context.Context, ctxFragment, title, descr
 	for attempt := 0; ; attempt++ {
 		tr.setState(PipelineCoding)
 		tr.event("running build and tests…")
-		fixed, buildErr := coder.BuildAndFix(ctx, coderResult.Files)
+		fixed, buildErr := coder.BuildAndFix(ctx, files)
 		if buildErr != nil {
 			if !agent.IsBuildFixStuck(buildErr) {
 				return fmt.Errorf("build: %w", buildErr)
@@ -778,13 +877,12 @@ func (tr *TaskRunner) executeBead(ctx context.Context, ctxFragment, title, descr
 			// BuildFixStuck: fall through to QA escalation below.
 			tr.event("build-fix loop stuck — escalating to QA")
 		} else {
-			coderResult.Files = fixed
+			files = fixed
 
-			// Run tests to verify.
-			files := collectProjectFilesFromRoot(coderResult.Files, tr.root)
-			testPass := tr.runBuildTests(ctx, files)
-			if testPass {
-				tr.event("bead complete — tests pass")
+			// Run tests to verify the whole project.
+			projFiles := collectProjectFilesFromRoot(files, tr.root)
+			if tr.runBuildTests(ctx, projFiles) {
+				tr.event("implementation complete — tests pass")
 				return nil
 			}
 		}
@@ -801,10 +899,10 @@ func (tr *TaskRunner) executeBead(ctx context.Context, ctxFragment, title, descr
 			tr.event(fmt.Sprintf("coder failed %d times — asking QA to verify tests (round %d/%d)…",
 				attempt, qaVerifyRound, maxQAVerifyRounds))
 
-			testFiles := filterTestFiles(coderResult.Files)
+			testFiles := filterTestFiles(files)
 			verifyResult, verifyErr := qa.VerifyTests(ctx, agent.QAVerifyTestsPayload{
 				Failure:        "Coder failed to make tests pass after multiple attempts",
-				Files:          coderResult.Files,
+				Files:          files,
 				TestFiles:      testFiles,
 				ProjectContext: ctxFragment,
 			})
@@ -817,7 +915,7 @@ func (tr *TaskRunner) executeBead(ctx context.Context, ctxFragment, title, descr
 				tr.event("QA confirms tests are correct — coder must try harder")
 			} else {
 				tr.event(fmt.Sprintf("QA updated %d test file(s)", len(verifyResult.UpdatedFiles)))
-				coderResult.Files = mergeFileList(coderResult.Files, verifyResult.UpdatedFiles)
+				files = mergeFileList(files, verifyResult.UpdatedFiles)
 			}
 		}
 
@@ -826,14 +924,14 @@ func (tr *TaskRunner) executeBead(ctx context.Context, ctxFragment, title, descr
 		fixResp, fixErr := tr.runAgent(ctx, bus.RoleCoder, agent.CoderFixPayload{
 			Failure:        "Tests are failing. Fix the implementation to make them pass.",
 			ProjectContext: ctxFragment,
-			Files:          coderResult.Files,
+			Files:          files,
 			Targets:        tr.scopedCoderFixTargets(ctx),
 		})
 		if fixErr != nil {
 			return fmt.Errorf("coder fix: %w", fixErr)
 		}
 		fixResult := extractCoderResult(fixResp)
-		coderResult.Files = mergeFileList(coderResult.Files, fixResult.Files)
+		files = mergeFileList(files, fixResult.Files)
 	}
 }
 
@@ -1158,12 +1256,24 @@ func (tr *TaskRunner) event(msg string) {
 	tr.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, msg))
 }
 
+// notify sends a best-effort external alert (cmux) for a noteworthy pipeline
+// moment — approval needed, completion, or failure — mirroring how Claude Code
+// forwards alerts into cmux. No-ops when notifications are disabled or cmux is
+// not running.
+func (tr *TaskRunner) notify(subtitle, body string) {
+	if tr.cfg.Notifications.DisableCMux {
+		return
+	}
+	notify.SendCMux("Orchestrator", subtitle, body)
+}
+
 // waitArtifact blocks until the user approves or asks to regenerate the artifact.
 // Returns true on approval, false on regenerate request.
 func (tr *TaskRunner) waitArtifact(ctx context.Context, filename string) (bool, error) {
 	tr.log.Info("waiting for artifact approval", slog.String("artifact", filename))
 	tr.setState(PipelineGate)
 	tr.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgHumanGate, filename))
+	tr.notify("Approval needed", fmt.Sprintf("Review %s and approve to continue", filename))
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()

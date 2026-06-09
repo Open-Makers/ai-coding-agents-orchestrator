@@ -93,6 +93,34 @@ func (a *QAAgent) SetMaxContextTokens(n int) { a.maxContextTokens = n }
 
 func (a *QAAgent) Role() bus.AgentRole { return bus.RoleQA }
 
+// ReviewPlan audits an implementation plan (before any code exists) for quality
+// and correctness risks. It returns the structured result so the caller can
+// surface MUST-FIX items to the human before the plan is approved.
+func (a *QAAgent) ReviewPlan(ctx context.Context, planText, projectCtx string) (QAReviewResult, error) {
+	systemPrompt := prompts.MustLoad("qa-plan-review")
+	userContent := planText
+	if projectCtx != "" {
+		userContent = "Project context:\n" + projectCtx + "\n\nImplementation plan:\n" + planText
+	}
+	if a.maxContextTokens > 0 {
+		userContent = tokenutil.Truncate(userContent, a.maxContextTokens)
+	}
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: userContent}},
+	})
+	if err != nil {
+		return QAReviewResult{}, fmt.Errorf("qa plan review: runner: %w", err)
+	}
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return QAReviewResult{}, fmt.Errorf("qa plan review: stream: %w", err)
+	}
+	return parseQAReview(output), nil
+}
+
 // GenerateTests creates test files via LLM in TDD mode (tests before implementation).
 func (a *QAAgent) GenerateTests(ctx context.Context, payload QATestPayload) error {
 	if len(payload.Files) == 0 && strings.TrimSpace(payload.Plan) == "" {
