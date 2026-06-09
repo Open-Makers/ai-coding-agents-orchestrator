@@ -671,14 +671,32 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 	dimStyle := lipgloss.NewStyle().Foreground(p.dim)
 	titleStyle := lipgloss.NewStyle().Foreground(p.accent).Bold(true)
 
-	// Each menu item gets its own accent color.
-	itemColors := []lipgloss.Color{
-		p.green,  // New Task
-		p.accent, // Open Project
-		p.cyan,   // Global Settings
-		p.gold,   // Project Setup
-		p.red,    // Reset Artifacts
-		p.dim,    // Quit
+	// Each menu item gets its own accent color, keyed by action so dynamic
+	// items (Resume, Done Tasks) don't shift colors onto the wrong rows or onto
+	// the dim description color.
+	itemColorFor := func(action homeAction) lipgloss.Color {
+		switch action {
+		case homeActionNewTask, homeActionResume:
+			return p.green
+		case homeActionOpenProject, homeActionResumeProject:
+			return p.accent
+		case homeActionGlobalSettings:
+			return p.cyan
+		case homeActionModelMemory:
+			return p.gold
+		case homeActionSetup:
+			return p.red
+		case homeActionSetProjectName:
+			return p.accent
+		case homeActionClean:
+			return p.gold
+		case homeActionDoneTasks:
+			return p.bright
+		case homeActionQuit:
+			return p.dim
+		default:
+			return p.bright
+		}
 	}
 
 	cardW := contentWidth/2 - 2
@@ -697,10 +715,7 @@ func (m HomeModel) renderMenu(contentWidth int) string {
 	for i, item := range m.items {
 		disabled := !m.projectValid && requiresProject(item.action)
 
-		itemColor := p.bright
-		if i < len(itemColors) {
-			itemColor = itemColors[i]
-		}
+		itemColor := itemColorFor(item.action)
 		if disabled {
 			itemColor = p.dim
 		}
