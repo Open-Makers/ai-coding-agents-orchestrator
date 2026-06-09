@@ -341,6 +341,30 @@ func OllamaModelSizeBytes(model string) int64 {
 	return 0
 }
 
+// OllamaInstalledWithSizes returns installed Ollama models paired with their
+// on-disk weight size in bytes, from a single /api/tags call.
+func OllamaInstalledWithSizes() (map[string]int64, error) {
+	resp, err := http.Get("http://localhost:11434/api/tags")
+	if err != nil {
+		return nil, fmt.Errorf("ollama not reachable: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var result struct {
+		Models []struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	sizes := make(map[string]int64, len(result.Models))
+	for _, m := range result.Models {
+		sizes[m.Name] = m.Size
+	}
+	return sizes, nil
+}
+
 // OllamaListInstalled returns model names available in the local Ollama instance.
 func OllamaListInstalled() ([]string, error) {
 	resp, err := http.Get("http://localhost:11434/api/tags")

@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"sort"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 )
@@ -77,20 +78,36 @@ func ContextTokensForRAM(cfg config.AgentConfig, ramGB float64) int {
 	if ramGB <= 0 {
 		return 0
 	}
-	ramBytes := int64(ramGB * float64(bytesPerGiB))
-
 	weights := modelWeightBytes(cfg)
 	if weights <= 0 {
 		weights = defaultWeightsBytes
 	}
+	return ContextTokensForWeights(weights, ramGB)
+}
 
-	kvBudget := ramBytes - int64(float64(weights)*weightsOverhead) - runtimeOverheadBytes
+// ContextTokensForWeights estimates the largest context window (in tokens) a
+// model of the given weight size can run within ramGB gigabytes of memory. It
+// is the network-free core of ContextTokensForRAM, exposed so callers that
+// already know a model's weight size (e.g. a UI listing several models) can
+// compute estimates without re-fetching metadata per keystroke. weightBytes <= 0
+// falls back to the default estimate. The result is clamped and rounded down to
+// a multiple of 1024.
+func ContextTokensForWeights(weightBytes int64, ramGB float64) int {
+	if ramGB <= 0 {
+		return 0
+	}
+	if weightBytes <= 0 {
+		weightBytes = defaultWeightsBytes
+	}
+	ramBytes := int64(ramGB * float64(bytesPerGiB))
+
+	kvBudget := ramBytes - int64(float64(weightBytes)*weightsOverhead) - runtimeOverheadBytes
 	if kvBudget <= 0 {
 		return minContextTokens
 	}
 
 	// Scale per-token KV cost by model size relative to the 7B baseline.
-	kvPerToken := int64(float64(kvBytesPerTokenBaseline) * float64(weights) / float64(defaultWeightsBytes))
+	kvPerToken := int64(float64(kvBytesPerTokenBaseline) * float64(weightBytes) / float64(defaultWeightsBytes))
 	if kvPerToken < minKVBytesPerToken {
 		kvPerToken = minKVBytesPerToken
 	}
@@ -155,4 +172,46 @@ func ApplyModelMemory(cfg *config.Config) {
 			cfg.Agents[role] = ac
 		}
 	}
+}
+
+// LocalModel describes a locally-hosted model discovered on one of the local
+// backends, with its weight size when the backend reports it.
+type LocalModel struct {
+	Runner      string // "ollama" | "lmstudio" | "mlx"
+	Model       string
+	WeightBytes int64 // 0 when the backend does not report a size (heuristic used)
+}
+
+// ListLocalModels enumerates models currently available across the local
+// backends (Ollama, LM Studio, oMLX). Unreachable backends are skipped silently
+// so the result reflects whatever is up right now. Ollama entries include their
+// on-disk weight size; LM Studio and oMLX entries leave WeightBytes at 0 because
+// those servers do not report a reliable size.
+func ListLocalModels() []LocalModel {
+	var out []LocalModel
+
+	if sizes, err := OllamaInstalledWithSizes(); err == nil {
+		names := make([]string, 0, len(sizes))
+		for name := range sizes {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			out = append(out, LocalModel{Runner: "ollama", Model: name, WeightBytes: sizes[name]})
+		}
+	}
+
+	if models, err := LMStudioListInstalled(); err == nil {
+		for _, name := range models {
+			out = append(out, LocalModel{Runner: "lmstudio", Model: name})
+		}
+	}
+
+	if models, err := MLXListInstalled(); err == nil {
+		for _, name := range models {
+			out = append(out, LocalModel{Runner: "mlx", Model: name})
+		}
+	}
+
+	return out
 }

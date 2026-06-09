@@ -37,9 +37,25 @@ type modelMemoryModel struct {
 	mode       int
 	value      textinput.Model
 	totalRAMGB float64
-	sampleCfg  config.AgentConfig // representative agent for the live RAM→context preview
-	width      int
-	height     int
+
+	// Available local models discovered across backends, for the live
+	// RAM→context preview. Loaded asynchronously on Init.
+	localModels  []runner.LocalModel
+	localLoading bool
+
+	width  int
+	height int
+}
+
+// localModelsMsg carries the result of the async local-model discovery.
+type localModelsMsg struct {
+	models []runner.LocalModel
+}
+
+func fetchLocalModelsCmd() tea.Cmd {
+	return func() tea.Msg {
+		return localModelsMsg{models: runner.ListLocalModels()}
+	}
 }
 
 func newModelMemoryModel(cfg config.Config) modelMemoryModel {
@@ -62,33 +78,15 @@ func newModelMemoryModel(cfg config.Config) modelMemoryModel {
 	}
 
 	m := modelMemoryModel{
-		mode:       mode,
-		value:      ti,
-		totalRAMGB: total,
-		sampleCfg:  representativeAgent(cfg.Agents),
-		width:      80,
-		height:     24,
+		mode:         mode,
+		value:        ti,
+		totalRAMGB:   total,
+		localLoading: true,
+		width:        80,
+		height:       24,
 	}
 	m.value.SetValue(m.initialValue(cfg))
 	return m
-}
-
-// representativeAgent picks a local agent config to drive the RAM→context
-// preview. The coder is preferred (it does the heaviest work); otherwise any
-// local agent, falling back to a zero config.
-func representativeAgent(agents map[string]config.AgentConfig) config.AgentConfig {
-	if ac, ok := agents["coder"]; ok && runner.IsLocalRunner(ac) {
-		return ac
-	}
-	for _, ac := range agents {
-		if runner.IsLocalRunner(ac) {
-			return ac
-		}
-	}
-	if ac, ok := agents["coder"]; ok {
-		return ac
-	}
-	return config.AgentConfig{}
 }
 
 func (m modelMemoryModel) initialValue(cfg config.Config) string {
@@ -109,12 +107,18 @@ func (m modelMemoryModel) initialValue(cfg config.Config) string {
 	return ""
 }
 
-func (m modelMemoryModel) Init() tea.Cmd { return textinput.Blink }
+func (m modelMemoryModel) Init() tea.Cmd {
+	return tea.Batch(textinput.Blink, fetchLocalModelsCmd())
+}
 
 func (m modelMemoryModel) Update(msg tea.Msg) (modelMemoryModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+	case localModelsMsg:
+		m.localModels = msg.models
+		m.localLoading = false
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -203,7 +207,7 @@ func (m modelMemoryModel) View() string {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("   (system total: %.1f GB)", m.totalRAMGB)))
 		}
 		b.WriteString("\n\n")
-		b.WriteString(dimStyle.Render("  " + m.preview()))
+		b.WriteString(m.renderPreview(dimStyle))
 	case mmModeContext:
 		b.WriteString("  Max context (tokens):  ")
 		b.WriteString(m.value.View())
@@ -216,19 +220,54 @@ func (m modelMemoryModel) View() string {
 	return lipgloss.NewStyle().Padding(1, 2).Render(b.String())
 }
 
-// preview shows the estimated context window the RAM limit yields for the
-// representative agent, so the user sees the effect before saving.
-func (m modelMemoryModel) preview() string {
+// renderPreview lists the estimated context window the RAM limit yields for
+// every local model currently available across backends, so the user sees the
+// effect on each model before saving.
+func (m modelMemoryModel) renderPreview(dim lipgloss.Style) string {
 	gb, err := strconv.ParseFloat(strings.TrimSpace(m.value.Value()), 64)
 	if err != nil || gb <= 0 {
-		return "Enter a RAM budget to preview the derived context size."
+		return dim.Render("  Enter a RAM budget to preview the derived context size.")
 	}
-	tokens := runner.ContextTokensForRAM(m.sampleCfg, gb)
-	model := m.sampleCfg.Model
-	if model == "" {
-		model = "the configured model"
+	if m.localLoading {
+		return dim.Render("  Estimated context per available local model:\n  scanning local backends…")
 	}
-	return fmt.Sprintf("≈ %d-token context for %s (auto, per agent).", tokens, model)
+	if len(m.localModels) == 0 {
+		return dim.Render("  No local models detected (Ollama / LM Studio / oMLX not running?).\n  Heuristic for a typical 7B model: ≈ " +
+			strconv.Itoa(runner.ContextTokensForWeights(0, gb)) + " tokens.")
+	}
+
+	headStyle := lipgloss.NewStyle().Foreground(homePalette.gold)
+	valStyle := lipgloss.NewStyle().Foreground(homePalette.green)
+
+	var lines []string
+	lines = append(lines, headStyle.Render("  Estimated context per available local model:"))
+
+	// Cap the list so the screen does not overflow; note any remainder.
+	maxRows := m.height - 14
+	if maxRows < 4 {
+		maxRows = 4
+	}
+	shown := m.localModels
+	extra := 0
+	if len(shown) > maxRows {
+		extra = len(shown) - maxRows
+		shown = shown[:maxRows]
+	}
+
+	for _, lm := range shown {
+		tokens := runner.ContextTokensForWeights(lm.WeightBytes, gb)
+		est := ""
+		if lm.WeightBytes <= 0 {
+			est = dim.Render(" (est)")
+		}
+		label := fmt.Sprintf("%-9s %s", lm.Runner, lm.Model)
+		lines = append(lines, "  "+dim.Render(label)+"  "+
+			valStyle.Render(fmt.Sprintf("≈ %d tok", tokens))+est)
+	}
+	if extra > 0 {
+		lines = append(lines, dim.Render(fmt.Sprintf("  … and %d more", extra)))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func digitsOnly(s string, allowDot bool) string {

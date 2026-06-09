@@ -10,6 +10,31 @@ import (
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 )
 
+func TestContextTokensForWeights_LargerModelFewerTokens(t *testing.T) {
+	small := ContextTokensForWeights(4*(1<<30), 32)
+	large := ContextTokensForWeights(20*(1<<30), 32)
+	if small <= 0 || large <= 0 {
+		t.Fatalf("expected positive estimates, got small=%d large=%d", small, large)
+	}
+	if large >= small {
+		t.Errorf("a larger model should leave room for fewer tokens: small=%d large=%d", small, large)
+	}
+}
+
+func TestContextTokensForWeights_DefaultWhenUnknown(t *testing.T) {
+	// weightBytes <= 0 falls back to the default and must match the cfg path.
+	viaWeights := ContextTokensForWeights(0, 16)
+	viaCfg := ContextTokensForRAM(config.AgentConfig{Runner: "lmstudio"}, 16)
+	if viaWeights != viaCfg {
+		t.Errorf("default fallback mismatch: weights=%d cfg=%d", viaWeights, viaCfg)
+	}
+}
+
+func TestListLocalModels_NoPanicWhenBackendsDown(t *testing.T) {
+	// With no local backends running the call must return without error/panic.
+	_ = ListLocalModels()
+}
+
 func TestContextTokensForRAM_ScalesWithRAM(t *testing.T) {
 	cfg := config.AgentConfig{Runner: "lmstudio", Model: "x"} // no metadata → default weights
 
