@@ -29,6 +29,11 @@ const (
 type OllamaRunner struct {
 	Model   string
 	BaseURL string
+
+	// NumCtx, when > 0, sets Ollama's num_ctx option so the model loads with a
+	// bounded context window. This is the primary lever for capping a local
+	// model's RAM use (the KV cache grows with the context window).
+	NumCtx int
 }
 
 func NewOllamaRunner(model string) *OllamaRunner {
@@ -51,6 +56,7 @@ func (r *OllamaRunner) Complete(ctx context.Context, req CompletionRequest) (<-c
 		Stream:   true,
 		Options: ollamaOptions{
 			NumPredict: ollamaMaxPredict,
+			NumCtx:     r.NumCtx,
 		},
 	}
 
@@ -251,9 +257,11 @@ type ollamaChatRequest struct {
 
 // ollamaOptions overrides Ollama's per-model generation defaults. We set
 // num_predict explicitly because Ollama defaults it to 128 for many models,
-// which silently truncates long responses (TASKSPEC, plans, code).
+// which silently truncates long responses (TASKSPEC, plans, code). num_ctx,
+// when non-zero, bounds the loaded context window (and thus the KV-cache RAM).
 type ollamaOptions struct {
 	NumPredict int `json:"num_predict,omitempty"`
+	NumCtx     int `json:"num_ctx,omitempty"`
 }
 
 type ollamaChatMessage struct {
@@ -267,6 +275,70 @@ type ollamaChatResponse struct {
 	Done            bool              `json:"done"`
 	PromptEvalCount int               `json:"prompt_eval_count"` // input tokens
 	EvalCount       int               `json:"eval_count"`        // output tokens
+}
+
+// Unload asks Ollama to evict the given model from memory immediately by
+// issuing an empty /api/generate request with keep_alive=0. Best-effort: a nil
+// return means the request was accepted, not that eviction is guaranteed.
+func (r *OllamaRunner) Unload(ctx context.Context, model string) error {
+	if model == "" {
+		model = r.Model
+	}
+	payload, err := json.Marshal(map[string]any{
+		"model":      model,
+		"keep_alive": 0,
+	})
+	if err != nil {
+		return err
+	}
+	endpoint := r.baseURL() + "/api/generate"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("ollama: unload %q: %w", model, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
+}
+
+// OllamaModelSizeBytes returns the on-disk size (≈ weight size) of an installed
+// model as reported by /api/tags, or 0 when unavailable. Ollama matches model
+// names loosely (an empty tag means ":latest"), so both the exact name and a
+// ":latest" variant are considered.
+func OllamaModelSizeBytes(model string) int64 {
+	if model == "" {
+		return 0
+	}
+	resp, err := http.Get("http://localhost:11434/api/tags")
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var result struct {
+		Models []struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0
+	}
+	want := model
+	wantLatest := model
+	if !strings.Contains(model, ":") {
+		wantLatest = model + ":latest"
+	}
+	for _, m := range result.Models {
+		if m.Name == want || m.Name == wantLatest {
+			return m.Size
+		}
+	}
+	return 0
 }
 
 // OllamaListInstalled returns model names available in the local Ollama instance.

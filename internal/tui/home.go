@@ -27,6 +27,7 @@ const (
 	homeActionDoneTasks
 	homeActionOpenProject
 	homeActionGlobalSettings
+	homeActionModelMemory
 	homeActionSetup
 	homeActionClean
 	homeActionQuit
@@ -134,6 +135,7 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		{icon: "▶", label: "New Task", desc: "Start a PM chat to define a task — attach existing .md with Ctrl+F", action: homeActionNewTask, key: "Enter"},
 		{icon: "📂", label: "Open Project", desc: "Switch to another project directory", action: homeActionOpenProject, key: "o"},
 		{icon: "🌐", label: "Global Settings", desc: "Default provider & model (~/.orchestrator/config.yaml)", action: homeActionGlobalSettings, key: "g"},
+		{icon: "🧠", label: "Model Memory", desc: "Cap local-model RAM or context size (auto RAM→context per agent)", action: homeActionModelMemory, key: "m"},
 		{icon: "⚙", label: "Project Setup", desc: "Per-agent runner & model overrides", action: homeActionSetup, key: "s"},
 		{icon: "✦", label: "Reset Artifacts", desc: "Remove generated plans & reports — keeps code, config, and project memory", action: homeActionClean, key: "c"},
 		{icon: "⏻", label: "Quit", desc: "Exit orchestrator", action: homeActionQuit, key: "q"},
@@ -252,6 +254,8 @@ func (m HomeModel) Update(msg tea.Msg) (HomeModel, tea.Cmd) {
 			return m, m.selectAction(homeActionSetup)
 		case "g", "G":
 			return m, m.selectAction(homeActionGlobalSettings)
+		case "m", "M":
+			return m, m.selectAction(homeActionModelMemory)
 		case "o", "O":
 			return m, m.selectAction(homeActionOpenProject)
 		case "c", "C":
@@ -976,7 +980,7 @@ func requiresProject(action homeAction) bool {
 	switch action {
 	case homeActionNewTask, homeActionRunPipeline, homeActionResume, homeActionResumeProject, homeActionSetup, homeActionClean:
 		return true
-	case homeActionOpenProject, homeActionGlobalSettings, homeActionDoneTasks, homeActionQuit:
+	case homeActionOpenProject, homeActionGlobalSettings, homeActionModelMemory, homeActionDoneTasks, homeActionQuit:
 		return false
 	}
 	return false

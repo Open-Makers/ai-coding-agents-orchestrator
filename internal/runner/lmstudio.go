@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"sort"
 	"strings"
 
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/executil"
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
@@ -253,6 +255,30 @@ func (r *LMStudioRunner) baseURL() string {
 		return r.BaseURL
 	}
 	return lmStudioBaseURL
+}
+
+// Unload evicts the given model from LM Studio via the `lms` CLI
+// (`lms unload <model>`). LM Studio's REST API has no documented unload
+// endpoint, so this shells out best-effort: if the `lms` CLI is not on PATH the
+// call is a no-op and returns nil.
+func (r *LMStudioRunner) Unload(ctx context.Context, model string) error {
+	if model == "" {
+		model = r.Model
+	}
+	if _, err := exec.LookPath("lms"); err != nil {
+		return nil // lms CLI unavailable — nothing to do, not an error
+	}
+	args := []string{"unload"}
+	if model != "" {
+		args = append(args, model)
+	} else {
+		args = append(args, "--all")
+	}
+	cmd := executil.CommandContext(ctx, "lms", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("lmstudio: lms unload: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // lmStudioChatRequest is the OpenAI-compatible payload for /v1/chat/completions.

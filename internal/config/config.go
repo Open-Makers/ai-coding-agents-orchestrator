@@ -25,6 +25,23 @@ type Config struct {
 	Project        ProjectConfig          `yaml:"project,omitempty"`
 	Agents         map[string]AgentConfig `yaml:"agents,omitempty"`
 	PromptLanguage string                 `yaml:"prompt_language,omitempty"`
+	ModelMemory    ModelMemoryConfig      `yaml:"model_memory,omitempty"`
+}
+
+// ModelMemoryConfig bounds how much memory local models may use. The two modes
+// are mutually exclusive (a toggle):
+//   - Mode "ram": the user sets MaxRAMGB and the orchestrator derives a
+//     per-agent maximum context size from the agent's model (see
+//     runner.ContextTokensForRAM).
+//   - Mode "context": the user sets MaxContextTokens directly and it is applied
+//     verbatim to every agent.
+//
+// Mode "" (empty) disables the feature, leaving per-agent context limits as
+// configured elsewhere.
+type ModelMemoryConfig struct {
+	Mode             string  `yaml:"mode,omitempty"`               // "ram" | "context" | ""
+	MaxRAMGB         float64 `yaml:"max_ram_gb,omitempty"`         // used when Mode == "ram"
+	MaxContextTokens int     `yaml:"max_context_tokens,omitempty"` // used when Mode == "context"
 }
 
 // SupportedLanguages lists languages available for LLM prompt responses.
@@ -361,6 +378,16 @@ func merge(dst *Config, src Config) {
 	mergeMemory(&dst.Project.Context.Memory, src.Project.Context.Memory)
 	if src.PromptLanguage != "" {
 		dst.PromptLanguage = src.PromptLanguage
+	}
+
+	if src.ModelMemory.Mode != "" {
+		dst.ModelMemory.Mode = src.ModelMemory.Mode
+	}
+	if src.ModelMemory.MaxRAMGB > 0 {
+		dst.ModelMemory.MaxRAMGB = src.ModelMemory.MaxRAMGB
+	}
+	if src.ModelMemory.MaxContextTokens > 0 {
+		dst.ModelMemory.MaxContextTokens = src.ModelMemory.MaxContextTokens
 	}
 
 	if src.Agents != nil {

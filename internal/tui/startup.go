@@ -29,6 +29,7 @@ const (
 	startupPhaseOpenProject                     // project directory browser
 	startupPhaseProjectList                     // recent projects + browse
 	startupPhaseHistory                         // completed-task history
+	startupPhaseModelMemory                     // global RAM/context limit setting
 )
 
 // startupModel is a standalone Bubble Tea model shown when the orchestrator is
@@ -41,6 +42,7 @@ type startupModel struct {
 	taskHistory   TaskHistoryModel
 	home          HomeModel
 	setup         SetupModel
+	modelMemory   modelMemoryModel
 	moduleInput   textinput.Model
 	picker        PickerModel
 	editor        EditorModel
@@ -99,6 +101,8 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.projectPicker, _ = m.projectPicker.Update(msg)
 		case startupPhaseHistory:
 			m.taskHistory.SetSize(wm.Width, wm.Height)
+		case startupPhaseModelMemory:
+			m.modelMemory, _ = m.modelMemory.Update(msg)
 		}
 	}
 
@@ -183,6 +187,12 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.setup = setup
 				m.phase = startupPhaseSetup
 				return m, m.setup.Init()
+			case homeActionModelMemory:
+				mm := newModelMemoryModel(m.cfg)
+				mm.width, mm.height = m.width, m.height
+				m.modelMemory = mm
+				m.phase = startupPhaseModelMemory
+				return m, m.modelMemory.Init()
 			}
 		}
 		var cmd tea.Cmd
@@ -344,6 +354,24 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.taskHistory, cmd = m.taskHistory.Update(msg)
 		return m, cmd
+
+	case startupPhaseModelMemory:
+		switch msg := msg.(type) {
+		case modelMemoryDoneMsg:
+			_ = config.SaveGlobal(config.Config{ModelMemory: msg.cfg})
+			m.cfg.ModelMemory = msg.cfg
+			m.phase = startupPhaseHome
+			m.home = NewHomeModel(m.cfg, m.root)
+			m.home.width, m.home.height = m.width, m.height
+			m.home.syncViewport()
+			return m, m.home.Init()
+		case modelMemoryCancelledMsg:
+			m.phase = startupPhaseHome
+			return m, m.home.Init()
+		}
+		var cmd tea.Cmd
+		m.modelMemory, cmd = m.modelMemory.Update(msg)
+		return m, cmd
 	}
 
 	return m, nil
@@ -406,6 +434,8 @@ func (m startupModel) View() string {
 		return m.dirBrowser.View()
 	case startupPhaseHistory:
 		return m.taskHistory.View()
+	case startupPhaseModelMemory:
+		return m.modelMemory.View()
 	default:
 		return m.home.View()
 	}

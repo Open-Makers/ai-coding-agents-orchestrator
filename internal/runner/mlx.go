@@ -241,6 +241,17 @@ func (r *MLXRunner) baseURL() string {
 	return mlxBaseURL
 }
 
+// Unload is a best-effort no-op for oMLX: the server exposes no documented
+// model-eviction endpoint, so the orchestrator cannot force an unload. It is
+// defined to satisfy the Unloader interface; callers treat a nil return as
+// "unload attempted". oMLX typically holds a single model and swaps it on the
+// next request anyway.
+func (r *MLXRunner) Unload(ctx context.Context, model string) error {
+	_ = ctx
+	_ = model
+	return nil
+}
+
 // mlxChatRequest is the OpenAI-compatible payload for POST /v1/chat/completions.
 type mlxChatRequest struct {
 	Model     string           `json:"model"`

@@ -345,3 +345,23 @@ project:
 		t.Error("expected scoped_context_coder_fix to be true after load")
 	}
 }
+
+func TestMerge_ModelMemory(t *testing.T) {
+	dst := DefaultConfig()
+	merge(&dst, Config{ModelMemory: ModelMemoryConfig{Mode: "ram", MaxRAMGB: 16}})
+	if dst.ModelMemory.Mode != "ram" || dst.ModelMemory.MaxRAMGB != 16 {
+		t.Fatalf("ram merge: got %+v", dst.ModelMemory)
+	}
+
+	// A later layer switching to context mode overrides the mode and value;
+	// the empty-mode case must NOT clobber an existing setting.
+	merge(&dst, Config{ModelMemory: ModelMemoryConfig{Mode: "context", MaxContextTokens: 8192}})
+	if dst.ModelMemory.Mode != "context" || dst.ModelMemory.MaxContextTokens != 8192 {
+		t.Fatalf("context merge: got %+v", dst.ModelMemory)
+	}
+
+	merge(&dst, Config{}) // empty layer
+	if dst.ModelMemory.Mode != "context" {
+		t.Errorf("empty layer should not clear mode, got %q", dst.ModelMemory.Mode)
+	}
+}

@@ -21,6 +21,9 @@ func New(cfg config.AgentConfig, skillLoader *skills.Loader, promptLanguage stri
 
 	case "ollama":
 		base = NewOllamaRunner(cfg.Model)
+		if cfg.MaxContextTokens > 0 {
+			base.(*OllamaRunner).NumCtx = cfg.MaxContextTokens
+		}
 
 	case "mlx":
 		base = NewMLXRunner(cfg.Model)
@@ -45,8 +48,11 @@ func New(cfg config.AgentConfig, skillLoader *skills.Loader, promptLanguage stri
 		base = &SkillRunner{inner: base, loader: skillLoader}
 	}
 
-	// Wrap cloud runners with token budget enforcement when configured.
-	if cfg.MaxContextTokens > 0 && !IsLocalRunner(cfg) {
+	// Wrap with token budget enforcement when configured. For cloud runners
+	// this caps cost; for local runners it trims the prompt to the bounded
+	// context window so an over-long prompt is not silently truncated (or
+	// rejected) by the model after it loads.
+	if cfg.MaxContextTokens > 0 {
 		base = &BudgetRunner{inner: base, maxTokens: cfg.MaxContextTokens}
 	}
 

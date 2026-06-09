@@ -63,6 +63,12 @@ type TaskRunner struct {
 	taskBeadID string
 	runID      string
 
+	// loadedModel tracks the local model currently resident in memory so the
+	// previous one can be unloaded when the pipeline switches agent/model,
+	// freeing RAM before the next model loads. loadedSet guards the zero value.
+	loadedModel config.AgentConfig
+	loadedSet   bool
+
 	// humanCh carries replies from the user during negotiation.
 	humanCh chan string
 
@@ -997,6 +1003,8 @@ func (tr *TaskRunner) runAgent(ctx context.Context, role bus.AgentRole, payload 
 		tr.codingStarted = time.Now()
 	}
 
+	tr.unloadOnSwitch(ctx, role)
+
 	tr.log.Info("starting agent", slog.String("role", string(role)))
 	msg := bus.NewMessage(bus.RoleSystem, role, bus.MsgRequest, payload)
 	tr.b.Publish(msg)
@@ -1027,6 +1035,40 @@ func (tr *TaskRunner) runAgent(ctx context.Context, role bus.AgentRole, payload 
 	tr.b.Publish(bus.NewMessage(role, "", bus.MsgResponse,
 		fmt.Sprintf("%s complete", role)))
 	return resp, nil
+}
+
+// unloadOnSwitch frees the memory held by the previously-active local model
+// when the pipeline moves to an agent whose runner/model differs. This prevents
+// multiple local models from accumulating in RAM across pipeline stages. Cloud
+// runners hold no local RAM, so switching to/from them only triggers an unload
+// of a prior *local* model. Best-effort: unload failures are logged, not fatal.
+func (tr *TaskRunner) unloadOnSwitch(ctx context.Context, role bus.AgentRole) {
+	next := tr.cfg.Agents[string(role)]
+	if tr.loadedSet && shouldUnloadPrev(tr.loadedModel, next) {
+		prev := tr.loadedModel
+		tr.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent,
+			fmt.Sprintf("unloading %s model %q to free RAM before %s",
+				prev.Runner, prev.Model, role)))
+		if err := runner.UnloadFor(ctx, prev); err != nil {
+			tr.log.Warn("model unload failed",
+				slog.String("runner", prev.Runner),
+				slog.String("model", prev.Model),
+				slog.String("error", err.Error()),
+			)
+		}
+	}
+	tr.loadedModel = next
+	tr.loadedSet = true
+}
+
+// shouldUnloadPrev reports whether the previously-loaded model should be
+// unloaded before switching to next: only when it is a local model (cloud holds
+// no local RAM) and the runner or model actually changed.
+func shouldUnloadPrev(prev, next config.AgentConfig) bool {
+	if !runner.IsLocalRunner(prev) {
+		return false
+	}
+	return prev.Runner != next.Runner || prev.Model != next.Model
 }
 
 func (tr *TaskRunner) setState(s PipelineState) {

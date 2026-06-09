@@ -417,6 +417,11 @@ func resolveUIMode(requested string) string {
 }
 
 func buildAgents(b *bus.Bus, cfg config.Config, ws artifacts.Workspace, root string) map[bus.AgentRole]agent.Agent {
+	// Derive per-agent context limits from the global RAM/context setting before
+	// constructing runners so both the runners and the review agents pick up the
+	// computed MaxContextTokens.
+	runner.ApplyModelMemory(&cfg)
+
 	skillLoader := skills.New("")
 	var allSkills []string
 	for _, ac := range cfg.Agents {
