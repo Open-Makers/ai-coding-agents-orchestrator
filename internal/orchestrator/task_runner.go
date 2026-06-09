@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/agent"
@@ -52,6 +53,16 @@ type TaskRunner struct {
 	niceToHave     map[string][]string
 	agentDurations map[bus.AgentRole]time.Duration
 	codingStarted  time.Time
+
+	// startedAt marks the start of the whole run, for the total wall-clock stat.
+	startedAt time.Time
+
+	// Run statistics surfaced in the final summary.
+	statsMu     sync.Mutex
+	usageByRole map[bus.AgentRole]bus.AgentUsage // token usage accumulated from the bus
+	touched     map[string]bool                  // distinct files written by agents
+	subTaskCount int                             // sub-tasks in the approved plan
+	fixRounds    int                             // quality back-and-forth rounds
 
 	// projCtx is the project context collected at the start of a run; reused
 	// for scoped-context shadow measurement during review. Best-effort.
@@ -98,6 +109,8 @@ func NewTaskRunner(
 		state:          PipelineIdle,
 		niceToHave:     make(map[string][]string),
 		agentDurations: make(map[bus.AgentRole]time.Duration),
+		usageByRole:    make(map[bus.AgentRole]bus.AgentUsage),
+		touched:        make(map[string]bool),
 		humanCh:        make(chan string, 1),
 		gateCh:         make(chan struct{}, 1),
 		regenerateCh:   make(chan struct{}, 1),
@@ -188,6 +201,10 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 	promptsDir := filepath.Join(tr.root, artifacts.DirName, appprompts.PromptsDirName)
 	appprompts.SetOverrideDir(promptsDir)
 	appprompts.SetUserLanguage("English")
+
+	tr.startedAt = time.Now()
+	stopUsage := tr.startUsageAccumulator()
+	defer stopUsage()
 
 	var (
 		curStage = "init"
@@ -319,6 +336,7 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 
 	// ── Phase 3+4: Implement + Quality Review loop ──
 	curStage = "execute"
+	tr.subTaskCount = len(subTasks)
 	tr.bootstrapForTDD(spec)
 
 	if err := tr.implementAndReview(ctx, spec, ctxFragment, subTasks, subBeadIDs); err != nil {
@@ -328,7 +346,7 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 	curStage = "finalise"
 	saveNiceToHaveFile(tr.ws, tr.niceToHave, tr.log)
 	tr.setState(PipelineDone)
-	emitSummary(tr.b, tr.ws, tr.agents, tr.niceToHave, tr.agentDurations, tr.codingStarted)
+	emitSummary(tr.b, tr.ws, tr.agents, tr.niceToHave, tr.collectStats())
 	tr.finaliseMemory(ctx, spec)
 	tr.closeBead(ctx, beadID, "Completed by orchestrator")
 	// The run is complete; drop the resume sidecars so it isn't offered later.
@@ -391,6 +409,7 @@ func (tr *TaskRunner) implementAndReview(ctx context.Context, spec agent.TaskSpe
 		}
 
 		tr.event(fmt.Sprintf("PM verdict: %d issue(s) to fix (review scope: %s)", len(verdict.SubTasks), verdict.ReviewScope))
+		tr.fixRounds++
 
 		// Create new beads for the fix tasks.
 		tasks = verdict.SubTasks
@@ -846,7 +865,9 @@ func (tr *TaskRunner) implementBead(ctx context.Context, ctxFragment, title, des
 	if err != nil {
 		return nil, fmt.Errorf("coder: %w", err)
 	}
-	return extractCoderResult(resp).Files, nil
+	files := extractCoderResult(resp).Files
+	tr.markTouched(files)
+	return files, nil
 }
 
 // globalBuildFix runs one project-wide build → test → fix loop after all stages
@@ -932,6 +953,7 @@ func (tr *TaskRunner) globalBuildFix(ctx context.Context, ctxFragment string, fi
 		}
 		fixResult := extractCoderResult(fixResp)
 		files = mergeFileList(files, fixResult.Files)
+		tr.markTouched(fixResult.Files)
 	}
 }
 
@@ -1254,6 +1276,79 @@ func (tr *TaskRunner) closeBead(ctx context.Context, id, reason string) {
 
 func (tr *TaskRunner) event(msg string) {
 	tr.b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent, msg))
+}
+
+// startUsageAccumulator subscribes to the bus and accumulates per-agent token
+// usage into usageByRole until the returned stop function is called. Used to
+// surface token statistics in the final summary. Best-effort: a few in-flight
+// messages may be missed at shutdown, which is acceptable for a summary.
+func (tr *TaskRunner) startUsageAccumulator() func() {
+	sub := tr.b.Subscribe()
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case msg, ok := <-sub:
+				if !ok {
+					return
+				}
+				if msg.Type != bus.MsgUsage {
+					continue
+				}
+				u, ok := msg.Payload.(bus.AgentUsage)
+				if !ok {
+					continue
+				}
+				tr.statsMu.Lock()
+				cur := tr.usageByRole[msg.From]
+				cur.InputTokens += u.InputTokens
+				cur.OutputTokens += u.OutputTokens
+				if u.Estimated {
+					cur.Estimated = true
+				}
+				tr.usageByRole[msg.From] = cur
+				tr.statsMu.Unlock()
+			}
+		}
+	}()
+	return func() { close(stop) }
+}
+
+// markTouched records files written by agents so the summary can report how
+// many distinct files the run produced or changed.
+func (tr *TaskRunner) markTouched(files []string) {
+	if len(files) == 0 {
+		return
+	}
+	tr.statsMu.Lock()
+	for _, f := range files {
+		if f != "" {
+			tr.touched[f] = true
+		}
+	}
+	tr.statsMu.Unlock()
+}
+
+// collectStats snapshots the accumulated run statistics for the final summary.
+func (tr *TaskRunner) collectStats() summaryStats {
+	tr.statsMu.Lock()
+	defer tr.statsMu.Unlock()
+	usage := make(map[bus.AgentRole]bus.AgentUsage, len(tr.usageByRole))
+	for k, v := range tr.usageByRole {
+		usage[k] = v
+	}
+	return summaryStats{
+		startedAt:      tr.startedAt,
+		codingStarted:  tr.codingStarted,
+		agentDurations: tr.agentDurations,
+		usageByRole:    usage,
+		subTasks:       tr.subTaskCount,
+		fixRounds:      tr.fixRounds,
+		filesTouched:   len(tr.touched),
+		niceToHave:     totalNiceToHave(tr.niceToHave),
+	}
 }
 
 // notify sends a best-effort external alert (cmux) for a noteworthy pipeline

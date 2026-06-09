@@ -87,12 +87,29 @@ func saveNiceToHaveFile(ws artifacts.Workspace, items map[string][]string, log *
 	}
 }
 
+// summaryStats holds the run statistics rendered at the end of the pipeline.
+type summaryStats struct {
+	startedAt      time.Time
+	codingStarted  time.Time
+	agentDurations map[bus.AgentRole]time.Duration
+	usageByRole    map[bus.AgentRole]bus.AgentUsage
+	subTasks       int
+	fixRounds      int
+	filesTouched   int
+	niceToHave     int
+}
+
 // emitSummary builds and emits a final pipeline summary.
-func emitSummary(b *bus.Bus, ws artifacts.Workspace, agents map[bus.AgentRole]agent.Agent, niceToHave map[string][]string, agentDurations map[bus.AgentRole]time.Duration, codingStarted time.Time) {
+func emitSummary(b *bus.Bus, ws artifacts.Workspace, agents map[bus.AgentRole]agent.Agent, niceToHave map[string][]string, stats summaryStats) {
 	var sb strings.Builder
 	sb.WriteString("\n════════════════════════════════════════\n")
 	sb.WriteString("  PIPELINE COMPLETE — SUMMARY\n")
 	sb.WriteString("════════════════════════════════════════\n\n")
+
+	// Headline: total time taken for the whole run.
+	if !stats.startedAt.IsZero() {
+		_, _ = fmt.Fprintf(&sb, "  ⏱ Total time: %s\n\n", formatDuration(time.Since(stats.startedAt)))
+	}
 
 	phases := []struct {
 		name string
@@ -116,6 +133,20 @@ func emitSummary(b *bus.Bus, ws artifacts.Workspace, agents map[bus.AgentRole]ag
 		}
 	}
 
+	// Run statistics.
+	sb.WriteString("\n  Stats:\n")
+	if stats.subTasks > 0 {
+		_, _ = fmt.Fprintf(&sb, "    %-16s %d\n", "Sub-tasks", stats.subTasks)
+	}
+	if stats.filesTouched > 0 {
+		_, _ = fmt.Fprintf(&sb, "    %-16s %d\n", "Files written", stats.filesTouched)
+	}
+	_, _ = fmt.Fprintf(&sb, "    %-16s %d\n", "Quality rounds", stats.fixRounds)
+	_, _ = fmt.Fprintf(&sb, "    %-16s %d\n", "Nice-to-have", stats.niceToHave)
+
+	// Token usage.
+	emitTokenStats(&sb, stats.usageByRole)
+
 	total := totalNiceToHave(niceToHave)
 	if total > 0 {
 		_, _ = fmt.Fprintf(&sb, "\n  📋 %d nice-to-have suggestions saved to %s\n", total, artifacts.NiceToHaveFile)
@@ -135,14 +166,14 @@ func emitSummary(b *bus.Bus, ws artifacts.Workspace, agents map[bus.AgentRole]ag
 		}
 	}
 
-	if len(agentDurations) > 0 {
+	if len(stats.agentDurations) > 0 {
 		sb.WriteString("\n  Agent Durations:\n")
 		totalDuration := time.Duration(0)
 		for _, role := range []bus.AgentRole{
 			bus.RolePM, bus.RoleCoder, bus.RoleQA,
 			bus.RoleUXReviewer, bus.RoleSecurity,
 		} {
-			d, ok := agentDurations[role]
+			d, ok := stats.agentDurations[role]
 			if !ok || d == 0 {
 				continue
 			}
@@ -152,8 +183,8 @@ func emitSummary(b *bus.Bus, ws artifacts.Workspace, agents map[bus.AgentRole]ag
 		if totalDuration > 0 {
 			_, _ = fmt.Fprintf(&sb, "    %-12s %s\n", "TOTAL", formatDuration(totalDuration))
 		}
-		if !codingStarted.IsZero() {
-			wallClock := time.Since(codingStarted)
+		if !stats.codingStarted.IsZero() {
+			wallClock := time.Since(stats.codingStarted)
 			_, _ = fmt.Fprintf(&sb, "    %-12s %s (since first coder handoff)\n", "WALL CLOCK", formatDuration(wallClock))
 		}
 	}
@@ -167,6 +198,54 @@ func emitSummary(b *bus.Bus, ws artifacts.Workspace, agents map[bus.AgentRole]ag
 		bus.TokenPayload{Text: summary, Done: false}))
 	b.Publish(bus.NewMessage(bus.RoleSystem, "", bus.MsgEvent,
 		bus.TokenPayload{Text: "", Done: true}))
+}
+
+// emitTokenStats renders per-agent and total token usage when any was recorded.
+func emitTokenStats(sb *strings.Builder, usage map[bus.AgentRole]bus.AgentUsage) {
+	if len(usage) == 0 {
+		return
+	}
+	var totalIn, totalOut int
+	estimated := false
+	sb.WriteString("\n  Token Usage:\n")
+	for _, role := range []bus.AgentRole{
+		bus.RolePM, bus.RoleCoder, bus.RoleQA,
+		bus.RoleUXReviewer, bus.RoleSecurity,
+	} {
+		u, ok := usage[role]
+		if !ok || (u.InputTokens == 0 && u.OutputTokens == 0) {
+			continue
+		}
+		totalIn += u.InputTokens
+		totalOut += u.OutputTokens
+		if u.Estimated {
+			estimated = true
+		}
+		_, _ = fmt.Fprintf(sb, "    %-12s in %s · out %s\n",
+			string(role), formatTokenCount(u.InputTokens), formatTokenCount(u.OutputTokens))
+	}
+	if totalIn == 0 && totalOut == 0 {
+		return
+	}
+	note := ""
+	if estimated {
+		note = " (≈ estimated)"
+	}
+	_, _ = fmt.Fprintf(sb, "    %-12s in %s · out %s · total %s%s\n",
+		"TOTAL", formatTokenCount(totalIn), formatTokenCount(totalOut),
+		formatTokenCount(totalIn+totalOut), note)
+}
+
+// formatTokenCount renders a token count compactly (e.g. 12.3k, 1.2M).
+func formatTokenCount(n int) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // extractCoderResult safely extracts CoderResult from a message.
