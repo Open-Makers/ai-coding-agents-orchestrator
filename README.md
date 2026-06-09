@@ -9,19 +9,15 @@
   <a href="https://github.com/Open-Makers/ai-coding-agents-orchestrator/blob/main/LICENSE"><img src="https://img.shields.io/github/license/Open-Makers/ai-coding-agents-orchestrator?style=flat-square" alt="MIT License"></a>
   <a href="https://github.com/Open-Makers/ai-coding-agents-orchestrator/releases"><img src="https://img.shields.io/github/v/release/Open-Makers/ai-coding-agents-orchestrator?style=flat-square" alt="Latest Release"></a>
   <a href="https://github.com/Open-Makers/ai-coding-agents-orchestrator/actions"><img src="https://img.shields.io/github/actions/workflow/status/Open-Makers/ai-coding-agents-orchestrator/ci.yml?style=flat-square&label=CI" alt="CI"></a>
-  <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.25+">
+  <img src="https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go 1.26+">
   <a href="https://goreportcard.com/report/github.com/Open-Makers/ai-coding-agents-orchestrator"><img src="https://goreportcard.com/badge/github.com/Open-Makers/ai-coding-agents-orchestrator?style=flat-square" alt="Go Report Card"></a>
-  <img src="https://img.shields.io/badge/status-experimental-orange?style=flat-square" alt="Experimental">
 </p>
-
-> **⚠️ Status: Experimental**
-> This project is in early development — it works, but it has only been tested on the author's machine. Expect rough edges, breaking changes, and missing documentation. Contributions and feedback are welcome!
 
 ---
 
 ## What Is It?
 
-AI Coding Agents Orchestrator is an open-source CLI tool written in Go that drives a team of specialized AI agents through a structured software development pipeline. Instead of chatting with a single LLM, you define requirements in Markdown and the orchestrator runs a full **PM → Plan → Code → Test → Review → Fix → Done** workflow — with human approval gates at every critical step.
+AI Coding Agents Orchestrator is an open-source CLI tool written in Go that drives a team of specialized AI agents through a structured software development pipeline. Instead of chatting with a single LLM, you describe a task in plain text and the orchestrator runs a full **Negotiate → Decompose → Implement (TDD) → Quality Review → Fix → Done** workflow — with human approval gates before any code is written.
 
 It ships with a rich terminal UI (built with [Bubble Tea](https://github.com/charmbracelet/bubbletea)) and also supports a headless plain-text mode for CI or scripting.
 
@@ -30,24 +26,21 @@ It ships with a rich terminal UI (built with [Bubble Tea](https://github.com/cha
 Manual back-and-forth with AI coding assistants is slow, error-prone, and hard to reproduce. This orchestrator:
 
 - **Structures the work** into well-defined phases so nothing gets skipped.
-- **Runs multiple specialist agents** (PM, Planner, Coder, Tester, Reviewer, UX Reviewer, Security Auditor, QA) — each with its own prompt, skills, and model.
+- **Runs multiple specialist agents** (PM, Coder, QA, UX Reviewer, Security Auditor) — each with its own prompt, skills, and model.
 - **Iterates automatically** — if tests fail or reviewers find must-fix issues, the Coder fixes and the entire quality gate restarts.
-- **Keeps humans in the loop** — approval gates let you review and revise architecture, plan, and prompts before any code is written.
+- **Keeps humans in the loop** — approval gates let you review and revise the task spec and execution plan before any code is written.
 
 ## Features
 
-### 8 Specialized Agents
+### 5 Specialized Agents
 
 | Agent | Role |
 |-------|------|
-| **PM** | Produces product vision and MoSCoW prioritization |
-| **Planner** | Generates architecture, implementation plan, and stage prompts |
-| **Coder** | Writes and fixes code, runs builds |
-| **Tester** | Generates tests and executes test suites |
-| **Reviewer** | Code review with must-fix / nice-to-have classification |
+| **PM** | Negotiates the task spec, decomposes work into sub-tasks, and arbitrates review feedback |
+| **Coder** | Writes and fixes code, runs builds and tests |
+| **QA** | Generates tests (TDD), verifies test runs, and reviews code quality, logic, and corner cases |
 | **UX Reviewer** | UX/UI heuristic review |
 | **Security** | Security audit and vulnerability scanning |
-| **QA** | Corner-case and edge-case analysis |
 
 ### Interactive TUI
 
@@ -70,11 +63,11 @@ See [`doc/tui.md`](doc/tui.md) for a full reference of every panel, status indic
 </p>
 
 <p align="center">
-  <img src="doc/images/tester.png" width="700" alt="Tester Agent">
+  <img src="doc/images/tester.png" width="700" alt="QA — Test Generation">
 </p>
 
 <p align="center">
-  <img src="doc/images/reviewer.png" width="700" alt="Reviewer Agent">
+  <img src="doc/images/reviewer.png" width="700" alt="QA — Code Review">
 </p>
 
 <p align="center">
@@ -89,10 +82,18 @@ See [`doc/tui.md`](doc/tui.md) for a full reference of every panel, status indic
 
 Supports multiple runners out of the box:
 
+**CLI runners** (drive an external coding-agent CLI):
+
 - **OpenCode** (default)
 - **Claude CLI**
-- **Ollama** (local models)
-- **Codex**
+- **Codex CLI**
+- **GitHub Copilot CLI**
+
+**Local model backends** (talk to a local OpenAI-compatible server):
+
+- **Ollama** (`http://127.0.0.1:11434`)
+- **LM Studio** (`http://127.0.0.1:1234`)
+- **MLX** (Apple Silicon, `http://127.0.0.1:8000`)
 
 Each agent can use a different runner and model — configure globally (`~/.orchestrator/config.yaml`) or per-project (`.orchestrator/project.yaml`).
 
@@ -134,32 +135,43 @@ orchestrator memory add "Use sqlc for typed queries"
 
 ### Human Approval Gates
 
-The pipeline pauses for your approval at key stages:
-- Product vision & MoSCoW prioritization
-- Architecture
-- Implementation plan
-- Stage prompts
+The pipeline pauses for your approval before any code is written:
+- **Task spec** — title, scope, and description negotiated with the PM
+- **Execution plan** — the decomposition into sub-tasks (`task_plan.md`), pre-reviewed by Security and QA
 
 You can review, revise via chat, and approve — all from the TUI.
 
+### Pipeline Algorithm
+
+The orchestrator runs a deterministic, resumable pipeline:
+
+1. **Collect context** — scans the project (greenfield vs. brownfield, language, toolchain) and recalls relevant fragments from project memory.
+2. **Negotiate** *(human gate)* — the **PM** turns your task input into a structured `TaskSpec`; you approve or re-negotiate via chat.
+3. **Decompose** *(human gate)* — the **PM** splits the spec into ordered sub-tasks. The plan is pre-reviewed by **Security** and **QA**, then rendered to `task_plan.md` for your approval. Sub-tasks are tracked as **beads** (durable issues) so the run is resumable.
+4. **Implement + Quality Review loop** *(autonomous, capped iterations)*:
+   - **Phase A — Tests first (TDD):** **QA** writes tests for *all* sub-tasks before any implementation.
+   - **Phase B — Implement:** the **Coder** implements every sub-task in bead order.
+   - **Phase C — Global build/test/fix:** one project-wide build → test → fix loop after all sub-tasks are implemented.
+   - **Phase D — Quality review:** **QA**, **UX Reviewer**, and **Security** review the result. The **PM** arbitrates all feedback in a single verdict; must-fix issues become new beads and the loop restarts. Nice-to-haves are deferred.
+5. **Finalize** — emits a summary and `nice_to_have.md`, updates project memory, closes the beads, and clears resume state.
+
+Any interrupted run can be resumed: the orchestrator reloads the spec and sub-task plan, re-establishes build/test state, and finishes the remaining open beads without re-negotiating.
+
 ### Quality Gate Loop
 
-After coding, the pipeline runs all quality checks in a single loop:
-**Test → Code Review → UX Review → Security Audit → QA**
+After implementation, the pipeline runs all quality checks:
+**QA Review → UX Review → Security Audit → PM Arbitration**
 
-If any phase finds must-fix issues, the Coder fixes them and the loop restarts from the beginning. The cycle continues until all checks pass (or a configurable max attempt limit is reached).
-
-### Multi-Language Prompts
-
-LLM responses can be generated in 20+ languages — configure `prompt_language` in your config.
+If the PM classifies any feedback as must-fix, those items become new sub-tasks (beads), the Coder fixes them, and the loop restarts from implementation. The cycle continues until all checks pass (or a configurable max iteration limit is reached).
 
 ## Quick Start
 
 ### Prerequisites
 
-- **Go 1.25+**
+- **Go 1.26+**
 - **Git** repository to work in
-- At least one LLM backend configured (e.g. OpenCode, Claude CLI, or Ollama)
+- At least one LLM backend installed and configured — a CLI runner (**OpenCode**, **Claude CLI**, **Codex CLI**, or **GitHub Copilot CLI**) or a local model server (**Ollama**, **LM Studio**, or **MLX**)
+- **[bd (beads)](https://github.com/gastownhall/beads)** — recommended. Sub-tasks are tracked as durable beads, which makes runs resumable across sessions. Without `bd` the pipeline still runs, but multi-session resume of a bead-backed task is unavailable.
 
 ### Install
 
@@ -181,17 +193,23 @@ go install github.com/Open-Makers/ai-coding-agents-orchestrator/cmd/orchestrator
 
 ### Run
 
-**Interactive mode** — launch the TUI, pick requirements from a file browser:
+**Interactive mode** — launch the TUI and start a new task or pick a requirements file:
 
 ```bash
 cd /path/to/your/project
 orchestrator
 ```
 
-**CLI mode** — pass requirements directly:
+**CLI mode** — run a unified task (feature, bugfix, refactor, or greenfield) from a description:
 
 ```bash
-orchestrator run --requirements path/to/requirements.md
+orchestrator task --description "Add JWT auth to the login endpoint"
+```
+
+**From a file:**
+
+```bash
+orchestrator task --from-file task.md
 ```
 
 **On a feature branch:**
@@ -202,13 +220,12 @@ orchestrator run --requirements requirements.md --branch feat/my-feature
 
 ### What Happens Next
 
-1. The **PM agent** analyzes your requirements and produces a product vision + MoSCoW plan.
-2. You **review and approve** (or revise via chat).
-3. The **Planner** generates architecture, an implementation plan, and per-stage prompts.
-4. You **review and approve** each artifact.
-5. For each stage, the **Coder** writes code, **Tester** generates and runs tests, then all reviewers run.
-6. If issues are found, the Coder fixes and the quality gate restarts.
-7. A final summary with all artifacts lands in `.orchestrator/`.
+1. The orchestrator **collects project context** and recalls relevant fragments from project memory.
+2. The **PM** negotiates a structured task spec from your input — you **review and approve** (or revise via chat).
+3. The **PM** decomposes the spec into ordered sub-tasks (beads); **Security** and **QA** pre-review the plan — you **review and approve** `task_plan.md`.
+4. **QA** writes tests for all sub-tasks (TDD), the **Coder** implements them, then a global build/test/fix loop runs.
+5. **QA**, **UX Reviewer**, and **Security** review the result; the **PM** arbitrates. Must-fix issues become new sub-tasks and the loop restarts.
+6. A final summary and all artifacts land in `.orchestrator/`.
 
 
 ## License

@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-06-09
+
+### Added
+- **Phased pipeline with pre-approval plan review**: the PM decomposes a task
+  into ordered sub-tasks (beads) and the plan is pre-reviewed by Security and
+  QA before the human approval gate (`task_plan.md`).
+- **Run timing and stats** in the final summary.
+- **Additional LLM backends**: GitHub Copilot CLI, LM Studio, and MLX (Apple
+  Silicon) runners join OpenCode, Claude CLI, Codex CLI, and Ollama.
+
+### Changed
+- **Docs**: README updated to reflect the current 5-agent roster (PM, Coder,
+  QA, UX Reviewer, Security), the full runner list, the actual
+  Negotiate → Decompose → Implement (TDD) → Quality Review → Fix pipeline, and
+  updated prerequisites (Go 1.26+, Git, an LLM backend, and `bd`/beads for
+  resumable runs). Removed the experimental/early-stage notice.
+
+### Removed
+- **Multi-language prompts**: agent responses are now always generated in
+  English; the `prompt_language` directive is a no-op.
+
 ## [0.7.0] - 2026-06-05
 
 ### Added
