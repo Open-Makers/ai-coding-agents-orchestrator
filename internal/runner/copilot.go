@@ -238,14 +238,21 @@ func (r CopilotRunner) startStreamingProcess(ctx context.Context, prompt, system
 	return cmd, stdout, stderr, nil
 }
 
-// streamCopilotOutput forwards stdout chunks as Token deltas while the CLI runs,
-// then emits a final Done token with token usage estimated from the I/O text.
-// The Copilot CLI does not report token counts on stdout, so usage is always
-// estimated heuristically.
+// streamCopilotOutput forwards stdout chunks as Token deltas while the CLI runs.
+// The Copilot CLI does not report token counts on stdout, so usage is estimated
+// heuristically. To make long coder/QA runs show progress, the estimate is
+// emitted *incrementally*: the input estimate up front, an output-token delta
+// for each streamed chunk, and a final reconciling delta on the Done token —
+// instead of a single lump sum only when the run finishes.
 func streamCopilotOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr *bytes.Buffer, fullInput string, ch chan<- Token) {
 	defer close(ch)
 
+	// Emit the input-token estimate immediately so the agent's usage starts
+	// climbing the moment it begins, before any output arrives.
+	ch <- Token{Usage: &TokenUsage{InputTokens: tokenutil.EstimateTokens(fullInput), Estimated: true}}
+
 	var collected strings.Builder
+	emittedOut := 0
 	buf := make([]byte, 4096)
 	for {
 		n, readErr := stdout.Read(buf)
@@ -253,6 +260,10 @@ func streamCopilotOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr *bytes.Buff
 			chunk := string(buf[:n])
 			collected.WriteString(chunk)
 			ch <- Token{Text: chunk}
+			if d := tokenutil.EstimateTokens(chunk); d > 0 {
+				emittedOut += d
+				ch <- Token{Usage: &TokenUsage{OutputTokens: d, Estimated: true}}
+			}
 		}
 		if readErr != nil {
 			break
@@ -274,10 +285,12 @@ func streamCopilotOutput(cmd *exec.Cmd, stdout io.ReadCloser, stderr *bytes.Buff
 		return
 	}
 
-	usage := TokenUsage{
-		InputTokens:  tokenutil.EstimateTokens(fullInput),
-		OutputTokens: tokenutil.EstimateTokens(output),
-		Estimated:    true,
+	// Reconcile the streamed per-chunk estimates against a single whole-output
+	// estimate (per-chunk truncation can drift slightly) so the final total is
+	// stable, then finish with the Done token.
+	done := Token{Done: true}
+	if correction := tokenutil.EstimateTokens(output) - emittedOut; correction != 0 {
+		done.Usage = &TokenUsage{OutputTokens: correction, Estimated: true}
 	}
-	ch <- Token{Done: true, Usage: &usage}
+	ch <- done
 }

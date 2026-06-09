@@ -1,8 +1,14 @@
 package runner
 
 import (
+	"bytes"
+	"io"
+	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/tokenutil"
 )
 
 func TestParseCopilotModelsOutput_TableFormat(t *testing.T) {
@@ -82,5 +88,46 @@ func TestCopilotFallbackModels_ConfiguredNotInListIsPrepended(t *testing.T) {
 	}
 	if len(got) != len(CopilotModels)+1 {
 		t.Fatalf("len = %d, want %d", len(got), len(CopilotModels)+1)
+	}
+}
+
+func TestStreamCopilotOutput_IncrementalUsage(t *testing.T) {
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("cannot start helper process: %v", err)
+	}
+	const input = "system prompt and user content"
+	const output = "hello world, here is some streamed answer text"
+	body := io.NopCloser(strings.NewReader(output))
+
+	ch := make(chan Token, 128)
+	go streamCopilotOutput(cmd, body, &bytes.Buffer{}, input, ch)
+
+	var inputTotal, outputTotal int
+	var sawLiveOutput, done bool
+	for tok := range ch {
+		if tok.Usage != nil {
+			inputTotal += tok.Usage.InputTokens
+			outputTotal += tok.Usage.OutputTokens
+			if tok.Usage.OutputTokens > 0 && !tok.Done {
+				sawLiveOutput = true
+			}
+		}
+		if tok.Done {
+			done = true
+		}
+	}
+
+	if !done {
+		t.Fatal("stream never produced a Done token")
+	}
+	if !sawLiveOutput {
+		t.Error("expected at least one intermediate (live) output-usage token")
+	}
+	if want := tokenutil.EstimateTokens(input); inputTotal != want {
+		t.Errorf("input tokens: got %d, want %d", inputTotal, want)
+	}
+	if want := tokenutil.EstimateTokens(output); outputTotal != want {
+		t.Errorf("output tokens (sum of deltas + reconciliation): got %d, want %d", outputTotal, want)
 	}
 }

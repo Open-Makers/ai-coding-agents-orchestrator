@@ -115,3 +115,55 @@ func TestBaseAgent_CollectStream_EmitsUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestBaseAgent_CollectStream_EmitsIncrementalUsage(t *testing.T) {
+	b := bus.New()
+	sub := b.Subscribe()
+
+	a := NewBase(bus.RoleCoder, b)
+	in := make(chan runner.Token, 8)
+	in <- runner.Token{Usage: &runner.TokenUsage{InputTokens: 100, Estimated: true}}
+	in <- runner.Token{Text: "partial "}
+	in <- runner.Token{Usage: &runner.TokenUsage{OutputTokens: 10, Estimated: true}}
+	in <- runner.Token{Text: "answer"}
+	in <- runner.Token{Usage: &runner.TokenUsage{OutputTokens: 5, Estimated: true}}
+	in <- runner.Token{Done: true, Usage: &runner.TokenUsage{OutputTokens: 2, Estimated: true}}
+	close(in)
+
+	out, err := a.collectStream(in)
+	if err != nil {
+		t.Fatalf("collectStream error: %v", err)
+	}
+	if out != "partial answer" {
+		t.Errorf("collected text: got %q", out)
+	}
+
+	// Drain the bus (buffered, non-blocking publish) and tally usage events.
+	var totalOut, usageEvents int
+	deadline := time.After(time.Second)
+drain:
+	for {
+		select {
+		case msg := <-sub:
+			if msg.Type == bus.MsgUsage {
+				if u, ok := msg.Payload.(bus.AgentUsage); ok {
+					totalOut += u.OutputTokens
+					usageEvents++
+				}
+			}
+		case <-deadline:
+			break drain
+		default:
+			break drain
+		}
+	}
+
+	// One input + three output usage events must have been forwarded live,
+	// not collapsed into a single final event.
+	if usageEvents < 4 {
+		t.Errorf("expected >=4 usage events (1 input + 3 output), got %d", usageEvents)
+	}
+	if totalOut != 17 {
+		t.Errorf("summed output usage: got %d, want 17", totalOut)
+	}
+}

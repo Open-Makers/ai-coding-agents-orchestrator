@@ -57,10 +57,14 @@ func (a *BaseAgent) collectStream(ch <-chan runner.Token) (string, error) {
 		if tok.Error != nil {
 			return sb.String(), tok.Error
 		}
+		// Usage may arrive on intermediate tokens (live incremental estimates
+		// from streaming CLI runners) as well as on the final Done token. Emit
+		// it whenever present so the monitor's per-agent token counters climb
+		// live during long runs instead of only updating when the agent ends.
+		if tok.Usage != nil {
+			a.emitUsage(*tok.Usage)
+		}
 		if tok.Done {
-			if tok.Usage != nil {
-				a.emitUsage(*tok.Usage)
-			}
 			break
 		}
 		// Reasoning is shown live but never accumulated into the result, so a
