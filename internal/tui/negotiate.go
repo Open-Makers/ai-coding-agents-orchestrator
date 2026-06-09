@@ -205,7 +205,7 @@ func (m *NegotiateModel) refreshViewport() {
 			sb.WriteString(renderWrappedChatLine("you › ", line.content, userStyle, lipgloss.NewStyle(), m.vp.Width))
 			sb.WriteString("\n\n")
 		case "assistant":
-			sb.WriteString(renderWrappedChatLine("pm › ", line.content, dimStyle, pmStyle, m.vp.Width))
+			sb.WriteString(renderMarkdownChatLine("pm › ", line.content, dimStyle, pmStyle, m.vp.Width))
 			sb.WriteString("\n\n")
 		}
 	}

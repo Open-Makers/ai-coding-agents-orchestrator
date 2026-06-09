@@ -255,7 +255,7 @@ func (m *ChatModel) refreshViewport() {
 			sb.WriteString(renderWrappedChatLine("you › ", line.content, userStyle, lipgloss.NewStyle(), m.vp.Width))
 			sb.WriteString("\n\n")
 		case "assistant":
-			sb.WriteString(renderWrappedChatLine("ai › ", line.content, dimStyle, assistantStyle, m.vp.Width))
+			sb.WriteString(renderMarkdownChatLine("ai › ", line.content, dimStyle, assistantStyle, m.vp.Width))
 			sb.WriteString("\n\n")
 		}
 	}
