@@ -53,31 +53,6 @@ type ModelMemoryConfig struct {
 	MaxContextTokens int     `yaml:"max_context_tokens,omitempty"` // used when Mode == "context"
 }
 
-// SupportedLanguages lists languages available for LLM prompt responses.
-var SupportedLanguages = []string{
-	"English",
-	"Polish",
-	"German",
-	"French",
-	"Spanish",
-	"Portuguese",
-	"Italian",
-	"Dutch",
-	"Ukrainian",
-	"Czech",
-	"Swedish",
-	"Norwegian",
-	"Danish",
-	"Finnish",
-	"Turkish",
-	"Japanese",
-	"Korean",
-	"Chinese",
-	"Hindi",
-	"Arabic",
-	"Russian",
-}
-
 // SupportedProgrammingLanguages lists selectable project programming languages.
 var SupportedProgrammingLanguages = []string{
 	"go",

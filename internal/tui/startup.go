@@ -171,7 +171,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if projectCfg.Agents != nil {
 					projectOverrides = projectCfg.Agents
 				}
-				setup := NewSetupModelWithOverrides(currentRunner, currentModel, m.cfg.PromptLanguage, m.cfg.Project.Language, m.cfg.Project.Name, projectOverrides)
+				setup := NewSetupModelWithOverrides(currentRunner, currentModel, m.cfg.Project.Language, m.cfg.Project.Name, projectOverrides)
 				setup.root = m.root
 				setup.width, setup.height = m.width, m.height
 				setup.syncViewport()
@@ -180,7 +180,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.setup.Init()
 			case homeActionGlobalSettings:
 				currentRunner, currentModel := detectDefaultRunnerModel(m.cfg.Agents)
-				setup := NewSetupModel(currentRunner, currentModel, m.cfg.PromptLanguage, m.cfg.Agents)
+				setup := NewSetupModel(currentRunner, currentModel, m.cfg.Agents)
 				setup.globalOnly = true
 				setup.width, setup.height = m.width, m.height
 				setup.syncViewport()
@@ -203,7 +203,7 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg := msg.(type) {
 		case setupDoneMsg:
 			if m.setup.globalOnly {
-				// Global Settings: save provider+model+language for all agents.
+				// Global Settings: save provider+model for all agents.
 				globalAgents := make(map[string]config.AgentConfig)
 				for role, ac := range m.cfg.Agents {
 					ac.Runner = msg.provider
@@ -213,10 +213,8 @@ func (m startupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					globalAgents[role] = ac
 				}
 				_ = config.SaveGlobal(config.Config{
-					Agents:         globalAgents,
-					PromptLanguage: msg.promptLanguage,
+					Agents: globalAgents,
 				})
-				m.cfg.PromptLanguage = msg.promptLanguage
 
 				// Update runtime config with global values.
 				for role := range m.cfg.Agents {

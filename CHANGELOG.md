@@ -23,8 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resumable runs). Removed the experimental/early-stage notice.
 
 ### Removed
-- **Multi-language prompts**: agent responses are now always generated in
-  English; the `prompt_language` directive is a no-op.
+- **Response Language selector**: agent responses have always been generated
+  exclusively in English, so the non-functional "Response Language" picker was
+  removed from the Global Settings and Project Setup screens (and the matching
+  `RESP LANG` row from the home panel). The `prompt_language` config key is now
+  fully ignored.
 
 ## [0.7.0] - 2026-06-05
 

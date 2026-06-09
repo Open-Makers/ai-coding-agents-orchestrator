@@ -59,7 +59,7 @@ func newModelSetupModel(root string, cfg config.Config) modelSetupModel {
 		projectOverrides = projectCfg.Agents
 	}
 	setup := NewSetupModelWithOverrides(currentRunner, currentModel,
-		cfg.PromptLanguage, cfg.Project.Language, cfg.Project.Name, projectOverrides)
+		cfg.Project.Language, cfg.Project.Name, projectOverrides)
 	setup.root = root
 	return modelSetupModel{setup: setup, root: root, cfg: cfg, width: 80, height: 24}
 }

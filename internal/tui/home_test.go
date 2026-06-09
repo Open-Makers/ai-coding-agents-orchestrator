@@ -26,7 +26,6 @@ func newTestConfig() config.Config {
 			"ux_reviewer": {Runner: "codex", Model: "gpt-5.4"},
 			"security":    {Runner: "claude", Model: "opus"},
 		},
-		PromptLanguage: "Polish",
 	}
 }
 
@@ -41,9 +40,6 @@ func TestNewHomeModel_CachesProjectInfo(t *testing.T) {
 	}
 	if m.cachedLanguage != "go" {
 		t.Errorf("expected language 'go', got %q", m.cachedLanguage)
-	}
-	if m.cachedPromptLang != "Polish" {
-		t.Errorf("expected prompt language 'Polish', got %q", m.cachedPromptLang)
 	}
 }
 
@@ -114,21 +110,6 @@ func TestHomeModel_ShortenProjectPath_SimilarPrefix(t *testing.T) {
 	result := m.shortenProjectPath(sibling)
 	if result != sibling {
 		t.Errorf("sibling path should not be shortened, got %q", result)
-	}
-}
-
-func TestNewHomeModel_DefaultPromptLanguage(t *testing.T) {
-	root := t.TempDir()
-	cfg := config.Config{
-		Agents: map[string]config.AgentConfig{
-			"pm": {Runner: "codex", Model: "gpt-5"},
-		},
-	}
-
-	m := NewHomeModel(cfg, root)
-
-	if m.cachedPromptLang != "English" {
-		t.Errorf("expected default prompt language 'English', got %q", m.cachedPromptLang)
 	}
 }
 

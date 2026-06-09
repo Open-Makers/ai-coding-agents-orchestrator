@@ -79,7 +79,6 @@ type setupSection int
 const (
 	sectionProvider setupSection = iota
 	sectionModel
-	sectionLanguage
 	sectionProgLang
 	sectionAgentSetup
 	sectionProjectName
@@ -97,7 +96,6 @@ type agentSetupOverride struct {
 type setupDoneMsg struct {
 	provider       string
 	model          string
-	promptLanguage string
 	progLanguage   string
 	projectName    string
 	agentOverrides map[string]agentSetupOverride
@@ -181,10 +179,6 @@ type SetupModel struct {
 	lmstudioModels        []string
 	lmstudioModelsLoading bool
 
-	// Language selection.
-	languages   []string
-	languageIdx int
-
 	// Programming language selection.
 	progLanguages []string
 	progLangIdx   int
@@ -227,7 +221,7 @@ type SetupModel struct {
 
 var setupAgentRoles = []string{"pm", "coder", "coder_fixer", "qa", "ux_reviewer", "security"}
 
-func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfgs map[string]config.AgentConfig) SetupModel {
+func NewSetupModel(currentRunner, currentModel string, agentCfgs map[string]config.AgentConfig) SetupModel {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 	sp.Style = lipgloss.NewStyle().Foreground(homePalette.accent)
@@ -236,17 +230,6 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 	nameInput.CharLimit = 80
 	nameInput.Prompt = ""
 	nameInput.Placeholder = "(unnamed)"
-
-	languages := config.SupportedLanguages
-	langIdx := 0
-	if currentLanguage != "" {
-		for i, lang := range languages {
-			if lang == currentLanguage {
-				langIdx = i
-				break
-			}
-		}
-	}
 
 	m := SetupModel{
 		models:                runner.OpenCodeAvailableModels,
@@ -264,8 +247,6 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 		lmstudioModels:        nil,
 		lmstudioModelsLoading: true,
 		providerAvailability:  make(map[providerKind]error),
-		languages:             languages,
-		languageIdx:           langIdx,
 		progLanguages:         config.SupportedProgrammingLanguages,
 		projectNameInput:      nameInput,
 		agentRoles:            setupAgentRoles,
@@ -304,8 +285,8 @@ func NewSetupModel(currentRunner, currentModel, currentLanguage string, agentCfg
 // NewSetupModelWithOverrides creates a setup model pre-populated with explicit
 // project-level overrides (from project.yaml), instead of detecting them from
 // merged config.
-func NewSetupModelWithOverrides(currentRunner, currentModel, currentLanguage, currentProgLang, currentProjectName string, projectAgents map[string]config.AgentConfig) SetupModel {
-	m := NewSetupModel(currentRunner, currentModel, currentLanguage, nil)
+func NewSetupModelWithOverrides(currentRunner, currentModel, currentProgLang, currentProjectName string, projectAgents map[string]config.AgentConfig) SetupModel {
+	m := NewSetupModel(currentRunner, currentModel, nil)
 	m.projectNameInput.SetValue(currentProjectName)
 	m.projectNameInput.CursorEnd()
 	// Pre-select programming language.
@@ -602,8 +583,6 @@ func (m SetupModel) handleKey(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 		return m.handleProviderKeys(msg)
 	case sectionModel:
 		return m.handleModelKeys(msg)
-	case sectionLanguage:
-		return m.handleLanguageKeys(msg)
 	case sectionProgLang:
 		return m.handleProgLangKeys(msg)
 	case sectionAgentSetup:
@@ -638,8 +617,11 @@ func (m SetupModel) handleProjectNameKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) 
 		m.ensureSectionVisible()
 		return m, nil
 	case "shift+tab", "up":
-		m.section = sectionLanguage
-		m.languageIdx = len(m.languages) - 1
+		m.section = sectionModel
+		models := m.activeModels()
+		if m.modelIdx >= len(models) {
+			m.modelIdx = max(0, len(models)-1)
+		}
 		m.ensureSectionVisible()
 		return m, nil
 	case "enter":
@@ -665,8 +647,11 @@ func (m SetupModel) handleProviderKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 			m.section = sectionProgLang
 			m.progLangIdx = len(m.progLanguages) - 1
 		} else {
-			m.section = sectionLanguage
-			m.languageIdx = len(m.languages) - 1
+			m.section = sectionModel
+			models := m.activeModels()
+			if m.modelIdx >= len(models) {
+				m.modelIdx = max(0, len(models)-1)
+			}
 		}
 		m.ensureSectionVisible()
 	}
@@ -695,48 +680,14 @@ func (m SetupModel) handleModelKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
 			m.pingErr = nil
 		}
 	case "tab":
-		m.section = sectionLanguage
+		if !m.globalOnly {
+			m.section = sectionProjectName
+		} else {
+			m.section = sectionProvider
+		}
 		m.ensureSectionVisible()
 	case "shift+tab":
 		m.section = sectionProvider
-		m.ensureSectionVisible()
-	case "enter":
-		return m.startValidation()
-	}
-	return m, nil
-}
-
-func (m SetupModel) handleLanguageKeys(msg tea.KeyMsg) (SetupModel, tea.Cmd) {
-	switch msg.String() {
-	case "up", "k":
-		if m.languageIdx > 0 {
-			m.languageIdx--
-		} else {
-			m.section = sectionModel
-			models := m.activeModels()
-			if m.modelIdx >= len(models) {
-				m.modelIdx = max(0, len(models)-1)
-			}
-			m.ensureSectionVisible()
-		}
-	case "down", "j":
-		if m.languageIdx < len(m.languages)-1 {
-			m.languageIdx++
-		}
-	case "tab":
-		if !m.globalOnly {
-			m.section = sectionProjectName
-			m.ensureSectionVisible()
-		} else {
-			m.section = sectionProvider
-			m.ensureSectionVisible()
-		}
-	case "shift+tab":
-		m.section = sectionModel
-		models := m.activeModels()
-		if m.modelIdx >= len(models) {
-			m.modelIdx = max(0, len(models)-1)
-		}
 		m.ensureSectionVisible()
 	case "enter":
 		return m.startValidation()
@@ -884,10 +835,6 @@ func (m SetupModel) startValidation() (SetupModel, tea.Cmd) {
 	for k, v := range m.agentOverrides {
 		overrides[k] = v
 	}
-	promptLang := "English"
-	if m.languageIdx < len(m.languages) {
-		promptLang = m.languages[m.languageIdx]
-	}
 	progLang := ""
 	if m.progLangIdx < len(m.progLanguages) {
 		progLang = m.progLanguages[m.progLangIdx]
@@ -896,7 +843,6 @@ func (m SetupModel) startValidation() (SetupModel, tea.Cmd) {
 	pending := setupDoneMsg{
 		provider:       provider,
 		model:          model,
-		promptLanguage: promptLang,
 		progLanguage:   progLang,
 		projectName:    strings.TrimSpace(m.projectNameInput.Value()),
 		agentOverrides: overrides,
@@ -999,7 +945,6 @@ func (m SetupModel) renderContent() string {
 
 	providerCard := m.renderProviderCard(contentWidth, labelStyle, focusLabelStyle, activeItemStyle, inactiveItemStyle)
 	modelCard := m.renderModelCard(contentWidth, labelStyle, focusLabelStyle, activeItemStyle, inactiveItemStyle, dimStyle)
-	languageCard := m.renderLanguageCard(contentWidth, labelStyle, focusLabelStyle, activeItemStyle, inactiveItemStyle, dimStyle)
 
 	globalHeader := sectionHeaderStyle.Render("  ◆ Global Defaults") + dimStyle.Render("  — saved to ~/.orchestrator/config.yaml")
 
@@ -1022,8 +967,6 @@ func (m SetupModel) renderContent() string {
 			providerCard,
 			sep,
 			modelCard,
-			sep,
-			languageCard,
 		}
 	} else {
 		parts = []string{
@@ -1032,8 +975,6 @@ func (m SetupModel) renderContent() string {
 			providerCard,
 			sep,
 			modelCard,
-			sep,
-			languageCard,
 		}
 	}
 
@@ -1169,29 +1110,6 @@ func (m SetupModel) renderModelCard(contentWidth int, label, focusLabel, active,
 		Padding(0, 1).
 		Width(contentWidth - 2).
 		Render(strings.Join(modelLines, "\n"))
-}
-
-func (m SetupModel) renderLanguageCard(contentWidth int, label, focusLabel, active, inactive, dim lipgloss.Style) string {
-	p := homePalette
-	isFocused := m.section == sectionLanguage
-
-	var lines []string
-	langLabel := label.Render(" Response Language")
-	if isFocused {
-		langLabel = focusLabel.Render(" ◆ Response Language")
-	}
-	lines = append(lines, langLabel)
-	lines = append(lines, dim.Render("  Language for LLM responses (code stays in English):"))
-	lines = append(lines, "")
-
-	lines = append(lines, renderWindowedList(m.languages, m.languageIdx, isFocused, active, inactive, dim)...)
-
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(p.border).
-		Padding(0, 1).
-		Width(contentWidth - 2).
-		Render(strings.Join(lines, "\n"))
 }
 
 func (m SetupModel) renderProjectNameCard(contentWidth int, label, focusLabel, dim lipgloss.Style) string {
@@ -1520,22 +1438,10 @@ func (m SetupModel) renderFooter(style lipgloss.Style) string {
 		hints = []string{
 			hint("↑↓", "navigate"),
 			hint("Enter", "save"),
-			hint("Tab", "language"),
+			hint("Tab", "next"),
 			hint("Ctrl+S", "save"),
 			hint("Esc", "back"),
 		}
-	case m.section == sectionLanguage:
-		hints = []string{
-			hint("↑↓", "navigate"),
-			hint("Enter", "save"),
-		}
-		if !m.globalOnly {
-			hints = append(hints, hint("Tab", "agents"))
-		}
-		hints = append(hints,
-			hint("Ctrl+S", "save"),
-			hint("Esc", "back"),
-		)
 	case m.section == sectionAgentSetup:
 		hints = []string{
 			hint("↑↓", "navigate"),
@@ -1710,8 +1616,6 @@ func (m *SetupModel) ensureSectionVisible() {
 		}
 	case sectionModel:
 		targetLine = findLineContaining(lines, "Default Model")
-	case sectionLanguage:
-		targetLine = findLineContaining(lines, "Response Language")
 	}
 
 	if targetLine < 0 {

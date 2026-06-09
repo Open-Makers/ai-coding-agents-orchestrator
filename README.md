@@ -71,6 +71,10 @@ See [`doc/tui.md`](doc/tui.md) for a full reference of every panel, status indic
 </p>
 
 <p align="center">
+  <img src="doc/images/security.png" width="700" alt="Security Agent reviewing the plan">
+</p>
+
+<p align="center">
   <img src="doc/images/summary.png" width="700" alt="Pipeline Summary">
 </p>
 
@@ -144,6 +148,18 @@ The pipeline pauses for your approval before any code is written:
 - **Execution plan** — the decomposition into sub-tasks (`task_plan.md`), pre-reviewed by Security and QA
 
 You can review, revise via chat, and approve — all from the TUI.
+
+<p align="center">
+  <img src="doc/images/task-spec.png" width="700" alt="Task Spec approval gate">
+</p>
+
+<p align="center">
+  <img src="doc/images/task-plan.png" width="700" alt="Task Plan approval gate — sub-tasks with dependencies">
+</p>
+
+<p align="center">
+  <img src="doc/images/plan-review.png" width="700" alt="Plan reviewer notes — pre-approval Security & QA review">
+</p>
 
 ### Pipeline Algorithm
 

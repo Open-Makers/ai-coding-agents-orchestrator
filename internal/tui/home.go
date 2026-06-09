@@ -84,7 +84,6 @@ type HomeModel struct {
 	cachedModel      string
 	cachedProject    string
 	cachedLanguage   string
-	cachedPromptLang string
 	cachedBranch     string
 	cachedOverrides  []agentOverride
 
@@ -125,11 +124,6 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 	language := resolveLanguageFromRoot(root, cfg)
 	gitBranch := GitBranch(root)
 	overrides := resolveOverrides(cfg.Agents, runnerName, modelName)
-
-	promptLang := cfg.PromptLanguage
-	if promptLang == "" {
-		promptLang = "English"
-	}
 
 	items := []homeMenuItem{
 		{icon: "▶", label: "New Task", desc: "Start a PM chat to define a task — attach existing .md with Ctrl+F", action: homeActionNewTask, key: "Enter"},
@@ -190,7 +184,6 @@ func NewHomeModel(cfg config.Config, root string) HomeModel {
 		cachedModel:      modelName,
 		cachedProject:    projectName,
 		cachedLanguage:   language,
-		cachedPromptLang: promptLang,
 		cachedBranch:     gitBranch,
 		cachedOverrides:  overrides,
 		recentProjects:   LoadRecentProjects(),
@@ -634,7 +627,6 @@ func (m HomeModel) renderInfoCard(contentWidth int) string {
 	}
 	row("RUNNER", m.cachedRunner+dimStyle.Render(" (global)"), valueStyle)
 	row("MODEL", m.cachedModel+dimStyle.Render(" (global)"), valueStyle)
-	row("RESP LANG", m.cachedPromptLang+dimStyle.Render(" (global)"), valueStyle)
 
 	if len(m.cachedOverrides) > 0 {
 		lines = append(lines, "")
