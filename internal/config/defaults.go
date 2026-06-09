@@ -24,7 +24,7 @@ func DefaultConfig() Config {
 		},
 		Agents: map[string]AgentConfig{
 			"pm": {
-				Skills: []string{"agentic-engineering"},
+				Skills: []string{"project-manager", "agentic-engineering"},
 			},
 			"coder": {
 				Skills: []string{"golang-patterns", "coding-standards", "verification-loop"},

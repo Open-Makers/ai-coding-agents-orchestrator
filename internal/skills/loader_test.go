@@ -2,6 +2,8 @@ package skills
 
 import (
 	"testing"
+
+	"github.com/Open-Makers/ai-coding-agents-orchestrator/internal/config"
 )
 
 func TestLoader_LoadEmbeddedSkill(t *testing.T) {
@@ -22,6 +24,27 @@ func TestLoader_LoadEmbeddedSkill(t *testing.T) {
 	}
 	if content2 != content {
 		t.Errorf("cache hit returned different content")
+	}
+}
+
+func TestLoader_DefaultAgentSkillsAllLoad(t *testing.T) {
+	l := New("")
+	// Every skill referenced by the default per-agent layout must be embedded
+	// and loadable, including the project-manager skill for the PM agent.
+	for _, ac := range config.DefaultConfig().Agents {
+		for _, name := range ac.Skills {
+			content, err := l.Load(name)
+			if err != nil {
+				t.Errorf("default skill %q failed to load: %v", name, err)
+			}
+			if content == "" {
+				t.Errorf("default skill %q is empty", name)
+			}
+		}
+	}
+
+	if _, err := l.Load("project-manager"); err != nil {
+		t.Errorf("project-manager skill must exist: %v", err)
 	}
 }
 
