@@ -41,8 +41,9 @@ const (
 	RunLogFile               = "runlog.txt"
 	TaskSpecFile             = "task_spec.json"
 	TaskPlanFile             = "task_plan.md"
-	RunStateFile             = "run_state.json" // links the active run to its top-level bead (resume)
-	SubTasksFile             = "sub_tasks.json" // structured decomposition for resume
+	ResearchReportFile       = "research_report.md" // brown/fix Phase 0 codebase analysis
+	RunStateFile             = "run_state.json"     // links the active run to its top-level bead (resume)
+	SubTasksFile             = "sub_tasks.json"     // structured decomposition for resume
 )
 
 // Workspace represents the .orchestrator directory inside a repo root.

@@ -605,10 +605,20 @@ type TaskSpec struct {
 	Title              string   `json:"title"`
 	Description        string   `json:"description"`
 	Scope              string   `json:"scope"`
+	Pipeline           string   `json:"pipeline,omitempty"`
 	AcceptanceCriteria []string `json:"acceptance_criteria"`
 	Constraints        []string `json:"constraints,omitempty"`
 	FilesToModify      []string `json:"files_to_modify,omitempty"`
 }
+
+// Pipeline identifiers PM selects to route a task through the right execution
+// strategy. Empty defaults to PipelineGreen after resolution.
+const (
+	PipelineGreen = "green" // build new from scratch (TDD)
+	PipelineBrown = "brown" // existing codebase: research → discuss → TDD
+	PipelineFix   = "fix"   // bug/repair: research → short coder-first fix loop
+	PipelineRnD   = "rnd"   // proof-of-concept: short PM↔user loop, quick PoC
+)
 
 // ExecutionPlan is the PM's strategy for implementing a task.
 type ExecutionPlan struct {
@@ -716,6 +726,81 @@ func (a *PMAgent) NegotiateTask(ctx context.Context, input, projectCtx string, h
 			return TaskSpec{}, ctx.Err()
 		}
 	}
+}
+
+// RnDAction is one PM turn in the R&D pipeline: a message to relay to the user,
+// an optional quick coder task (proof-of-concept), and whether PM proposes
+// ending the experiment because the concept is confirmed.
+type RnDAction struct {
+	Message    string
+	CoderTask  string
+	ProposeEnd bool
+}
+
+// RnDTurn runs a single PM turn for the R&D pipeline over the running
+// conversation. It returns the parsed action and the raw assistant output so
+// the caller can append it to the history.
+func (a *PMAgent) RnDTurn(ctx context.Context, projectCtx string, messages []runner.ConvMessage) (RnDAction, string, error) {
+	systemPrompt := fmt.Sprintf(prompts.MustLoad("pm-rnd"), projectCtx)
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     messages,
+	})
+	if err != nil {
+		return RnDAction{}, "", fmt.Errorf("pm rnd: runner: %w", err)
+	}
+	output, err := a.collectStream(ch)
+	if err != nil {
+		return RnDAction{}, "", fmt.Errorf("pm rnd: stream: %w", err)
+	}
+	return parseRnDAction(output), output, nil
+}
+
+// parseRnDAction extracts the coder directive and end-proposal marker from a PM
+// R&D turn, leaving the rest as the user-facing message.
+func parseRnDAction(output string) RnDAction {
+	act := RnDAction{}
+	rest := output
+
+	if stripped, found := stripMarker(rest, "===PROPOSE_END==="); found {
+		act.ProposeEnd = true
+		rest = stripped
+	}
+	if inner, remainder, ok := cutBlock(rest, "===CODER===", "===END==="); ok {
+		act.CoderTask = strings.TrimSpace(inner)
+		rest = remainder
+	}
+	act.Message = strings.TrimSpace(rest)
+	return act
+}
+
+// stripMarker removes the first case-insensitive occurrence of marker from s.
+func stripMarker(s, marker string) (string, bool) {
+	i := strings.Index(strings.ToUpper(s), strings.ToUpper(marker))
+	if i < 0 {
+		return s, false
+	}
+	return s[:i] + s[i+len(marker):], true
+}
+
+// cutBlock extracts the text between the first case-insensitive start and end
+// markers, returning the inner text and s with the whole block removed. When
+// start is present but end is missing, the rest of s after start is taken.
+func cutBlock(s, start, end string) (inner, remainder string, ok bool) {
+	up := strings.ToUpper(s)
+	i := strings.Index(up, strings.ToUpper(start))
+	if i < 0 {
+		return "", s, false
+	}
+	innerStart := i + len(start)
+	j := strings.Index(up[innerStart:], strings.ToUpper(end))
+	if j < 0 {
+		return s[innerStart:], s[:i], true
+	}
+	innerEnd := innerStart + j
+	return s[innerStart:innerEnd], s[:i] + s[innerEnd+len(end):], true
 }
 
 // taskSpecCacheDir is the workspace subdirectory holding cached negotiations.
@@ -1076,6 +1161,10 @@ func parseTaskSpec(output string) (TaskSpec, bool) {
 		case strings.HasPrefix(upper, "SCOPE:"):
 			scope := strings.TrimSpace(strings.TrimPrefix(trimmed, trimmed[:6]))
 			spec.Scope = strings.ToLower(scope)
+			currentField = ""
+		case strings.HasPrefix(upper, "PIPELINE:"):
+			pipeline := strings.TrimSpace(strings.TrimPrefix(trimmed, trimmed[:9]))
+			spec.Pipeline = strings.ToLower(pipeline)
 			currentField = ""
 		case strings.HasPrefix(upper, "DESCRIPTION:"):
 			currentField = "description"

@@ -26,6 +26,7 @@ type CodexRunner struct {
 
 // CodexModels lists known Codex-compatible model names.
 var CodexModels = []string{
+	"gpt-5.5",
 	"gpt-5.4",
 	"gpt-5.4-mini",
 	"gpt-5.3-codex",
@@ -65,22 +66,30 @@ func readCodexConfigModel() string {
 	if err != nil {
 		return ""
 	}
+	return parseCodexConfigModel(string(data))
+}
 
-	for _, line := range strings.Split(string(data), "\n") {
+// parseCodexConfigModel extracts the top-level `model` value from a Codex
+// config.toml. It matches the exact `model` key only — sibling keys such as
+// `model_provider` or `model_reasoning_effort` must not be mistaken for the
+// model (that bug surfaced foreign values like "omlx" in the Codex model list).
+func parseCodexConfigModel(data string) string {
+	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
-		// Match top-level: model = "value" (stop at first section header).
+		// Stop at the first section header — only the top-level table counts.
 		if strings.HasPrefix(line, "[") {
 			break
 		}
-		if strings.HasPrefix(line, "model") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				val := strings.TrimSpace(parts[1])
-				val = strings.Trim(val, `"'`)
-				if val != "" {
-					return val
-				}
-			}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		if strings.TrimSpace(parts[0]) != "model" {
+			continue
+		}
+		val := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+		if val != "" {
+			return val
 		}
 	}
 	return ""

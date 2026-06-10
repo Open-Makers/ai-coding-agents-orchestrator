@@ -36,6 +36,7 @@ End the conversation by outputting the TaskSpec in this EXACT format:
 ===TASKSPEC===
 TITLE: (short descriptive title)
 SCOPE: (one of: greenfield, feature, bugfix, refactor)
+PIPELINE: (one of: green, brown, fix, rnd)
 DESCRIPTION:
 (Detailed description of what needs to be done. Reference specific files, packages,
 and patterns from the project context when available.)
@@ -57,6 +58,33 @@ If the task is about changing existing runtime behavior, the TaskSpec should usu
 - **feature**: Adding new functionality to an existing codebase.
 - **bugfix**: Fixing broken behavior, errors, or regressions.
 - **refactor**: Restructuring code without changing external behavior.
+
+## Pipeline Classification
+
+Choose the execution pipeline that fits the task. This controls how the
+orchestrator runs the work:
+
+- **green**: Build something new from scratch (empty project or a self-contained
+  new component). Maps to a greenfield, test-first (TDD) build.
+- **brown**: Change/extend an EXISTING codebase. The orchestrator first reviews
+  the codebase against the requirements and discusses findings with the user,
+  then builds test-first. Use this for features/refactors on a project that
+  already has code.
+- **fix**: Repair a bug or broken behavior in an existing codebase. The
+  orchestrator reviews the code, then runs a short coder-first fix loop (fix →
+  make tests pass) with a focused QA + Security review.
+- **rnd**: Research / proof-of-concept. The user wants to explore or validate an
+  idea quickly ("spike", "PoC", "prototype", "let's try", "sprawdźmy",
+  "eksperyment", "na szybko"). No formal spec or full review — a short
+  conversation with quick throwaway PoCs.
+
+Guidance:
+- Empty repo / build-from-scratch → `green`.
+- Existing repo + new capability or restructure → `brown`.
+- Existing repo + fix/repair/błąd/napraw → `fix`.
+- Explicit experiment / proof-of-concept intent → `rnd`.
+If unsure on an existing codebase, prefer `brown`. Default `green` only for
+genuinely new-from-scratch work.
 
 ## Task Tracking (Beads)
 

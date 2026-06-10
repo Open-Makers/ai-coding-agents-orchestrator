@@ -395,7 +395,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					r, mdl := runnerModelForKey(m.agentConfigs, configKeyForState(s))
 					m.statusbar = m.statusbar.WithRunnerModel(r, mdl)
 				}
-				for _, ps := range []string{"negotiating", "pm", "planner", "coder", "coder_fixer", "qa_tests", "qa_review", "tester", "reviewer", "ux_reviewer", "security", "done"} {
+				for _, ps := range []string{"negotiating", "pm", "planner", "research", "coder", "poc", "coder_fixer", "qa_tests", "qa_review", "tester", "reviewer", "ux_reviewer", "security", "done"} {
 					if s == ps {
 						m.phase = s
 						m.statusbar = m.statusbar.WithState(s)
@@ -1521,7 +1521,7 @@ func stateToRole(state string) bus.AgentRole {
 	switch state {
 	case "pm", "negotiating":
 		return bus.RolePM
-	case "coder", "coder_fixer":
+	case "coder", "coder_fixer", "research", "poc":
 		return bus.RoleCoder
 	case "qa_tests", "qa_review":
 		return bus.RoleQA

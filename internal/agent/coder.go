@@ -44,6 +44,14 @@ type CoderResult struct {
 	Files []string
 }
 
+// CoderResearchPayload requests a read-only codebase review for the brown and
+// fix pipelines. The coder analyses existing code against the requirements and
+// returns prose findings; it writes no files.
+type CoderResearchPayload struct {
+	Requirements   string
+	ProjectContext string
+}
+
 // BuildFixStuckError indicates that the build/test fix loop is repeating the
 // same failure and was aborted to avoid an infinite cycle.
 type BuildFixStuckError struct {
@@ -187,6 +195,56 @@ func (a *CoderAgent) Run(ctx context.Context, msg bus.Message) (bus.Message, err
 	a.Bus.Publish(bus.NewMessage(bus.RoleCoder, "", bus.MsgEvent, "EventFilesWritten"))
 
 	return bus.NewMessage(bus.RoleCoder, "", bus.MsgResponse, CoderResult{Files: written}), nil
+}
+
+// Research performs a read-only review of the existing codebase against the
+// user's requirements and returns the coder's analysis as text. It writes no
+// files; it is used as Phase 0 of the brown and fix pipelines.
+func (a *CoderAgent) Research(ctx context.Context, p CoderResearchPayload) (string, error) {
+	systemPrompt := fmt.Sprintf(prompts.MustLoad("coder-research"), p.ProjectContext)
+
+	var sb strings.Builder
+	sb.WriteString("Requirements from the user:\n\n")
+	sb.WriteString(strings.TrimSpace(p.Requirements))
+	if src := a.buildSourceContext(a.collectExistingSourceFiles()); strings.TrimSpace(src) != "" {
+		sb.WriteString("\n\nExisting source code:\n\n")
+		sb.WriteString(src)
+	}
+
+	ch, err := a.runner.Complete(ctx, runner.CompletionRequest{
+		SystemPrompt: systemPrompt,
+		Skills:       a.skills,
+		Model:        a.model,
+		Messages:     []runner.ConvMessage{{Role: "user", Content: sb.String()}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("coder research: runner: %w", err)
+	}
+
+	var out strings.Builder
+	var usage runner.TokenUsage
+	for tok := range ch {
+		if tok.Error != nil {
+			return "", fmt.Errorf("coder research: %w", tok.Error)
+		}
+		if tok.Done {
+			if tok.Usage != nil {
+				usage = *tok.Usage
+			}
+			break
+		}
+		if tok.Reasoning != "" {
+			a.emitToken(tok.Reasoning, false)
+		}
+		if tok.Text == "" {
+			continue
+		}
+		a.emitToken(tok.Text, false)
+		out.WriteString(tok.Text)
+	}
+	a.emitUsage(usage)
+
+	return strings.TrimSpace(out.String()), nil
 }
 
 // isNoChangesDeclared reports whether the CHANGES section explicitly states

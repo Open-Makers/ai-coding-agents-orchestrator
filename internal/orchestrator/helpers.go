@@ -289,6 +289,53 @@ func formatDuration(d time.Duration) string {
 	}
 }
 
+// resolvePipeline returns the execution pipeline for a spec. PM normally sets
+// spec.Pipeline explicitly; when absent or invalid it is derived from the scope
+// and whether the project already has code, so older specs and PM omissions
+// still route sensibly. r&d is only ever selected explicitly by PM.
+func resolvePipeline(spec agent.TaskSpec, brownfield bool) string {
+	switch spec.Pipeline {
+	case agent.PipelineGreen, agent.PipelineBrown, agent.PipelineFix, agent.PipelineRnD:
+		return spec.Pipeline
+	}
+	switch strings.ToLower(spec.Scope) {
+	case "bugfix":
+		return agent.PipelineFix
+	case "greenfield":
+		if brownfield {
+			return agent.PipelineBrown
+		}
+		return agent.PipelineGreen
+	}
+	if brownfield {
+		return agent.PipelineBrown
+	}
+	return agent.PipelineGreen
+}
+
+// isAffirmative reports whether a human reply is a clear yes, used to confirm
+// PM's proposal to end the R&D loop. Recognises English and Polish wording.
+func isAffirmative(reply string) bool {
+	r := strings.ToLower(strings.TrimSpace(reply))
+	if r == "" {
+		return false
+	}
+	switch r {
+	case "y", "yes", "yep", "yeah", "ok", "okay", "sure", "tak", "zgoda", "akceptuję", "akceptuje":
+		return true
+	}
+	prefixes := []string{
+		"yes", "ok", "okay", "sure", "accept", "agreed", "sounds good", "go ahead",
+		"tak", "zgadzam", "akcept", "zgoda", "potwierdz",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(r, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // inferBrownfieldScope picks a non-greenfield scope by scanning the user's
 // task description for fix/refactor intent keywords. Defaults to "feature".
 // Recognises both English and Polish wording since the orchestrator is used

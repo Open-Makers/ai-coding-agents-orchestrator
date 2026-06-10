@@ -49,6 +49,27 @@ func TestNegotiate_CtrlCClearsInput(t *testing.T) {
 	// The conversation must stay open (no close message expected).
 }
 
+func TestNegotiate_EscWhileWaitingCloses(t *testing.T) {
+	m := NewNegotiate(nil, "")
+	m.SetSize(80, 24)
+	m.SetWaiting()
+
+	// A non-esc key is swallowed while the PM is thinking.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd != nil {
+		t.Errorf("expected non-esc key to be swallowed while waiting")
+	}
+
+	// Esc must still close the overlay so the user can interrupt and exit.
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected a command from Esc while waiting")
+	}
+	if _, ok := cmd().(NegotiateClosedMsg); !ok {
+		t.Errorf("Esc while waiting should emit NegotiateClosedMsg")
+	}
+}
+
 func TestNegotiate_ArrowKeysMoveCursor(t *testing.T) {
 	m := NewNegotiate(nil, "")
 	m.SetSize(80, 24)

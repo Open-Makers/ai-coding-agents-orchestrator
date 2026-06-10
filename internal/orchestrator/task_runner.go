@@ -39,6 +39,19 @@ const maxQAVerifyRounds = 2
 // maxArbitrateIterations caps the outer PM-arbitrate loop (review → fix → review).
 const maxArbitrateIterations = 3
 
+// maxFixIterations is the shorter arbitrate cap for the fix pipeline.
+const maxFixIterations = 2
+
+// execOpts tunes the implement+review loop per pipeline.
+//   - skipTDD: do not generate tests up front (coder-first; used by fix).
+//   - skipUX:  skip the UX review during quality review (used by fix).
+//   - maxIters: cap on the review→fix→review arbitration loop.
+type execOpts struct {
+	skipTDD  bool
+	skipUX   bool
+	maxIters int
+}
+
 // TaskRunner is the unified orchestrator that treats everything as a task.
 // All work flows through: negotiate → decompose → per-bead (QA tests → coder) →
 // quality review → PM arbitrate → done.
@@ -50,6 +63,7 @@ type TaskRunner struct {
 	root           string
 	log            *slog.Logger
 	state          PipelineState
+	pipeline       string // execution pipeline: green/brown/fix/rnd
 	niceToHave     map[string][]string
 	agentDurations map[bus.AgentRole]time.Duration
 	codingStarted  time.Time
@@ -58,11 +72,11 @@ type TaskRunner struct {
 	startedAt time.Time
 
 	// Run statistics surfaced in the final summary.
-	statsMu     sync.Mutex
-	usageByRole map[bus.AgentRole]bus.AgentUsage // token usage accumulated from the bus
-	touched     map[string]bool                  // distinct files written by agents
-	subTaskCount int                             // sub-tasks in the approved plan
-	fixRounds    int                             // quality back-and-forth rounds
+	statsMu      sync.Mutex
+	usageByRole  map[bus.AgentRole]bus.AgentUsage // token usage accumulated from the bus
+	touched      map[string]bool                  // distinct files written by agents
+	subTaskCount int                              // sub-tasks in the approved plan
+	fixRounds    int                              // quality back-and-forth rounds
 
 	// projCtx is the project context collected at the start of a run; reused
 	// for scoped-context shadow measurement during review. Best-effort.
@@ -250,6 +264,7 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 		tr.taskBeadID, tr.runID, beadID = st.TopBeadID, st.RunID, st.TopBeadID
 		subTasks, subBeadIDs = plan.Tasks, plan.IDByKey
 		memoryQuery = strings.TrimSpace(spec.Title + " " + spec.Description)
+		tr.pipeline = resolvePipeline(spec, projCtx.IsBrownfield)
 	}
 	tr.taskQuery = memoryQuery
 
@@ -274,6 +289,20 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 		if rc := tr.buildResumeContext(ctx); rc != "" {
 			ctxFragment += "\n\n" + rc
 		}
+
+		// Resume behaves like the brown pipeline: before continuing, the coder
+		// reviews the current codebase against the task and the user discusses
+		// the findings at an approval gate. This re-orients both the user and
+		// the agents on a task picked up later.
+		curStage = "research"
+		research, rerr := tr.runResearch(ctx, spec, ctxFragment)
+		if rerr != nil {
+			return fmt.Errorf("resume research: %w", rerr)
+		}
+		if research != "" {
+			ctxFragment += "\n\n" + research
+		}
+		curStage = "execute"
 	} else {
 		tr.memAppend("task-start", fmt.Sprintf("**Task input:**\n\n%s", strings.TrimSpace(taskInput)))
 
@@ -310,37 +339,82 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 			_ = removeWorkspaceFile(tr.ws, artifacts.TaskSpecFile)
 		}
 
+		tr.pipeline = resolvePipeline(spec, projCtx.IsBrownfield)
+		if projCtx.IsBrownfield && tr.pipeline == agent.PipelineGreen {
+			// Never scaffold from scratch on an existing codebase, even if PM
+			// mislabeled the pipeline — mirror the greenfield→brownfield scope
+			// downgrade above.
+			tr.pipeline = agent.PipelineBrown
+			tr.event("brownfield project detected — using brown pipeline")
+		}
+		tr.event(fmt.Sprintf("pipeline: %s", tr.pipeline))
+
 		beadID = tr.registerBead(ctx, spec)
 
-		// ── Phase 2: Decompose ── (PM creates sub-tasks / beads)
-		curStage = "decompose"
-		subTasks, err = tr.runDecomposeGate(ctx, spec, "", ctxFragment, projCtx.IsBrownfield)
-		if err != nil {
-			return fmt.Errorf("decompose: %w", err)
+		// ── Phase 0: Research ── (brown + fix: coder reviews the codebase,
+		// PM presents the analysis to the human before planning.)
+		if tr.pipeline == agent.PipelineBrown || tr.pipeline == agent.PipelineFix {
+			curStage = "research"
+			research, rerr := tr.runResearch(ctx, spec, ctxFragment)
+			if rerr != nil {
+				return fmt.Errorf("research: %w", rerr)
+			}
+			if research != "" {
+				ctxFragment += "\n\n" + research
+			}
 		}
-		tr.memAppend("plan-done", fmt.Sprintf("Decomposed into %d sub-task(s).", len(subTasks)))
 
-		subBeadIDs = tr.createSubTaskBeads(ctx, subTasks)
-		// Persist the structured plan so an interrupted run can resume without
-		// re-negotiating or re-decomposing.
-		if err := tr.writeSubTasks(subTasks, subBeadIDs); err != nil {
-			tr.event(fmt.Sprintf("warning: write sub-task plan: %v", err))
-		}
-		// Persist the run-state sidecar so the run can be paused/resumed. This
-		// is written unconditionally — even when bd is unavailable and no top
-		// bead was registered — so resume never depends on a working bd.
-		if err := tr.writeRunState(spec.Title); err != nil {
-			tr.event(fmt.Sprintf("warning: write run state: %v", err))
+		if tr.pipeline == agent.PipelineRnD {
+			// ── R&D: short PM↔user PoC loop; no decomposition, no TDD. ──
+			curStage = "rnd"
+			if err := tr.runRnDLoop(ctx, spec, ctxFragment); err != nil {
+				return err
+			}
+			subTasks, subBeadIDs = nil, nil
+		} else {
+			// ── Phase 2: Decompose ── (PM creates sub-tasks / beads)
+			curStage = "decompose"
+			subTasks, err = tr.runDecomposeGate(ctx, spec, "", ctxFragment, projCtx.IsBrownfield)
+			if err != nil {
+				return fmt.Errorf("decompose: %w", err)
+			}
+			tr.memAppend("plan-done", fmt.Sprintf("Decomposed into %d sub-task(s).", len(subTasks)))
+
+			subBeadIDs = tr.createSubTaskBeads(ctx, subTasks)
+			// Persist the structured plan so an interrupted run can resume without
+			// re-negotiating or re-decomposing.
+			if err := tr.writeSubTasks(subTasks, subBeadIDs); err != nil {
+				tr.event(fmt.Sprintf("warning: write sub-task plan: %v", err))
+			}
+			// Persist the run-state sidecar so the run can be paused/resumed. This
+			// is written unconditionally — even when bd is unavailable and no top
+			// bead was registered — so resume never depends on a working bd.
+			if err := tr.writeRunState(spec.Title); err != nil {
+				tr.event(fmt.Sprintf("warning: write run state: %v", err))
+			}
 		}
 	}
 
 	// ── Phase 3+4: Implement + Quality Review loop ──
 	curStage = "execute"
 	tr.subTaskCount = len(subTasks)
-	tr.bootstrapForTDD(spec)
 
-	if err := tr.implementAndReview(ctx, spec, ctxFragment, subTasks, subBeadIDs); err != nil {
-		return err
+	switch tr.pipeline {
+	case agent.PipelineRnD:
+		// PoC already produced in the R&D loop; no implement/review phase.
+	case agent.PipelineFix:
+		// Coder-first fix loop: no TDD test-generation up front, short
+		// arbitration, and no UX review.
+		if err := tr.implementAndReview(ctx, spec, ctxFragment, subTasks, subBeadIDs,
+			execOpts{skipTDD: true, skipUX: true, maxIters: maxFixIterations}); err != nil {
+			return err
+		}
+	default: // green, brown
+		tr.bootstrapForTDD(spec)
+		if err := tr.implementAndReview(ctx, spec, ctxFragment, subTasks, subBeadIDs,
+			execOpts{maxIters: maxArbitrateIterations}); err != nil {
+			return err
+		}
 	}
 
 	curStage = "finalise"
@@ -360,20 +434,25 @@ func (tr *TaskRunner) run(ctx context.Context, taskInput string, resume bool) (r
 // Phase 3: Execute all beads (QA writes tests, Coder implements per bead).
 // Phase 4: Quality review (QA + UX + Security), PM arbitrates.
 // If PM finds real issues, new beads are created and the loop restarts.
-func (tr *TaskRunner) implementAndReview(ctx context.Context, spec agent.TaskSpec, ctxFragment string, subTasks []agent.SubTask, subBeadIDs map[string]string) error {
+func (tr *TaskRunner) implementAndReview(ctx context.Context, spec agent.TaskSpec, ctxFragment string, subTasks []agent.SubTask, subBeadIDs map[string]string, opts execOpts) error {
 	tasks := subTasks
 	beadIDs := subBeadIDs
 
-	for iter := 0; iter < maxArbitrateIterations; iter++ {
+	maxIters := opts.maxIters
+	if maxIters <= 0 {
+		maxIters = maxArbitrateIterations
+	}
+
+	for iter := 0; iter < maxIters; iter++ {
 		// ── Phase 3: Execute beads ──
-		if err := tr.executeBeads(ctx, spec, ctxFragment, tasks, beadIDs); err != nil {
+		if err := tr.executeBeads(ctx, spec, ctxFragment, tasks, beadIDs, opts.skipTDD); err != nil {
 			return err
 		}
 
 		// ── Phase 4: Quality review ──
 		files := collectProjectFilesFromRoot(nil, tr.root)
 
-		qaFeedback, uxFeedback, secFeedback := tr.qualityReview(ctx, ctxFragment, files)
+		qaFeedback, uxFeedback, secFeedback := tr.qualityReview(ctx, ctxFragment, files, opts.skipUX)
 
 		if qaFeedback == "" && uxFeedback == "" && secFeedback == "" {
 			tr.event("quality review passed — all checks clean")
@@ -416,7 +495,7 @@ func (tr *TaskRunner) implementAndReview(ctx context.Context, spec agent.TaskSpe
 		beadIDs = tr.createSubTaskBeads(ctx, tasks)
 	}
 
-	tr.event(fmt.Sprintf("quality review loop exhausted after %d iterations — remaining issues moved to nice-to-have", maxArbitrateIterations))
+	tr.event(fmt.Sprintf("quality review loop exhausted after %d iterations — remaining issues moved to nice-to-have", maxIters))
 	return nil
 }
 
@@ -454,6 +533,139 @@ func (tr *TaskRunner) negotiate(ctx context.Context, input, ctxFragment string) 
 	tr.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgTaskSpec, string(specData)))
 
 	return spec, nil
+}
+
+// runResearch runs Phase 0 of the brown and fix pipelines: the coder performs a
+// read-only review of the existing codebase against the spec, the analysis is
+// written to research_report.md, and the human reviews it at an approval gate
+// (regenerate re-runs the review). Returns the approved analysis to enrich the
+// agent context for the subsequent planning/implementation phases.
+func (tr *TaskRunner) runResearch(ctx context.Context, spec agent.TaskSpec, ctxFragment string) (string, error) {
+	coder, ok := tr.agents[bus.RoleCoder].(*agent.CoderAgent)
+	if !ok {
+		tr.event("no coder agent — skipping codebase research")
+		return "", nil
+	}
+
+	requirements := spec.Title + "\n\n" + strings.TrimSpace(spec.Description)
+	if len(spec.AcceptanceCriteria) > 0 {
+		requirements += "\n\nAcceptance criteria:\n- " + strings.Join(spec.AcceptanceCriteria, "\n- ")
+	}
+
+	for {
+		tr.setState(PipelineResearch)
+		tr.event("coder reviewing the existing codebase…")
+		analysis, err := coder.Research(ctx, agent.CoderResearchPayload{
+			Requirements:   requirements,
+			ProjectContext: ctxFragment,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		report := "# Codebase Research\n\n" + analysis + "\n"
+		if werr := tr.ws.WriteFile(artifacts.ResearchReportFile, []byte(report)); werr != nil {
+			return "", fmt.Errorf("write research report: %w", werr)
+		}
+		tr.event("research ready — review and approve to continue, or regenerate")
+
+		approved, err := tr.waitArtifact(ctx, artifacts.ResearchReportFile)
+		if err != nil {
+			return "", err
+		}
+		if approved {
+			tr.memAppend("research", analysis)
+			return "## Codebase Research\n\n" + analysis, nil
+		}
+		tr.event("re-running codebase research…")
+		_ = removeWorkspaceFile(tr.ws, artifacts.ResearchReportFile)
+	}
+}
+
+// runRnDLoop runs the R&D pipeline: a short PM↔user conversation where PM may
+// ask the coder for quick proofs-of-concept. It ends when PM proposes wrapping
+// up (concept confirmed) and the user accepts. PoC code is left in the repo
+// as-is; there is no TDD, decomposition, or quality review.
+func (tr *TaskRunner) runRnDLoop(ctx context.Context, spec agent.TaskSpec, ctxFragment string) error {
+	pm, ok := tr.agents[bus.RolePM].(*agent.PMAgent)
+	if !ok {
+		tr.event("no PM agent — R&D pipeline requires PM")
+		return nil
+	}
+
+	tr.event("R&D mode: exploring the concept with quick proofs-of-concept")
+	messages := []runner.ConvMessage{{
+		Role:    "user",
+		Content: fmt.Sprintf("R&D task: %s\n\n%s", spec.Title, strings.TrimSpace(spec.Description)),
+	}}
+
+	for {
+		tr.setState(PipelinePM)
+		action, raw, err := pm.RnDTurn(ctx, ctxFragment, messages)
+		if err != nil {
+			return fmt.Errorf("rnd turn: %w", err)
+		}
+		messages = append(messages, runner.ConvMessage{Role: "assistant", Content: raw})
+
+		if action.Message != "" {
+			tr.b.Publish(bus.NewMessage(bus.RolePM, "", bus.MsgConversation,
+				bus.ConversationPayload{From: "pm", Content: action.Message}))
+		}
+
+		// PM asked the coder for a quick proof-of-concept.
+		if action.CoderTask != "" {
+			tr.setState(PipelinePoC)
+			tr.event("coder building a quick proof-of-concept…")
+			files, ferr := tr.implementBead(ctx, ctxFragment, "PoC: "+spec.Title, action.CoderTask)
+			if ferr != nil {
+				messages = append(messages, runner.ConvMessage{
+					Role:    "user",
+					Content: fmt.Sprintf("Coder failed to build the PoC: %v", ferr),
+				})
+				continue
+			}
+			summary := "Coder built the PoC."
+			if len(files) > 0 {
+				summary += " Files: " + strings.Join(files, ", ")
+			}
+			messages = append(messages, runner.ConvMessage{Role: "user", Content: summary})
+			continue
+		}
+
+		// PM proposes ending — the user must accept to finish.
+		if action.ProposeEnd {
+			tr.setState(PipelineNegotiating)
+			reply, ok := tr.waitHuman(ctx)
+			if !ok {
+				return ctx.Err()
+			}
+			if isAffirmative(reply) {
+				tr.event("R&D concept confirmed — wrapping up")
+				return nil
+			}
+			messages = append(messages, runner.ConvMessage{Role: "user", Content: reply})
+			continue
+		}
+
+		// PM asked the user something — wait for the reply.
+		tr.setState(PipelineNegotiating)
+		reply, ok := tr.waitHuman(ctx)
+		if !ok {
+			return ctx.Err()
+		}
+		messages = append(messages, runner.ConvMessage{Role: "user", Content: reply})
+	}
+}
+
+// waitHuman blocks for the next human reply during a conversational loop.
+// Returns ok=false when the context is cancelled or the channel closes.
+func (tr *TaskRunner) waitHuman(ctx context.Context) (string, bool) {
+	select {
+	case <-ctx.Done():
+		return "", false
+	case reply, ok := <-tr.humanCh:
+		return reply, ok
+	}
 }
 
 // runDecomposeGate asks PM to split the spec into sub-tasks, renders them
@@ -657,10 +869,10 @@ func (tr *TaskRunner) createSubTaskBeads(ctx context.Context, tasks []agent.SubT
 // (claimed-but-open) sub-tasks are resumed first, then newly-ready ones.
 // Execution is scoped to the top-level task bead so other tasks' beads are not
 // interleaved. Falls back to in-order execution when `bd` is unavailable.
-func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctxFragment string, tasks []agent.SubTask, idByKey map[string]string) error {
+func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctxFragment string, tasks []agent.SubTask, idByKey map[string]string, skipTDD bool) error {
 	if len(idByKey) == 0 {
 		// No beads were created (bd unavailable at decompose) — run in order.
-		return tr.executeSubTasksInOrder(ctx, spec, ctxFragment, tasks)
+		return tr.executeSubTasksInOrder(ctx, spec, ctxFragment, tasks, skipTDD)
 	}
 	if !beads.Available() {
 		// The plan is bead-backed but bd is no longer available. Running
@@ -686,8 +898,11 @@ func (tr *TaskRunner) executeBeads(ctx context.Context, spec agent.TaskSpec, ctx
 	}
 
 	// ── Phase A: QA writes tests for ALL sub-tasks first (TDD across the whole
-	// plan) before any implementation begins. ──
-	tr.generateAllTests(ctx, ctxFragment, tasks)
+	// plan) before any implementation begins. Skipped for the fix pipeline,
+	// where the coder applies the fix first and QA tends to tests afterwards. ──
+	if !skipTDD {
+		tr.generateAllTests(ctx, ctxFragment, tasks)
+	}
 
 	// ── Phase B: Coder implements ALL sub-tasks (bead-ordered), accumulating
 	// the produced files. No per-bead build/fix here — verification is global. ──
@@ -805,9 +1020,11 @@ func pickInProgress(inprog []beads.Issue, processed map[string]bool) (beads.Issu
 // executeSubTasksInOrder runs sub-tasks sequentially when `bd` is unavailable,
 // using the same phased flow as the bead-backed path: all tests first, then all
 // implementations, then one global build/fix loop.
-func (tr *TaskRunner) executeSubTasksInOrder(ctx context.Context, spec agent.TaskSpec, ctxFragment string, tasks []agent.SubTask) error {
+func (tr *TaskRunner) executeSubTasksInOrder(ctx context.Context, spec agent.TaskSpec, ctxFragment string, tasks []agent.SubTask, skipTDD bool) error {
 	_ = spec
-	tr.generateAllTests(ctx, ctxFragment, tasks)
+	if !skipTDD {
+		tr.generateAllTests(ctx, ctxFragment, tasks)
+	}
 
 	var implFiles []string
 	for i, t := range tasks {
@@ -959,7 +1176,7 @@ func (tr *TaskRunner) globalBuildFix(ctx context.Context, ctxFragment string, fi
 
 // qualityReview runs QA review + optional UX + Security on all project files.
 // Returns raw feedback strings (empty = passed).
-func (tr *TaskRunner) qualityReview(ctx context.Context, ctxFragment string, files []string) (qaFeedback, uxFeedback, secFeedback string) {
+func (tr *TaskRunner) qualityReview(ctx context.Context, ctxFragment string, files []string, skipUX bool) (qaFeedback, uxFeedback, secFeedback string) {
 	// Measurement-only: when scoped_context_shadow is enabled, derive per-file
 	// symbol targets from the semantic index so review agents can log the
 	// scoped-vs-whole token estimate. This does NOT change what reviewers see.
@@ -990,8 +1207,8 @@ func (tr *TaskRunner) qualityReview(ctx context.Context, ctxFragment string, fil
 		}
 	}
 
-	// UX review (optional).
-	if _, ok := tr.agents[bus.RoleUXReviewer]; ok {
+	// UX review (optional; skipped for the fix pipeline).
+	if _, ok := tr.agents[bus.RoleUXReviewer]; ok && !skipUX {
 		tr.setState(PipelineUXReviewing)
 		tr.event("UX reviewing…")
 		uxResp, uxErr := tr.runAgent(ctx, bus.RoleUXReviewer, agent.UXReviewerPayload{

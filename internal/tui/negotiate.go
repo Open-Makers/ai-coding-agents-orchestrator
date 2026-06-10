@@ -97,6 +97,12 @@ func (m NegotiateModel) Update(msg tea.Msg) (NegotiateModel, tea.Cmd) {
 			return m, cmd
 		}
 		if m.waiting {
+			// While waiting for the PM, still allow the user to abort the
+			// conversation with Esc — otherwise a slow or stuck PM ("PM is
+			// thinking…") traps the UI with no working shortcuts.
+			if msg.String() == "esc" {
+				return m, func() tea.Msg { return NegotiateClosedMsg{} }
+			}
 			return m, nil
 		}
 
