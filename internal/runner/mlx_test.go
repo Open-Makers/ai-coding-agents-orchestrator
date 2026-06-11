@@ -44,6 +44,59 @@ func TestMLXStreamResponse_CapturesUsage(t *testing.T) {
 	}
 }
 
+func TestMLXStreamResponse_EmitsDeltasLive(t *testing.T) {
+	// Plain-text deltas must be forwarded as they arrive (live), not collapsed
+	// into a single token at the end.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"foo "}}]}`,
+		`data: {"choices":[{"delta":{"content":"bar "}}]}`,
+		`data: {"choices":[{"delta":{"content":"baz"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	r := NewMLXRunner("")
+	ch := make(chan Token, 16)
+	go r.streamResponseFromBytes([]byte(stream), "", ch)
+
+	var textTokens int
+	var text string
+	for tok := range ch {
+		if tok.Text != "" {
+			textTokens++
+			text += tok.Text
+		}
+	}
+	if text != "foo bar baz" {
+		t.Errorf("text: want %q, got %q", "foo bar baz", text)
+	}
+	if textTokens < 2 {
+		t.Errorf("expected multiple live text tokens, got %d", textTokens)
+	}
+}
+
+func TestMLXStreamResponse_UnwrapsJSONEnvelope(t *testing.T) {
+	// A JSON-wrapped reply is buffered and unwrapped, emitted as one token.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"{\"response\": \"hi"}}]}`,
+		`data: {"choices":[{"delta":{"content":" there\"}"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	r := NewMLXRunner("")
+	ch := make(chan Token, 16)
+	go r.streamResponseFromBytes([]byte(stream), "", ch)
+
+	var text string
+	for tok := range ch {
+		text += tok.Text
+	}
+	if text != "hi there" {
+		t.Errorf("text: want %q, got %q", "hi there", text)
+	}
+}
+
 func TestMLXRunner_SendsExpectedRequest(t *testing.T) {
 	var captured mlxChatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -150,6 +150,10 @@ type Model struct {
 	codingStageIndex int
 	codingStageTotal int
 
+	// pipeline is the execution pipeline (green/brown/fix/rnd), parsed from the
+	// "pipeline: X" event, shown in the phase bar.
+	pipeline string
+
 	// Typed overlay state — only one active at a time.
 	overlay          overlayKind
 	overlayPicker    PickerModel
@@ -376,6 +380,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case bus.MsgEvent:
 			if s, ok := bm.Payload.(string); ok {
+				// Capture the pipeline classification for the phase bar.
+				if p := strings.TrimPrefix(s, "pipeline: "); p != s {
+					m.pipeline = strings.TrimSpace(p)
+				}
 				// Detect stage transitions (e.g. "── Stage 2/5: Must Have — Auth ──").
 				if stageInfo := extractStageInfo(s); stageInfo != "" {
 					prevStage := m.statusbar.stageInfo
@@ -1149,7 +1157,9 @@ func (m Model) renderPhaseBar() string {
 			(ph == "coder" && m.phase == "coder_fixer")
 
 		if isCodingActive && m.codingStageTotal > 1 {
-			// Expand into individual stage dots.
+			// Expand into individual stage dots. The active stage shows its
+			// name (from the current stage banner) instead of a bare "Sn".
+			activeName := extractStageTitle(m.statusbar.stageInfo)
 			for s := 1; s <= m.codingStageTotal; s++ {
 				stageDot := fmt.Sprintf("S%d", s)
 				if s == m.codingStageIndex {
@@ -1157,7 +1167,11 @@ func (m Model) renderPhaseBar() string {
 					if m.phase == "coder_fixer" {
 						icon = "⟳"
 					}
-					parts = append(parts, phaseStyle("CODER").Render(icon+" "+stageDot))
+					label := stageDot
+					if activeName != "" {
+						label = fmt.Sprintf("%s (%d/%d)", activeName, s, m.codingStageTotal)
+					}
+					parts = append(parts, phaseStyle("CODER").Render(icon+" "+label))
 				} else if s < m.codingStageIndex {
 					parts = append(parts, doneStyle.Render("✓ "+stageDot))
 				} else {
@@ -1174,6 +1188,15 @@ func (m Model) renderPhaseBar() string {
 	}
 
 	joined := "  " + strings.Join(parts, sepStyle.Render(" → "))
+
+	// Prefix the bar with the active pipeline type (green/brown/fix/rnd).
+	if m.pipeline != "" {
+		tag := lipgloss.NewStyle().
+			Foreground(crt.bright).
+			Bold(true).
+			Render("[" + strings.ToUpper(m.pipeline) + "]")
+		joined = "  " + tag + joined
+	}
 
 	// Clip to terminal width, keeping the active phase visible.
 	if m.width > 0 && lipgloss.Width(joined) > m.width {
@@ -1494,6 +1517,16 @@ func clipPhaseBar(bar string, maxWidth int) string {
 		runes = runes[:len(runes)-1]
 	}
 	return "…"
+}
+
+// extractStageTitle returns just the title portion of a normalised stage label
+// ("<kind> N/M: title") produced by extractStageInfo, or "" if not recognised.
+func extractStageTitle(stageInfo string) string {
+	m := stageBannerRe.FindStringSubmatch(stageInfo)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(m[4])
 }
 
 // parseStageProgress extracts (currentIndex, total) from a normalised stage

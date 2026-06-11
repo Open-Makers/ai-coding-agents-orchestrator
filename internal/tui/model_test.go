@@ -267,6 +267,45 @@ func TestExtractStageInfo(t *testing.T) {
 	}
 }
 
+func TestExtractStageTitle(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Sub-task 2/5: Implement login", "Implement login"},
+		{"Stage 4/4: Should Have — Stats", "Should Have — Stats"},
+		{"not a stage", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := extractStageTitle(tt.input); got != tt.expected {
+				t.Errorf("extractStageTitle(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestRenderPhaseBar_StageNameAndPipeline(t *testing.T) {
+	m := Model{
+		width:            500,
+		phase:            "coder",
+		pipeline:         "brown",
+		codingStageIndex: 2,
+		codingStageTotal: 3,
+		approvedGates:    map[string]bool{},
+	}
+	m.statusbar = NewStatusBar(500).WithStageInfo("Sub-task 2/5: Implement login")
+
+	bar := m.renderPhaseBar()
+	if !strings.Contains(bar, "Implement login") {
+		t.Errorf("expected active stage name in phase bar, got:\n%s", bar)
+	}
+	if !strings.Contains(bar, "BROWN") {
+		t.Errorf("expected pipeline tag in phase bar, got:\n%s", bar)
+	}
+}
+
 func TestParseStageProgress(t *testing.T) {
 	tests := []struct {
 		input      string

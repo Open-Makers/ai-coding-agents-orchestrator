@@ -145,22 +145,25 @@ func (r *MLXRunner) buildMessages(req CompletionRequest) []mlxChatMessage {
 
 func (r *MLXRunner) streamResponse(body io.ReadCloser, inputText string, ch chan<- Token) {
 	defer func() { _ = body.Close() }()
-	data, err := io.ReadAll(body)
-	if err != nil {
-		ch <- Token{Error: fmt.Errorf("omlx: read stream: %w", err)}
-		ch <- Token{Done: true}
-		close(ch)
-		return
-	}
-	r.streamResponseFromBytes(data, inputText, ch)
+	r.streamSSE(body, inputText, ch)
 }
 
-// streamResponseFromBytes parses an OpenAI-style SSE stream:
+// streamResponseFromBytes parses an OpenAI-style SSE stream from a byte slice.
+// It is a thin wrapper over streamSSE used by tests.
 //
 //	data: {"choices":[{"delta":{"content":"hi"}}], ...}
 //	data: {"choices":[{"finish_reason":"stop"}], "usage": {...}}
 //	data: [DONE]
 func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch chan<- Token) {
+	r.streamSSE(bytes.NewReader(data), inputText, ch)
+}
+
+// streamSSE reads the OpenAI-style SSE stream incrementally and forwards each
+// content delta to ch as it arrives, so the UI shows generation live instead of
+// the whole answer at the end. As a safety net for local models that wrap their
+// reply in a JSON envelope (despite the plain-text instruction), a response that
+// begins with '{' is buffered and unwrapped once at the end rather than streamed.
+func (r *MLXRunner) streamSSE(reader io.Reader, inputText string, ch chan<- Token) {
 	defer close(ch)
 
 	var buf strings.Builder
@@ -168,7 +171,10 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 	reasoningLen := 0
 	sawChunk := false
 
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	decided := false   // whether streaming-vs-buffer has been chosen
+	streaming := false // true once we know the reply is plain text (emit live)
+
+	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -190,6 +196,21 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 		for _, c := range chunk.Choices {
 			if c.Delta.Content != "" {
 				buf.WriteString(c.Delta.Content)
+				if !decided {
+					// Wait for the first non-whitespace character before
+					// deciding whether the reply is a JSON envelope.
+					if t := strings.TrimSpace(buf.String()); t != "" {
+						decided = true
+						if t[0] == '{' {
+							streaming = false // buffer + unwrap at end
+						} else {
+							streaming = true
+							ch <- Token{Text: buf.String()} // flush prefix
+						}
+					}
+				} else if streaming {
+					ch <- Token{Text: c.Delta.Content}
+				}
 			}
 			reasoningLen += len(c.Delta.Reasoning)
 		}
@@ -202,8 +223,13 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 		}
 	}
 
-	output := unwrapJSONResponse(buf.String())
-	if output == "" {
+	// In buffer mode (or when nothing was decided), unwrap a possible JSON
+	// envelope; in streaming mode the text was already emitted verbatim.
+	output := buf.String()
+	if !streaming {
+		output = unwrapJSONResponse(output)
+	}
+	if strings.TrimSpace(output) == "" {
 		// An empty content stream (HTTP 200, no error) usually means the prompt
 		// exceeded the model's context window, or the model emitted only
 		// reasoning. Surface a descriptive error instead of returning nothing,
@@ -212,7 +238,9 @@ func (r *MLXRunner) streamResponseFromBytes(data []byte, inputText string, ch ch
 		ch <- Token{Done: true}
 		return
 	}
-	ch <- Token{Text: output}
+	if !streaming {
+		ch <- Token{Text: output}
+	}
 	// Most oMLX builds do not include a `usage` block in streaming responses,
 	// so fall back to an estimated count instead of dropping usage entirely.
 	// The monitor needs *something* to surface for local-model agents.
