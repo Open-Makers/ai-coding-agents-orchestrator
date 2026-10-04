@@ -139,7 +139,7 @@ Stages are ordered for safe sequential rollout. Within a stage, run prompts top-
 
 ## Notes on Use
 
-- Each prompt assumes the project's coding rules in `AGENTS.md`/`CLAUDE.md` (surgical changes, simplicity first, tests before claiming done).
+- Each prompt assumes the project's coding rules in `AGENTS.md` (surgical changes, simplicity first, tests before claiming done).
 - Prompts within Stages 1, 2, 3 can be merged into a single PR per stage; Stages 4 and 5 are large enough to deserve a PR per prompt.
 - Before starting Stage 4, verify with the maintainer whether the optional Ollama dependency is acceptable as a runtime requirement for the feature flag.
 

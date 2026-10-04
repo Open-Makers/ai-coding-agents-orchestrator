@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
@@ -78,6 +78,13 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+## Model Usage Policy
+
+- Expensive, high-capability models (e.g. Claude Opus, GPT-*-sol class) are reserved for planning, task breakdown, delegation, supervision, code review and verification.
+- Implementation is delegated to cheaper models (e.g. Claude Sonnet, Haiku, GPT-*-mini/luna class) running as sub-agents with complete context, a bounded scope and explicit verification steps.
+- The planning model reviews every delegated diff, runs the build/tests/linters itself, and fixes only review findings directly; it does not write bulk implementation code.
+- Small, trivial edits (a few lines, docs, config) may be done directly when delegation would cost more than the change.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
