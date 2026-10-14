@@ -81,12 +81,11 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## Model Usage Policy
 
-- Expensive, high-capability models (e.g. Claude Opus, GPT-*-sol class) are reserved for planning, task breakdown, delegation, supervision, code review and verification.
-- Implementation is delegated to cheaper models (e.g. Claude Sonnet, Haiku, GPT-*-mini/luna class) running as sub-agents with complete context, a bounded scope and explicit verification steps.
-- The planning model reviews every delegated diff, runs the build/tests/linters itself, and fixes only review findings directly; it does not write bulk implementation code.
-- Small, trivial edits (a few lines, docs, config) may be done directly when delegation would cost more than the change.
+- **Claude Opus** — design and management only: architecture, planning, task breakdown, delegation, supervision, code review and verification. Opus does not write implementation code.
+- **Claude Haiku** — searching code and documentation (exploration, lookups, research sub-agents).
+- **Claude Sonnet** — all hands-on work: implementation, tests, refactors, docs, config, scripts, builds and fixes for review findings.
+- **GPT \*-sol** — UI/UX design only (layouts, user flows, visual and interaction design, design review). GPT models are banned from writing or editing code.
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:7510c1e2 -->
 ## Beads Issue Tracker
 
 This project uses **bd (beads)** for issue tracking. Run `bd prime` to see full workflow context and commands.
