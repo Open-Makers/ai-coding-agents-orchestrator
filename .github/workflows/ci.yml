@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@90ad2b35f69faf97585ad74d28fa006d2739b7af # v7.0.0+9: codeload 404s release archives
         with:
           go-version-file: go.mod
 
